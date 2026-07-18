@@ -113,28 +113,13 @@ wheels = [
 [[package]]
 name = "mamut-routing-lib"
 version = "0.6.0"
-source = { editable = "MAMUT-routing-lib" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "numpy", marker = "extra == 'pyvrp'", specifier = ">=2.0.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pyvrp", marker = "extra == 'pyvrp'", specifier = ">=0.12.2,<0.13" },
-    { name = "tqdm", marker = "extra == 'cli'", specifier = ">=4.66" },
-    { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12" },
-]
-provides-extras = ["cli", "pyvrp"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "numpy", specifier = ">=2.0.0" },
-    { name = "pytest", specifier = ">=9.0.0" },
-    { name = "pyvrp", specifier = ">=0.12.2,<0.13" },
-    { name = "tqdm", specifier = ">=4.66" },
-    { name = "typer", specifier = ">=0.12" },
+sdist = { url = "https://files.pythonhosted.org/packages/b0/c5/25aeea4e7f9460d076f7f7b699f0d0d79b00e632b1debc94f17939fb4a2e/mamut_routing_lib-0.6.0.tar.gz", hash = "sha256:005034592a6fdca511f471e7d8f7bb480ec7a94a43e33796361be55b51b2b6f4", size = 157148, upload-time = "2026-07-09T21:25:58.051Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2e/a7/ea1e658c297b4a5f7ed63ab6c1b12819f7fa7ce87862a80fae78f44d802d/mamut_routing_lib-0.6.0-py3-none-any.whl", hash = "sha256:ae0343e4e947751b7bf56b255f1e87c0fe5fb5a90cbe5b9ce67d3ccccecc9d90", size = 76613, upload-time = "2026-07-09T21:25:56.587Z" },
 ]
 
 [[package]]
@@ -161,7 +146,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
-    { name = "mamut-routing-lib", editable = "MAMUT-routing-lib" },
+    { name = "mamut-routing-lib" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "rustworkx", specifier = ">=0.15" },

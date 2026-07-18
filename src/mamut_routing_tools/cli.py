@@ -17,8 +17,31 @@ app = typer.Typer(
 
 roadgraph_app = typer.Typer(help="Road-graph engine (OpenStreetMapX-compatible construction).", no_args_is_help=True)
 geometry_app = typer.Typer(help="BKS route-geometry materialization.", no_args_is_help=True)
+osm_app = typer.Typer(help="OSM city acquisition (Nominatim + Overpass).", no_args_is_help=True)
 app.add_typer(roadgraph_app, name="roadgraph")
 app.add_typer(geometry_app, name="geometry")
+app.add_typer(osm_app, name="osm")
+
+
+@osm_app.command("fetch-city")
+def osm_fetch_city_cmd(
+    city: Annotated[str, typer.Argument(help="City or locality name to geocode and download.")],
+    country: Annotated[str, typer.Option("--country", help="Optional country to disambiguate the geocode.")] = "",
+    osm_dir: Annotated[Path, typer.Option("--osm-dir", help="Directory for the downloaded <city>.osm extract.")] = Path("osmdata"),
+    padding_km: Annotated[float, typer.Option("--padding-km", help="Extra bbox padding in km.")] = 0.0,
+    max_radius_km: Annotated[float, typer.Option("--max-radius-km", help="Clamp the administrative bbox to a square of this radius around the place's geocode point (0 = no clamp).")] = 0.0,
+) -> None:
+    """Download an OSM extract (roads + amenities) for a city by name."""
+    from mamut_routing_tools.osm import fetch_and_store_city_osm
+
+    summary = fetch_and_store_city_osm(
+        city,
+        country=country,
+        osm_dir=osm_dir,
+        padding_km=padding_km,
+        max_radius_km=max_radius_km,
+    )
+    typer.echo(json.dumps(summary, indent=1))
 
 
 @roadgraph_app.command("info")
