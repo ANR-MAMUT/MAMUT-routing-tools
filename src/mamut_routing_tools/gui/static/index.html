@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAMUT workbench (local)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#101226; --panel:#1b1e3d; --ink:#edeffc; --mut:#8d92b8; --acc:#9d8bff; --div:rgba(237,239,252,.13); }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 Inter, system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  #map { position:fixed; inset:0; }
+  .panel { position:fixed; top:16px; left:16px; bottom:16px; width:320px; overflow:auto; background:rgba(24,27,54,.94); border:1px solid rgba(157,139,255,.28); border-radius:14px; padding:14px; z-index:1000; }
+  .panel h1 { font-size:15px; margin:0 0 10px; font-weight:500; }
+  label { display:block; font-size:11px; color:var(--mut); margin:8px 0 3px; }
+  select, input { width:100%; padding:6px 8px; font:inherit; color:var(--ink); background:var(--panel); border:1px solid var(--div); border-radius:8px; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  button { cursor:pointer; margin-top:10px; margin-right:6px; padding:8px 14px; font:inherit; font-weight:500; border:none; border-radius:8px; background:var(--acc); color:#101226; }
+  button.secondary { background:transparent; color:var(--acc); border:1px solid var(--acc); }
+  #status { font-size:12px; color:var(--mut); margin-top:10px; white-space:pre-wrap; word-break:break-word; }
+  .note { font-size:11px; color:var(--mut); margin-top:12px; border-top:1px solid var(--div); padding-top:8px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="panel">
+  <h1>MAMUT workbench — local generation</h1>
+  <label>City (workspace OSM extracts)</label>
+  <select id="city"></select>
+  <label>Fetch a new city (Nominatim + Overpass)</label>
+  <div class="row"><input id="fetch-name" placeholder="e.g. Brest"><button class="secondary" id="fetch" style="margin-top:0">Fetch</button></div>
+  <div class="row">
+    <div><label>Customers</label><input id="n" type="number" value="30" min="2"></div>
+    <div><label>Seed</label><input id="seed" type="number" value="0"></div>
+  </div>
+  <label>Sampling method</label>
+  <select id="method">
+    <option value="poi_categories">POI categories</option>
+    <option value="parametric_attach">Parametric attach</option>
+    <option value="hybrid">Hybrid</option>
+  </select>
+  <div class="row">
+    <div><label>Demand type (1-7)</label><input id="demand" type="number" value="7" min="1" max="7"></div>
+    <div><label>Route size band (1-7)</label><input id="ars" type="number" value="4" min="1" max="7"></div>
+  </div>
+  <label><input id="vrptw" type="checkbox" style="width:auto"> derive VRPTW twin</label>
+  <div>
+    <button id="preview">Preview</button>
+    <button id="generate">Generate</button>
+    <button id="solve" class="secondary">Solve + render</button>
+  </div>
+  <div id="status">Ready.</div>
+  <div class="note">Placeholder GUI: the full workbench front (Nocturne design) replaces this page. Artifacts land in the workspace's instances/ directory; use <code>mamut-tools solve</code> and <code>generate bulk</code> for the full CLI surface.</div>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map('map').setView([46.5, 2.5], 6);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }).addTo(map);
+let layers = L.layerGroup().addTo(map);
+let lastGenerated = null;
+const PALETTE = ['#9d8bff','#3cd6f5','#45e8a5','#ffc14d','#ff7ab8','#7db1ff','#c9ec55','#d18cff','#ff9866','#3fe8cc'];
+const status = (text) => { document.getElementById('status').textContent = text; };
+
+async function api(path, body) {
+  const response = await fetch(path, body === undefined ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }));
+  if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+function requestBody() {
+  return {
+    city: document.getElementById('city').value,
+    nCustomers: Number(document.getElementById('n').value),
+    seed: Number(document.getElementById('seed').value),
+    method: document.getElementById('method').value,
+    demandType: Number(document.getElementById('demand').value),
+    avgRouteSize: Number(document.getElementById('ars').value),
+    deriveVrptw: document.getElementById('vrptw').checked,
+  };
+}
+
+async function loadCities() {
+  const data = await api('/api/workbench/generation/cities');
+  const select = document.getElementById('city');
+  select.innerHTML = '';
+  data.cities.forEach((c) => { const o = document.createElement('option'); o.value = c.label; o.textContent = c.label; select.append(o); });
+  status(data.cities.length ? `${data.cities.length} city extract(s) in the workspace.` : 'No OSM extracts yet: fetch a city first.');
+}
+
+function drawPreview(geojson) {
+  layers.clearLayers();
+  const pts = [];
+  geojson.features.forEach((f) => {
+    const [lon, lat] = f.geometry.coordinates;
+    pts.push([lat, lon]);
+    L.circleMarker([lat, lon], {
+      radius: f.properties.role === 'depot' ? 7 : 4,
+      color: f.properties.role === 'depot' ? '#ff7a6e' : (f.properties.source_tag === 'poi' ? '#45e8a5' : '#9d8bff'),
+      fillOpacity: 0.85,
+    }).bindTooltip(`#${f.properties.instance_node_id} ${f.properties.source_tag}`).addTo(layers);
+  });
+  if (pts.length) map.fitBounds(pts, { padding: [40, 40] });
+}
+
+document.getElementById('preview').onclick = async () => {
+  try { status('Previewing…'); const d = await api('/api/workbench/generation/preview', requestBody());
+    drawPreview(d.geojson); status(`Preview: ${d.summary.customers} customers (${d.summary.poi_customers} POI / ${d.summary.parametric_customers} parametric).`);
+  } catch (e) { status(`Preview failed: ${e.message}`); }
+};
+
+document.getElementById('generate').onclick = async () => {
+  try { status('Generating (matrices can take a minute on big cities)…');
+    const d = await api('/api/workbench/generation/single', requestBody());
+    lastGenerated = d; status(`Generated ${d.base_name}: capacity ${d.summary.capacity}, ~${d.summary.route_count} routes.\nFolder: ${d.folder}`);
+  } catch (e) { status(`Generation failed: ${e.message}`); }
+};
+
+document.getElementById('solve').onclick = async () => {
+  if (!lastGenerated) { status('Generate an instance first.'); return; }
+  try {
+    status('Solving (30 s budget)…');
+    const folder = lastGenerated.folder, base = lastGenerated.base_name;
+    const vrpJson = await fetch(`/instances-file?path=${encodeURIComponent(folder + '/' + lastGenerated.files.vrp_json.fastest)}`).then(r => r.json());
+    const solved = await api('/api/workbench/solve', { vrp_json: vrpJson, time_limit: 30 });
+    const meta = await fetch(`/instances-file?path=${encodeURIComponent(folder + '/' + lastGenerated.files.meta)}`).then(r => r.json());
+    const rendered = await api('/api/workbench/render-routes', { meta, routes: solved.routes, metric: 'fastest' });
+    layers.clearLayers();
+    const bounds = [];
+    rendered.geojson.features.forEach((f, i) => {
+      const line = f.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+      bounds.push(...line);
+      L.polyline(line, { color: PALETTE[i % PALETTE.length], weight: 3, opacity: 0.9 })
+        .bindTooltip(`R${f.properties.route_index}: ${f.properties.stops} stops, load ${f.properties.load} (${f.properties.render_mode})`).addTo(layers);
+    });
+    if (bounds.length) map.fitBounds(bounds, { padding: [40, 40] });
+    status(`Solved: cost ${solved.cost} with ${solved.n_routes} routes (${solved.method || 'pyvrp'}); render ${rendered.summary.render_mode}.`);
+  } catch (e) { status(`Solve failed: ${e.message}`); }
+};
+
+document.getElementById('fetch').onclick = async () => {
+  const name = document.getElementById('fetch-name').value.trim();
+  if (!name) return;
+  try { status(`Fetching ${name} from Overpass (can take minutes)…`);
+    await api('/api/workbench/generation/fetch-osm-city', { city: name });
+    await loadCities(); status(`Fetched ${name}.`);
+  } catch (e) { status(`Fetch failed: ${e.message}`); }
+};
+
+loadCities().catch((e) => status(`Cannot reach the local server: ${e.message}`));
+</script>
+</body>
+</html>

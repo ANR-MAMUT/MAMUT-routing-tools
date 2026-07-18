@@ -156,6 +156,74 @@ def generate_bulk_cmd(
     typer.echo(json.dumps(summary, indent=1))
 
 
+gui_app = typer.Typer(help="Local workbench GUI (loopback server owned by the CLI).", no_args_is_help=True)
+app.add_typer(gui_app, name="gui")
+
+
+@gui_app.command("start")
+def gui_start_cmd(
+    port: Annotated[int, typer.Option("--port", help="Port to bind (0 = pick a free one).")] = 0,
+    output_dir: Annotated[Optional[Path], typer.Option("--output-dir", help="Workspace directory.")] = None,
+    open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the tokened URL in the default browser.")] = True,
+) -> None:
+    """Start the workbench GUI server as a managed background process."""
+    from mamut_routing_tools.gui import runtime
+    from mamut_routing_tools.workspace import resolve_workspace
+
+    workspace = resolve_workspace(output_dir)
+    state = runtime.start(workspace, port=port)
+    if state.get("already_running"):
+        typer.echo(f"Already running (pid {state['pid']}): {state['url']}")
+        return
+    typer.echo(f"Workbench GUI running (pid {state['pid']}), workspace {workspace}")
+    typer.echo(state["url"])
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(state["url"])
+
+
+@gui_app.command("stop")
+def gui_stop_cmd(
+    output_dir: Annotated[Optional[Path], typer.Option("--output-dir")] = None,
+) -> None:
+    """Stop the workbench GUI server."""
+    from mamut_routing_tools.gui import runtime
+    from mamut_routing_tools.workspace import resolve_workspace
+
+    typer.echo(json.dumps(runtime.stop(resolve_workspace(output_dir))))
+
+
+@gui_app.command("status")
+def gui_status_cmd(
+    output_dir: Annotated[Optional[Path], typer.Option("--output-dir")] = None,
+) -> None:
+    """Show the GUI server status."""
+    from mamut_routing_tools.gui import runtime
+    from mamut_routing_tools.workspace import resolve_workspace
+
+    typer.echo(json.dumps(runtime.status(resolve_workspace(output_dir)), indent=1))
+
+
+@gui_app.command("run")
+def gui_run_cmd(
+    port: Annotated[int, typer.Option("--port")] = 8788,
+    output_dir: Annotated[Optional[Path], typer.Option("--output-dir")] = None,
+) -> None:
+    """Run the GUI server in the foreground (development mode)."""
+    import secrets
+
+    import uvicorn
+
+    from mamut_routing_tools.gui.server import create_app
+    from mamut_routing_tools.workspace import resolve_workspace
+
+    workspace = resolve_workspace(output_dir)
+    token = secrets.token_urlsafe(24)
+    typer.echo(f"http://127.0.0.1:{port}/?token={token}")
+    uvicorn.run(create_app(workspace, token), host="127.0.0.1", port=port, log_level="info")
+
+
 @app.command("solve")
 def solve_cmd(
     instance_path: Annotated[Path, typer.Argument(help="A .vrp.json instance (generated or from a benchmark collection).")],
