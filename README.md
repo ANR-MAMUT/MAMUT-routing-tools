@@ -12,7 +12,8 @@ Beta. The tool suite is being extracted from the website's former Julia backend;
 
 - `mamut-tools roadgraph`: build and inspect drivable road graphs from OSM XML extracts. The construction is a faithful Python port of the OpenStreetMapX.jl pipeline the project previously used (same road classes, oneway rules, intersection segmentation, ENU distances, and strongly-connected trim), so graphs and route geometry stay consistent with previously published data.
 - `mamut-tools geometry`: materialize road-following polylines for Best-Known Solutions (BKS), in the exact artifact format the MAMUT-routing website consumes.
-- Planned: OSM city fetch (Nominatim + Overpass), interactive CVRP/VRPTW generation with a local workbench GUI, and the official time-dependent benchmark campaign pipeline.
+- `mamut-tools osm fetch-city`: download an OSM extract (roads + amenities) for a city by name, via Nominatim geocoding and Overpass with retry, roads-only fallback, and tiled amenity backfill.
+- Planned: interactive CVRP/VRPTW generation with a local workbench GUI, and the official time-dependent benchmark campaign pipeline.
 
 ## Install
 
