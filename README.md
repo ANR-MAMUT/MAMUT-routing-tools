@@ -16,16 +16,24 @@ Beta. The tool suite is being extracted from the website's former Julia backend;
 
 ## Install
 
-Requires Python >= 3.11 and [uv](https://github.com/astral-sh/uv).
+Published on [PyPI](https://pypi.org/project/mamut-routing-tools/). With [uv](https://github.com/astral-sh/uv), no installation step is needed:
 
 ```bash
-git clone --recurse-submodules https://github.com/ANR-MAMUT/MAMUT-routing-tools.git
-cd MAMUT-routing-tools
-uv sync
-uv run mamut-tools --help
+uvx --from mamut-routing-tools mamut-tools --help
 ```
 
-The `MAMUT-routing-lib` contract library is vendored as a git submodule and installed as an editable dependency.
+Or install it into an environment with `pip install mamut-routing-tools` / `uv add mamut-routing-tools` (Python >= 3.11).
+
+For development, clone the repository and use the project environment:
+
+```bash
+git clone https://github.com/ANR-MAMUT/MAMUT-routing-tools.git
+cd MAMUT-routing-tools
+uv sync
+uv run pytest
+```
+
+The `MAMUT-routing-lib` contract library resolves from PyPI; the vendored submodule checkout exists for contract reference and unreleased-lib development.
 
 ## Quick examples
 

@@ -1,0 +1,24 @@
+name: Publish to PyPI
+
+# Publishes on a GitHub release via PyPI trusted publishing (OIDC, no
+# stored token). PyPI-side setup: project mamut-routing-tools -> Publishing
+# -> add GitHub publisher (owner ANR-MAMUT, repo MAMUT-routing-tools,
+# workflow publish.yml, environment pypi).
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
