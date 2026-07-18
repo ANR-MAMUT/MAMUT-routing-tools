@@ -13,7 +13,10 @@ Beta. The tool suite is being extracted from the website's former Julia backend;
 - `mamut-tools roadgraph`: build and inspect drivable road graphs from OSM XML extracts. The construction is a faithful Python port of the OpenStreetMapX.jl pipeline the project previously used (same road classes, oneway rules, intersection segmentation, ENU distances, and strongly-connected trim), so graphs and route geometry stay consistent with previously published data.
 - `mamut-tools geometry`: materialize road-following polylines for Best-Known Solutions (BKS), in the exact artifact format the MAMUT-routing website consumes.
 - `mamut-tools osm fetch-city`: download an OSM extract (roads + amenities) for a city by name, via Nominatim geocoding and Overpass with retry, roads-only fallback, and tiled amenity backfill.
-- Planned: interactive CVRP/VRPTW generation with a local workbench GUI, and the official time-dependent benchmark campaign pipeline.
+- `mamut-tools generate`: interactive CVRP/VRPTW instance generation on city road graphs (single, bulk, preview, VRPTW derivation), the port of the historical MAMUT workbench generator.
+- `mamut-tools solve`: PyVRP solving of generated and benchmark instances via mamut-routing-lib; with the `kayros` extra (`pip install 'mamut-routing-tools[kayros]'`), [KAYROS](https://pypi.org/project/kayros/) solves the time-dependent instances (Duration objective, anytime with exact certification tooling).
+- `mamut-tools gui`: a CLI-owned local workbench GUI (loopback server with token security) for fetching cities, previewing, generating, solving, and rendering road-following routes on a map.
+- Planned: the official time-dependent benchmark campaign pipeline.
 
 ## Install
 

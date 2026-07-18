@@ -54,7 +54,7 @@
 </div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-const map = L.map('map').setView([46.5, 2.5], 6);
+const map = L.map('map', { zoomControl: false }).setView([46.5, 2.5], 6);
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }).addTo(map);
 let layers = L.layerGroup().addTo(map);
 let lastGenerated = null;

@@ -280,6 +280,20 @@ wheels = [
 ]
 
 [[package]]
+name = "kayros"
+version = "1.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "mamut-routing-lib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0b/30/e6ab76f1f82b5c1e1e96be4247966d32cae88a363742048663dffa0cca3b/kayros-1.1.2.tar.gz", hash = "sha256:9fc1d141da8f5cd49c082b1a4a990057cf5abd8a934ea4fd3684a872854a8d0e", size = 380304, upload-time = "2026-07-18T14:07:43.208Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/2f/2a367523a41ec0deda40507d2d332134b905e28c6677b6961f9b0209d08f/kayros-1.1.2-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:26a0a661955878ef55802b6c2f9d76542f270fe652fff1b45d20f62e5dbebe1d", size = 22368303, upload-time = "2026-07-18T14:07:36.08Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/87/238b2e0a63bf9e95f524c34d594c2e61ae72981450ea06850989f6321bdc/kayros-1.1.2-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4788699a33c79adff82065ce6cbb233391b623d6bf365f1b7d4dcfa50150613c", size = 22372464, upload-time = "2026-07-18T14:07:38.443Z" },
+    { url = "https://files.pythonhosted.org/packages/09/d1/d04cce2bc4123c48deed8fbf271c00b05084c1cc4130b53ec6dbddc52cd5/kayros-1.1.2-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:3aabaf4a74a7b532d89e65ba333dd8cd59036cbf7ae03a9181e70159c8e5ac40", size = 22372545, upload-time = "2026-07-18T14:07:40.93Z" },
+]
+
+[[package]]
 name = "kiwisolver"
 version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -422,6 +436,11 @@ dependencies = [
     { name = "uvicorn" },
 ]
 
+[package.optional-dependencies]
+kayros = [
+    { name = "kayros" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -431,6 +450,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
+    { name = "kayros", marker = "extra == 'kayros'", specifier = ">=1.1.2" },
     { name = "mamut-routing-lib", extras = ["pyvrp"], specifier = ">=0.7.0" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -439,6 +459,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", specifier = ">=0.30" },
 ]
+provides-extras = ["kayros"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.0" }]

@@ -46,6 +46,11 @@ dependencies = [
     "uvicorn>=0.30",
 ]
 
+[project.optional-dependencies]
+kayros = [
+    "kayros>=1.1.2",
+]
+
 [project.urls]
 Repository = "https://github.com/ANR-MAMUT/MAMUT-routing-tools"
 Website = "https://mamut-routing.univ-ubs.fr/"

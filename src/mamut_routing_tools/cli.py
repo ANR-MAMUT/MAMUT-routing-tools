@@ -229,11 +229,47 @@ def solve_cmd(
     instance_path: Annotated[Path, typer.Argument(help="A .vrp.json instance (generated or from a benchmark collection).")],
     time_limit: Annotated[int, typer.Option("--time-limit", help="Wall-clock budget in seconds.")] = 30,
     seed: Annotated[int, typer.Option("--seed")] = 42,
-    objective: Annotated[str, typer.Option("--objective", help="MonoCost or HierarchicalVehicleCost (VRPTW only).")] = "MonoCost",
+    objective: Annotated[str, typer.Option("--objective", help="MonoCost or HierarchicalVehicleCost (VRPTW only; kayros solves Duration).")] = "MonoCost",
+    solver: Annotated[str, typer.Option("--solver", help="pyvrp (CVRP/VRPTW) or kayros (TDVRPTW/TDVRP Duration, exact/anytime BPC-seeded).")] = "pyvrp",
     update_bks: Annotated[bool, typer.Option("--update-bks/--no-update-bks", help="Write a BKS file next to the instance when the solution improves it.")] = False,
 ) -> None:
-    """Solve an instance with PyVRP via mamut-routing-lib."""
+    """Solve an instance: PyVRP via mamut-routing-lib, or KAYROS for TD instances."""
     import inspect
+
+    if solver == "kayros":
+        try:
+            import kayros
+        except ImportError:
+            typer.echo(
+                "KAYROS is not installed. Install the extra: uv sync --extra kayros "
+                "(or pip install 'mamut-routing-tools[kayros]').",
+                err=True,
+            )
+            raise typer.Exit(code=1) from None
+        if update_bks:
+            typer.echo("--update-bks is not wired for kayros yet; use kayros' own BKS tooling.", err=True)
+            raise typer.Exit(code=1)
+        solution = kayros.solve(instance_path, time_limit=float(time_limit), seed=seed)
+        typer.echo(
+            json.dumps(
+                {
+                    "ok": True,
+                    "method": "kayros",
+                    "objective_function": "Duration",
+                    "cost": solution.duration,
+                    "routes": solution.routes,
+                    "n_routes": solution.num_routes,
+                    "status": solution.status,
+                    "iterations": solution.iterations,
+                    "route_durations": solution.route_durations,
+                },
+                indent=1,
+            )
+        )
+        return
+    if solver != "pyvrp":
+        typer.echo(f"Unknown solver '{solver}'; use pyvrp or kayros.", err=True)
+        raise typer.Exit(code=1)
 
     from mamut_routing_lib.artifacts import load_benchmark_instance
     from mamut_routing_lib.enums import ObjectiveFunction
