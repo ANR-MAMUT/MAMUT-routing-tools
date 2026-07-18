@@ -138,8 +138,12 @@ class RoadGraph:
         return 3.6 * self.edge_weight[edge_index] / speeds[self.edge_class[edge_index]]
 
     def nearest_node(self, lat: float, lon: float, node_range_m: float = 100.0) -> int | None:
-        """Nearest road node (any node, not only graph vertices) within range,
-        matching OSMToolset's NodeSpatIndex/findnode contract."""
+        """Nearest road node (any node, not only graph vertices), matching
+        OSMToolset's NodeSpatIndex/findnode contract exactly: candidate
+        inclusion is an axis-aligned +-range box (L-infinity) around the
+        query point, and the pick is the minimum EUCLIDEAN distance among
+        the box hits. A node at 102 m Euclidean but inside the box still
+        matches; one at 99 m outside the box does not exist geometrically."""
         if self._kdtree is None:
             self._kdtree_nodes = list(self.node_enu.keys())
             points = np.array(
@@ -147,10 +151,12 @@ class RoadGraph:
             )
             self._kdtree = cKDTree(points)
         enu = enu_from_lla(LLA(lat, lon), self.ref_lla)
-        distance, index = self._kdtree.query([enu.east, enu.north], k=1)
-        if distance > node_range_m:
+        query = np.array([enu.east, enu.north])
+        hits = self._kdtree.query_ball_point(query, r=node_range_m, p=np.inf)
+        if not hits:
             return None
-        return self._kdtree_nodes[int(index)]
+        best_index = min(hits, key=lambda i: float(np.sum((self._kdtree.data[i] - query) ** 2)))
+        return self._kdtree_nodes[int(best_index)]
 
 
 def _add_intersection_edges(
