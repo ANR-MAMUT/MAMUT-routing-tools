@@ -386,11 +386,11 @@
   </div>
 
   <section id="visualizePanel" class="tab-panel">
-    <div class="kicker">Generated this session · click to select</div>
+    <div class="kicker">Workspace instances · click to select</div>
     <div id="instList" class="inst-list">
-      <div class="empty-note">Nothing generated yet. Use the Generate tab: generated instances appear here, ready to preview, solve and render on the map.</div>
+      <div class="empty-note">Nothing generated yet. Use the Generate tab: generated instances land in the workspace instances/ directory and appear here, ready to solve and render on the map.</div>
     </div>
-    <p class="note">Published benchmark instances live on the MAMUT-routing website; this local workbench visualizes what you generate here. Artifacts are on disk under the workspace instances/ directory.</p>
+    <p class="note">Published benchmark instances live on the MAMUT-routing website; this local workbench lists the instances generated in your workspace.</p>
   </section>
 
   <section id="generatePanel" class="tab-panel tab-panel-active">
@@ -582,6 +582,35 @@ function requestBody() {
   };
 }
 
+async function loadInstances(selectBase) {
+  const data = await api("/api/workbench/instances");
+  const previous = new Map(state.instances.map((instance) => [`${instance.folder}/${instance.base_name}`, instance]));
+  state.instances = (data.instances || []).map((entry) => {
+    const kept = previous.get(`${entry.folder}/${entry.base_name}`);
+    return {
+      base_name: entry.base_name,
+      folder: entry.folder,
+      files: entry.files,
+      summary: entry.summary || {},
+      vrptw: entry.has_vrptw_twin || null,
+      city: entry.city || "?",
+      n: entry.n_customers ?? "?",
+      seed: entry.seed ?? "?",
+      solved: kept?.solved || null,
+      rendered: kept?.rendered || null,
+    };
+  });
+  if (selectBase) {
+    const index = state.instances.findIndex((instance) => instance.base_name === selectBase);
+    if (index >= 0) selectInstance(index);
+  } else if (state.selected) {
+    const index = state.instances.findIndex((instance) => instance.base_name === state.selected.base_name && instance.folder === state.selected.folder);
+    state.selected = index >= 0 ? state.instances[index] : null;
+  }
+  renderInstanceList();
+  renderSelected();
+}
+
 async function loadCities() {
   const data = await api("/api/workbench/generation/cities");
   const select = el("city");
@@ -748,25 +777,10 @@ el("generate").addEventListener("click", async () => {
     status("Generating (matrices can take a minute on big cities)…");
     const body = requestBody();
     const data = await api("/api/workbench/generation/single", body);
-    const instance = {
-      base_name: data.base_name,
-      folder: data.folder,
-      files: data.files,
-      summary: data.summary,
-      vrptw: data.vrptw || null,
-      city: body.city,
-      n: body.nCustomers,
-      seed: body.seed,
-      solved: null,
-      rendered: null,
-    };
-    state.instances.unshift(instance);
-    state.selected = instance;
     state.hiddenRoutes = new Set();
     state.lastRendered = null;
     clearRouteLayers();
-    renderInstanceList();
-    renderSelected();
+    await loadInstances(data.base_name);
     status(`Generated ${data.base_name}: capacity ${data.summary.capacity}, ~${data.summary.route_count} routes.`);
   } catch (error) { status(`Generation failed: ${error.message}`); }
 });
@@ -824,23 +838,9 @@ el("bulk-run").addEventListener("click", async () => {
     body.avgRouteSizesList = el("bulk-ars").value;
     const data = await api("/api/workbench/generation/bulk", body);
     const results = Array.isArray(data.results) ? data.results : [];
-    results.slice().reverse().forEach((result) => {
-      state.instances.unshift({
-        base_name: result.base_name,
-        folder: result.folder,
-        files: result.files,
-        summary: result.summary || {},
-        vrptw: result.vrptw || null,
-        city: body.city,
-        n: result.summary?.customers ?? "?",
-        seed: body.seed,
-        solved: null,
-        rendered: null,
-      });
-    });
     state.bulkBases = results.map((result) => result.base_name).filter(Boolean);
     el("bulk-download").disabled = state.bulkBases.length === 0;
-    renderInstanceList();
+    await loadInstances(state.bulkBases[0]);
     const skipped = (data.city_reports || []).filter((report) => report.status === "skipped").length;
     status(`Bulk generated ${data.generated} instance(s)${skipped ? `, ${skipped} city report(s) skipped` : ""}.`);
     activateTab("visualize");
@@ -867,6 +867,7 @@ el("clear").addEventListener("click", () => {
 });
 
 loadCities().catch((error) => status(`Cannot reach the local server: ${error.message}`));
+loadInstances().catch((error) => console.warn("Unable to list workspace instances", error));
 </script>
 </body>
 </html>

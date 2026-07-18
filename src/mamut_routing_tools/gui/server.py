@@ -147,6 +147,47 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             "cities": cities,
         }
 
+    @app.get("/api/workbench/instances")
+    async def workbench_instances() -> dict[str, Any]:
+        """List generated instances already on disk (workspace instances/),
+        so the GUI Visualize tab survives server restarts. CVRP manifests
+        only: the VRPTW twin derivation manifests mark their base instead."""
+        root = instances_dir(workspace, create=False)
+        instances: list[dict[str, Any]] = []
+        if root.is_dir():
+            for manifest_path in sorted(root.rglob("*_manifest.json")):
+                if manifest_path.name.endswith("_vrptw_manifest.json"):
+                    continue
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                    params = manifest.get("params") or {}
+                    base_name = str(manifest["base_name"])
+                    folder = manifest_path.parent
+                    instances.append(
+                        {
+                            "base_name": base_name,
+                            "folder": str(folder),
+                            "files": manifest["files"],
+                            "generated_at": manifest.get("generated_at"),
+                            "city": params.get("city"),
+                            "n_customers": params.get("n_customers"),
+                            "seed": params.get("seed"),
+                            "method": params.get("method"),
+                            "summary": {
+                                "capacity": manifest.get("capacity"),
+                                "route_count": manifest.get("route_count"),
+                                "customers": params.get("n_customers"),
+                                "demand_type": manifest.get("demand_type"),
+                                "avg_route_size": manifest.get("avg_route_size"),
+                            },
+                            "has_vrptw_twin": (folder / f"{base_name}_vrptw_manifest.json").is_file(),
+                        }
+                    )
+                except (OSError, ValueError, KeyError):
+                    continue
+        instances.sort(key=lambda entry: str(entry.get("generated_at") or ""), reverse=True)
+        return {"ok": True, "instances": instances}
+
     @app.post("/api/workbench/generation/fetch-osm-city")
     async def generation_fetch_city(request: Request) -> Any:
         payload = await request.json()

@@ -43,6 +43,16 @@ def test_preview_generate_solve_render_round_trip(client: TestClient) -> None:
     assert single["ok"]
     folder = single["folder"]
 
+    listing = client.get("/api/workbench/instances").json()
+    assert listing["ok"]
+    listed = {entry["base_name"]: entry for entry in listing["instances"]}
+    assert single["base_name"] in listed
+    entry = listed[single["base_name"]]
+    assert entry["folder"] == folder
+    assert entry["files"]["vrp_json"]["fastest"] == single["files"]["vrp_json"]["fastest"]
+    assert entry["summary"]["capacity"] == single["summary"]["capacity"]
+    assert entry["has_vrptw_twin"] is False
+
     vrp_json = client.get(
         "/instances-file", params={"path": f"{folder}/{single['files']['vrp_json']['fastest']}"}
     ).json()
