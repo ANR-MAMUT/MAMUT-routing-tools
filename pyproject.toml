@@ -26,9 +26,6 @@ dev = [
     "pytest>=8.0",
 ]
 
-[tool.uv.sources]
-mamut-routing-lib = { path = "MAMUT-routing-lib", editable = true }
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
