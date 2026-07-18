@@ -1,6 +1,6 @@
 [project]
 name = "mamut-routing-tools"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local generation tool suite for MAMUT-routing: OSM acquisition, road-graph engine, route geometry, and CVRP/VRPTW instance generation."
 readme = "README.md"
 authors = [
