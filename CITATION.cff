@@ -1,0 +1,51 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: MAMUT-routing-tools
+message: >-
+  If you use MAMUT-routing-tools, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Florian
+    family-names: Rascoussier
+    alias: Onyr
+    affiliation: IMT Atlantique; INSA Lyon
+    orcid: "https://orcid.org/0009-0005-3253-9814"
+  - given-names: Adrien
+    family-names: Pichon
+    alias: Anzury
+    affiliation: Université Bretagne Sud
+    orcid: "https://orcid.org/0009-0005-8630-3962"
+repository-code: "https://github.com/ANR-MAMUT/MAMUT-routing-tools"
+abstract: >-
+  MAMUT-routing-tools is the local generation tool suite of the
+  MAMUT-routing benchmark project: OpenStreetMap city acquisition,
+  a road-graph engine compatible with the project's published
+  OSM-derived benchmark data, best-known-solution route-geometry
+  materialization, and interactive CVRP/VRPTW instance generation.
+  It complements the MAMUT-routing benchmark repository and its
+  static website by running all compute-heavy workflows locally,
+  supporting reproducible computational experiments in Operations
+  Research, Computer Science, and Applied Algorithmics.
+keywords:
+  - benchmarking
+  - CVRP
+  - VRPTW
+  - reproducibility
+  - vehicle routing problem
+  - instance generation
+  - best-known solutions
+  - BKS
+  - open science
+  - optimization benchmarks
+  - OpenStreetMap
+  - OSM
+  - road network
+  - urban logistics
+  - research software
+  - routing
+license: MIT
+version: 0.1.0
+date-released: "2026-07-18"
