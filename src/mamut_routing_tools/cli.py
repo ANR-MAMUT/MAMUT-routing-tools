@@ -156,6 +156,50 @@ def generate_bulk_cmd(
     typer.echo(json.dumps(summary, indent=1))
 
 
+@app.command("solve")
+def solve_cmd(
+    instance_path: Annotated[Path, typer.Argument(help="A .vrp.json instance (generated or from a benchmark collection).")],
+    time_limit: Annotated[int, typer.Option("--time-limit", help="Wall-clock budget in seconds.")] = 30,
+    seed: Annotated[int, typer.Option("--seed")] = 42,
+    objective: Annotated[str, typer.Option("--objective", help="MonoCost or HierarchicalVehicleCost (VRPTW only).")] = "MonoCost",
+    update_bks: Annotated[bool, typer.Option("--update-bks/--no-update-bks", help="Write a BKS file next to the instance when the solution improves it.")] = False,
+) -> None:
+    """Solve an instance with PyVRP via mamut-routing-lib."""
+    import inspect
+
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.solvers import pyvrp as lib_pyvrp
+
+    instance = load_benchmark_instance(instance_path)
+    objective_function = ObjectiveFunction(objective)
+    kwargs: dict = {"time_limit_s": time_limit, "seed": seed, "objective_function": objective_function}
+    # Released lib versions predate collection dispatch; pass instance_path
+    # only when the installed wrapper accepts it.
+    if "instance_path" in inspect.signature(lib_pyvrp.solve_instance).parameters:
+        kwargs["instance_path"] = instance_path
+    if update_bks:
+        result, bks_update = lib_pyvrp.solve_and_update_bks(instance, instance_path=instance_path, authors="mamut-routing-tools user", **{k: v for k, v in kwargs.items() if k != "instance_path"})
+    else:
+        result, bks_update = lib_pyvrp.solve_instance(instance, **kwargs), None
+    payload = {
+        "ok": result.solver_is_feasible,
+        "method": result.method,
+        "objective_function": result.objective_function,
+        "cost": result.solver_cost,
+        "routes": result.routes,
+        "n_routes": result.route_count,
+        "wall_time": round(result.wall_time, 2),
+        "metadata": result.metadata,
+    }
+    if bks_update is not None:
+        payload["bks_update"] = {
+            "improved": bool(getattr(bks_update, "improved", False)),
+            "path": str(getattr(bks_update, "bks_path", "")),
+        }
+    typer.echo(json.dumps(payload, indent=1))
+
+
 @generate_app.command("derive-vrptw")
 def generate_derive_vrptw_cmd(
     folder: Annotated[Path, typer.Argument(help="Folder holding the generated CVRP base files.")],
