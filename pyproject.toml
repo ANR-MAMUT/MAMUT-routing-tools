@@ -1,0 +1,40 @@
+[project]
+name = "mamut-routing-tools"
+version = "0.1.0"
+description = "Local generation tool suite for MAMUT-routing: OSM acquisition, road-graph engine, route geometry, and CVRP/VRPTW instance generation."
+readme = "README.md"
+authors = [
+    { name = "Florian Rascoussier", email = "onyr.maintainer@gmail.com" },
+    { name = "Adrien Pichon" },
+]
+requires-python = ">=3.11"
+dependencies = [
+    "mamut-routing-lib",
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "rustworkx>=0.15",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+mamut-tools = "mamut_routing_tools.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.uv.sources]
+mamut-routing-lib = { path = "MAMUT-routing-lib", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mamut_routing_tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

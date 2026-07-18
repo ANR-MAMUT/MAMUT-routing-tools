@@ -1,0 +1,13 @@
+# Python tooling outputs
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+.venv/
+.python-version
+
+# Local OSM stores and derived caches (workspace data, never tracked)
+/osmdata/
+/graph-cache/
+/workspaces/
