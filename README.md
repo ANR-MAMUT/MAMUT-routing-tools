@@ -2,7 +2,7 @@
 
 Local generation tool suite for the [MAMUT-routing](https://github.com/ANR-MAMUT/MAMUT-routing) benchmark project: OSM city acquisition, a road-graph engine, BKS route-geometry materialization, and interactive CVRP/VRPTW instance generation. The public MAMUT-routing website is fully static; everything compute-heavy lives here and runs on your own machine.
 
-Part of the [ANR MAMUT project](https://mamut.roadef.org/).
+Part of the [ANR MAMUT project](https://anr.fr/Projet-ANR-22-CE22-0016).
 
 ## Status
 
@@ -11,7 +11,7 @@ Beta. The tool suite is being extracted from the website's former Julia backend;
 ## Components
 
 - `mamut-tools roadgraph`: build and inspect drivable road graphs from OSM XML extracts. The construction is a faithful Python port of the OpenStreetMapX.jl pipeline the project previously used (same road classes, oneway rules, intersection segmentation, ENU distances, and strongly-connected trim), so graphs and route geometry stay consistent with previously published data.
-- `mamut-tools geometry`: materialize road-following polylines for best-known solutions, in the exact artifact format the MAMUT-routing website consumes.
+- `mamut-tools geometry`: materialize road-following polylines for Best-Known Solutions (BKS), in the exact artifact format the MAMUT-routing website consumes.
 - Planned: OSM city fetch (Nominatim + Overpass), interactive CVRP/VRPTW generation with a local workbench GUI, and the official time-dependent benchmark campaign pipeline.
 
 ## Install
