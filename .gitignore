@@ -11,3 +11,4 @@ build/
 /osmdata/
 /graph-cache/
 /workspaces/
+.cache/
