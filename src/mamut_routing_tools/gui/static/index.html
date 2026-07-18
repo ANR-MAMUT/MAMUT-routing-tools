@@ -1,155 +1,872 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MAMUT workbench (local)</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script>
+(function () {
+  try {
+    var theme = localStorage.getItem("mamut-tools-theme");
+    if (theme !== "dark" && theme !== "light") theme = "dark";
+    document.documentElement.dataset.theme = theme;
+  } catch (error) {
+    document.documentElement.dataset.theme = "dark";
+  }
+})();
+</script>
+<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
 <style>
-  :root { --bg:#101226; --panel:#1b1e3d; --ink:#edeffc; --mut:#8d92b8; --acc:#9d8bff; --div:rgba(237,239,252,.13); }
+  /* Nocturne design system (Adrien's Claude-Design merged demo): dual palettes
+     from the demo's renderVals, Inter self-hosted, glass panels over the map. */
+  @font-face {
+    font-family: "Inter";
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: url("/static/vendor/fonts/InterVariable.woff2") format("woff2-variations");
+  }
+
+  :root,
+  [data-theme="dark"] {
+    --bg: #101226; --s: #1b1e3d; --ink: #edeffc; --mut: #8d92b8;
+    --div: rgba(237, 239, 252, 0.13); --acc: #9d8bff; --on-acc: #101226;
+    --cy: #3cd6f5; --gr: #45e8a5; --am: #ffc14d; --cor: #ff7a6e;
+    --acc-t: rgba(157, 139, 255, 0.16); --cy-t: rgba(60, 214, 245, 0.14);
+    --gr-t: rgba(69, 232, 165, 0.16); --am-t: rgba(255, 193, 77, 0.16);
+    --cor-t: rgba(255, 122, 110, 0.16); --svg: #0c0e1f; --ptc: #dfe3f5;
+    --panel: rgba(24, 27, 54, 0.92); --edge: rgba(157, 139, 255, 0.28);
+    --shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+    color-scheme: dark;
+  }
+
+  [data-theme="light"] {
+    --bg: #f6f5f0; --s: #ffffff; --ink: #201b45; --mut: #6f6f92;
+    --div: rgba(32, 27, 69, 0.14); --acc: #5b43e8; --on-acc: #ffffff;
+    --cy: #0d94ba; --gr: #0f9e68; --am: #c47f00; --cor: #e8503f;
+    --acc-t: rgba(91, 67, 232, 0.11); --cy-t: rgba(13, 148, 186, 0.12);
+    --gr-t: rgba(15, 158, 104, 0.13); --am-t: rgba(196, 127, 0, 0.13);
+    --cor-t: rgba(232, 80, 63, 0.12); --svg: #efede6; --ptc: #3a3f55;
+    --panel: rgba(255, 255, 255, 0.94); --edge: rgba(91, 67, 232, 0.22);
+    --shadow: 0 14px 36px rgba(25, 29, 54, 0.14);
+    color-scheme: light;
+  }
+
   * { box-sizing: border-box; }
-  body { margin:0; font:14px/1.5 Inter, system-ui, sans-serif; background:var(--bg); color:var(--ink); }
-  #map { position:fixed; inset:0; }
-  .panel { position:fixed; top:16px; left:16px; bottom:16px; width:320px; overflow:auto; background:rgba(24,27,54,.94); border:1px solid rgba(157,139,255,.28); border-radius:14px; padding:14px; z-index:1000; }
-  .panel h1 { font-size:15px; margin:0 0 10px; font-weight:500; }
-  label { display:block; font-size:11px; color:var(--mut); margin:8px 0 3px; }
-  select, input { width:100%; padding:6px 8px; font:inherit; color:var(--ink); background:var(--panel); border:1px solid var(--div); border-radius:8px; }
-  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-  button { cursor:pointer; margin-top:10px; margin-right:6px; padding:8px 14px; font:inherit; font-weight:500; border:none; border-radius:8px; background:var(--acc); color:#101226; }
-  button.secondary { background:transparent; color:var(--acc); border:1px solid var(--acc); }
-  #status { font-size:12px; color:var(--mut); margin-top:10px; white-space:pre-wrap; word-break:break-word; }
-  .note { font-size:11px; color:var(--mut); margin-top:12px; border-top:1px solid var(--div); padding-top:8px; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    font-family: "Inter", system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink);
+    background: var(--bg);
+  }
+
+  [hidden] { display: none !important; }
+
+  :focus { outline: none; }
+  :focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+  ::selection { background: color-mix(in srgb, var(--acc) 30%, transparent); }
+
+  #map { position: fixed; inset: 0; background: var(--svg); }
+
+  .leaflet-control-attribution {
+    background: var(--panel) !important;
+    color: var(--mut) !important;
+    font-size: 10px !important;
+  }
+  .leaflet-control-attribution a { color: var(--mut) !important; }
+  .leaflet-container { font-family: "Inter", system-ui, sans-serif !important; }
+
+  /* ── Floating panels ── */
+  .panel {
+    position: fixed;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    background: var(--panel);
+    backdrop-filter: blur(10px);
+    border-radius: 14px;
+    box-shadow: 0 0 0 1px var(--edge), var(--shadow);
+    padding: 12px;
+    z-index: 900;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+
+  .panel::-webkit-scrollbar { width: 6px; }
+  .panel::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--ink) 15%, transparent);
+    border-radius: 3px;
+  }
+
+  .panel-left { left: 20px; top: 16px; bottom: 56px; width: 300px; }
+  .panel-right { right: 20px; top: 16px; max-height: calc(100% - 90px); width: 300px; padding: 16px; gap: 10px; }
+
+  .brand-row { display: flex; align-items: center; gap: 8px; }
+  .brand-mark {
+    width: 10px; height: 10px; flex: none;
+    background: linear-gradient(135deg, var(--acc), var(--cy));
+    border-radius: 2px;
+    transform: rotate(45deg);
+  }
+  .brand-name { font-weight: 500; font-size: 14px; }
+  .brand-sub { font-size: 10.5px; color: var(--mut); }
+
+  .theme-toggle {
+    margin-left: auto;
+    display: inline-flex;
+    border: 1px solid var(--div);
+    border-radius: 999px;
+    overflow: hidden;
+    font-size: 10px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .theme-side { padding: 3px 8px; color: var(--mut); background: transparent; border: none; cursor: pointer; font: inherit; }
+  [data-theme="dark"] .theme-side-moon,
+  [data-theme="light"] .theme-side-sun { background: var(--acc); color: var(--on-acc); }
+
+  .kicker {
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--mut);
+  }
+  .kicker-selected { color: var(--cy); }
+
+  .section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .section + .section {
+    padding-top: 10px;
+    background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent) no-repeat top / 100% 1px;
+  }
+
+  /* ── Tabs ── */
+  .tabs { display: flex; gap: 6px; flex: none; }
+  .tab-btn {
+    flex: 1;
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 0;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: var(--mut);
+  }
+  .tab-btn:hover { color: var(--ink); }
+  .tab-btn.tab-active { background: var(--acc); color: var(--on-acc); }
+
+  .tab-panel { display: none; min-height: 0; }
+  .tab-panel.tab-panel-active { display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0; }
+
+  /* ── Forms ── */
+  label.field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .field > span { font-size: 11px; color: var(--mut); }
+
+  select, input[type="text"], input[type="number"], input[type="search"] {
+    width: 100%;
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--ink);
+    background: var(--s);
+    border: 1px solid var(--div);
+    border-radius: 8px;
+    min-height: 30px;
+    padding: 5px 10px;
+    caret-color: var(--acc);
+  }
+  input:hover, select:hover { border-color: color-mix(in srgb, var(--ink) 45%, transparent); }
+  input:focus-visible, select:focus-visible { border-color: var(--acc); outline-offset: 0; }
+  input[type="checkbox"] { accent-color: var(--acc); }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row { display: flex; gap: 6px; align-items: end; flex-wrap: wrap; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 7px 14px;
+    border-radius: 8px;
+    border: none;
+    background: var(--acc);
+    color: var(--on-acc);
+  }
+  .btn:hover { background: color-mix(in srgb, var(--acc) 88%, var(--ink)); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-secondary { background: transparent; color: var(--acc); box-shadow: inset 0 0 0 1px var(--acc); }
+  .btn-secondary:hover { background: var(--acc-t); }
+  .btn-ghost {
+    background: transparent;
+    color: var(--mut);
+    box-shadow: inset 0 0 0 1px var(--div);
+  }
+  .btn-ghost:hover { color: var(--acc); box-shadow: inset 0 0 0 1px var(--edge); background: var(--acc-t); }
+
+  .note { font-size: 11px; line-height: 1.55; color: var(--mut); margin: 0; }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    font-size: 10px;
+    letter-spacing: 0.02em;
+    padding: 2px 8px;
+    border-radius: 6px;
+    white-space: nowrap;
+  }
+  .chip-am { background: var(--am-t); color: var(--am); }
+  .chip-gr { background: var(--gr-t); color: var(--gr); }
+  .chip-acc { background: var(--acc-t); color: var(--acc); }
+
+  details.bulk { border: none; }
+  details.bulk > summary {
+    cursor: pointer;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--mut);
+    user-select: none;
+  }
+  details.bulk > div { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
+
+  /* ── Instance list (Visualize tab) ── */
+  .inst-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    overflow-y: auto;
+    min-height: 0;
+    flex: 1;
+  }
+  .inst-row {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    text-align: left;
+    cursor: pointer;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 8px 10px;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+  }
+  .inst-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+  .inst-row.selected { background: var(--acc-t); border-color: var(--edge); }
+  .inst-row .inst-head { display: flex; align-items: center; gap: 8px; width: 100%; }
+  .inst-row .inst-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inst-row .inst-meta { font-size: 11px; color: var(--mut); }
+
+  .empty-note {
+    font-size: 12px;
+    color: var(--mut);
+    border: 1px dashed var(--div);
+    border-radius: 8px;
+    padding: 12px;
+  }
+
+  /* ── Right panel: selected instance ── */
+  .sel-name-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .sel-name { font-size: 20px; font-weight: 500; overflow-wrap: anywhere; }
+  .sel-meta { font-size: 11.5px; color: var(--mut); }
+
+  .sel-cost-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .sel-cost {
+    font-size: 24px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .sel-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 12px; }
+  .sel-facts dt { color: var(--mut); }
+  .sel-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+  .fading-rule {
+    height: 1px;
+    background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent);
+  }
+
+  .legend { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    font-size: 12px;
+    padding: 4px;
+    border-radius: 6px;
+    text-align: left;
+  }
+  .legend-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+  .legend-row.off { opacity: 0.35; }
+  .legend-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .legend-row .lbl { font-weight: 500; }
+  .legend-row .meta { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; }
+
+  /* ── Footer status chip ── */
+  .footer {
+    position: fixed;
+    left: 20px;
+    bottom: 18px;
+    z-index: 950;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11.5px;
+    color: var(--mut);
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+    border-radius: 8px;
+    padding: 8px 14px;
+    box-shadow: 0 0 0 1px var(--div);
+    max-width: min(58vw, 760px);
+  }
+  .footer .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); flex: none; }
+  .footer p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .map-clear-btn {
+    position: fixed;
+    right: 20px;
+    bottom: 18px;
+    z-index: 950;
+    cursor: pointer;
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    padding: 7px 14px;
+    border: none;
+    border-radius: 8px;
+    color: var(--mut);
+    background: var(--panel);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 0 0 1px var(--div);
+  }
+  .map-clear-btn:hover { color: var(--cor); box-shadow: 0 0 0 1px var(--cor); }
+
+  @media (max-width: 1000px) {
+    .panel-right { display: none; }
+  }
 </style>
 </head>
 <body>
 <div id="map"></div>
-<div class="panel">
-  <h1>MAMUT workbench — local generation</h1>
-  <label>City (workspace OSM extracts)</label>
-  <select id="city"></select>
-  <label>Fetch a new city (Nominatim + Overpass)</label>
-  <div class="row"><input id="fetch-name" placeholder="e.g. Brest"><button class="secondary" id="fetch" style="margin-top:0">Fetch</button></div>
-  <div class="row">
-    <div><label>Customers</label><input id="n" type="number" value="30" min="2"></div>
-    <div><label>Seed</label><input id="seed" type="number" value="0"></div>
-  </div>
-  <label>Sampling method</label>
-  <select id="method">
-    <option value="poi_categories">POI categories</option>
-    <option value="parametric_attach">Parametric attach</option>
-    <option value="hybrid">Hybrid</option>
-  </select>
-  <div class="row">
-    <div><label>Demand type (1-7)</label><input id="demand" type="number" value="7" min="1" max="7"></div>
-    <div><label>Route size band (1-7)</label><input id="ars" type="number" value="4" min="1" max="7"></div>
-  </div>
-  <label><input id="vrptw" type="checkbox" style="width:auto"> derive VRPTW twin</label>
-  <div>
-    <button id="preview">Preview</button>
-    <button id="generate">Generate</button>
-    <button id="solve" class="secondary">Solve + render</button>
-  </div>
-  <div id="status">Ready.</div>
-  <div class="note">Placeholder GUI: the full workbench front (Nocturne design) replaces this page. Artifacts land in the workspace's instances/ directory; use <code>mamut-tools solve</code> and <code>generate bulk</code> for the full CLI surface.</div>
-</div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script>
-const map = L.map('map', { zoomControl: false }).setView([46.5, 2.5], 6);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }).addTo(map);
-let layers = L.layerGroup().addTo(map);
-let lastGenerated = null;
-const PALETTE = ['#9d8bff','#3cd6f5','#45e8a5','#ffc14d','#ff7ab8','#7db1ff','#c9ec55','#d18cff','#ff9866','#3fe8cc'];
-const status = (text) => { document.getElementById('status').textContent = text; };
 
+<aside class="panel panel-left">
+  <div class="brand-row">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span><span class="brand-name">MAMUT workbench</span> <span class="brand-sub">local</span></span>
+    <span class="theme-toggle">
+      <button type="button" class="theme-side theme-side-sun" data-theme-pick="light" aria-label="Light theme">&#9728;</button>
+      <button type="button" class="theme-side theme-side-moon" data-theme-pick="dark" aria-label="Dark theme">&#9790;</button>
+    </span>
+  </div>
+
+  <div class="tabs">
+    <button id="tabVisualize" class="tab-btn" type="button">Visualize</button>
+    <button id="tabGenerate" class="tab-btn tab-active" type="button">Generate</button>
+  </div>
+
+  <section id="visualizePanel" class="tab-panel">
+    <div class="kicker">Generated this session · click to select</div>
+    <div id="instList" class="inst-list">
+      <div class="empty-note">Nothing generated yet. Use the Generate tab: generated instances appear here, ready to preview, solve and render on the map.</div>
+    </div>
+    <p class="note">Published benchmark instances live on the MAMUT-routing website; this local workbench visualizes what you generate here. Artifacts are on disk under the workspace instances/ directory.</p>
+  </section>
+
+  <section id="generatePanel" class="tab-panel tab-panel-active">
+    <label class="field"><span>City · OSM road graph</span><select id="city"></select></label>
+    <div class="row">
+      <label class="field" style="flex:1"><span>Fetch a new city (Nominatim + Overpass)</span><input id="fetch-name" type="text" placeholder="e.g. Brest"></label>
+      <button class="btn btn-secondary" id="fetch" type="button">Fetch</button>
+    </div>
+    <div class="grid-2">
+      <label class="field"><span>Customers</span><input id="n" type="number" value="30" min="2"></label>
+      <label class="field"><span>Seed</span><input id="seed" type="number" value="0"></label>
+    </div>
+    <label class="field"><span>Sampling method</span>
+      <select id="method">
+        <option value="poi_categories">POI categories</option>
+        <option value="parametric_attach">Parametric attach</option>
+        <option value="hybrid">Hybrid</option>
+      </select>
+    </label>
+    <label class="field"><span>Problem type</span>
+      <select id="problem">
+        <option value="cvrp">CVRP · capacity only</option>
+        <option value="vrptw">VRPTW · capacity + time windows</option>
+      </select>
+    </label>
+    <div class="grid-2">
+      <label class="field"><span>Demand type (1-7)</span><input id="demand" type="number" value="7" min="1" max="7"></label>
+      <label class="field"><span>Route size band (1-7)</span><input id="ars" type="number" value="4" min="1" max="7"></label>
+    </div>
+    <div class="row">
+      <button id="preview" class="btn btn-secondary" type="button">Preview</button>
+      <button id="generate" class="btn" type="button">Generate</button>
+    </div>
+    <details class="bulk">
+      <summary>Bulk generation</summary>
+      <div>
+        <label class="field"><span>Sizes n (comma-separated)</span><input id="bulk-sizes" type="text" value="10,50,100"></label>
+        <div class="grid-2">
+          <label class="field"><span>Demand types</span><input id="bulk-demands" type="text" value="7"></label>
+          <label class="field"><span>Route size bands</span><input id="bulk-ars" type="text" value="4"></label>
+        </div>
+        <div class="row">
+          <button id="bulk-run" class="btn btn-secondary" type="button">Generate bulk</button>
+          <button id="bulk-download" class="btn btn-ghost" type="button" disabled>Download zip</button>
+        </div>
+      </div>
+    </details>
+    <p class="note">Runs the published Mamut2026 v2 workbench pipeline locally: 3-metric CVRPLIB artifacts with shared road / geo / distance sidecars, plus VRPTW twins on request. Everything is written to your workspace.</p>
+  </section>
+</aside>
+
+<aside class="panel panel-right">
+  <div class="kicker kicker-selected">Selected instance</div>
+  <div id="selEmpty" class="empty-note">Generate an instance (or pick one in the Visualize tab), then solve and render it here.</div>
+  <div id="selBody" hidden>
+    <div class="sel-name-row"><span class="sel-name" id="selName"></span><span class="sel-meta" id="selMeta"></span></div>
+    <div id="selObjective" hidden>
+      <div class="kicker" id="selObjLabel">MonoCost · local solve</div>
+      <div class="sel-cost-row"><span class="sel-cost" id="selCost"></span><span class="chip chip-am" id="selMethod"></span></div>
+    </div>
+    <dl class="sel-facts" id="selFacts"></dl>
+    <div class="row" style="margin-top:6px">
+      <label class="field" style="width:90px"><span>Budget (s)</span><input id="solve-budget" type="number" value="30" min="1"></label>
+      <button id="solve" class="btn" type="button">Solve + render</button>
+    </div>
+    <div class="row">
+      <button id="download" class="btn btn-ghost" type="button">Download zip</button>
+    </div>
+    <div class="fading-rule" style="margin:8px 0"></div>
+    <div class="kicker">Routes · click to toggle</div>
+    <div id="legend" class="legend"><div class="empty-note">Solve the instance to draw its routes.</div></div>
+  </div>
+</aside>
+
+<div class="footer"><span class="dot" aria-hidden="true"></span><p id="status" title="">Ready.</p></div>
+<button id="clear" class="map-clear-btn" type="button">Clear map</button>
+
+<script src="/static/vendor/leaflet/leaflet.js"></script>
+<script>
+"use strict";
+
+/* Nocturne per-theme route palettes (VIVID_D / VIVID_L from the merged demo). */
+const ROUTE_COLORS_DARK = [
+  "#9d8bff", "#3cd6f5", "#45e8a5", "#ffc14d", "#ff7ab8",
+  "#7db1ff", "#c9ec55", "#d18cff", "#ff9866", "#3fe8cc",
+  "#e8e055", "#ff8f8f", "#66c2ff", "#9ff06b", "#f0d066",
+  "#b78cff", "#55f0e0", "#ffa8cc", "#8fd0f0", "#e8bb90",
+];
+const ROUTE_COLORS_LIGHT = [
+  "#5a43e8", "#0d94ba", "#0f9e68", "#c47f00", "#d63d8c",
+  "#2f6fd6", "#7a9e0d", "#9b4fd6", "#d65f2a", "#0da893",
+  "#94940d", "#d64f4f", "#1f7fd6", "#4f9e1f", "#b8930f",
+  "#7a4fd6", "#0d9e94", "#d66a9b", "#3d85ad", "#a87a4f",
+];
+
+const isDark = () => document.documentElement.dataset.theme !== "light";
+const routeColor = (index) => (isDark() ? ROUTE_COLORS_DARK : ROUTE_COLORS_LIGHT)[index % 20];
+const markerColors = () => (isDark()
+  ? { depot: "#ff7a6e", poi: "#45e8a5", parametric: "#9d8bff" }
+  : { depot: "#e8503f", poi: "#0f9e68", parametric: "#5b43e8" });
+
+const el = (id) => document.getElementById(id);
+const status = (text) => { el("status").textContent = text; el("status").title = text; };
+
+/* ── Map ── */
+const map = L.map("map", { zoomControl: false }).setView([46.5, 2.5], 6);
+const positron = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+  maxZoom: 20, subdomains: "abcd", attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+});
+const darkMatter = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+  maxZoom: 20, subdomains: "abcd", attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+});
+let baseLayer = isDark() ? darkMatter : positron;
+baseLayer.addTo(map);
+
+const previewLayers = L.layerGroup().addTo(map);
+let routeLayerGroups = [];
+
+/* ── Theme ── */
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem("mamut-tools-theme", theme); } catch (error) { /* private mode */ }
+  const nextBase = isDark() ? darkMatter : positron;
+  if (nextBase !== baseLayer) {
+    map.removeLayer(baseLayer);
+    nextBase.addTo(map);
+    baseLayer = nextBase;
+  }
+  redrawRoutes();
+}
+document.querySelectorAll("[data-theme-pick]").forEach((button) => {
+  button.addEventListener("click", () => applyTheme(button.dataset.themePick));
+});
+
+/* ── API ── */
 async function api(path, body) {
   const response = await fetch(path, body === undefined ? {} : {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }));
   if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
 
+async function apiBlob(path, body) {
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.blob();
+}
+
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+/* ── State ── */
+const state = {
+  instances: [],
+  selected: null,
+  hiddenRoutes: new Set(),
+  lastRendered: null,
+  bulkBases: null,
+};
+
+/* ── Tabs ── */
+function activateTab(name) {
+  el("tabVisualize").classList.toggle("tab-active", name === "visualize");
+  el("tabGenerate").classList.toggle("tab-active", name === "generate");
+  el("visualizePanel").classList.toggle("tab-panel-active", name === "visualize");
+  el("generatePanel").classList.toggle("tab-panel-active", name === "generate");
+}
+el("tabVisualize").addEventListener("click", () => activateTab("visualize"));
+el("tabGenerate").addEventListener("click", () => activateTab("generate"));
+
+/* ── Generation inputs ── */
 function requestBody() {
   return {
-    city: document.getElementById('city').value,
-    nCustomers: Number(document.getElementById('n').value),
-    seed: Number(document.getElementById('seed').value),
-    method: document.getElementById('method').value,
-    demandType: Number(document.getElementById('demand').value),
-    avgRouteSize: Number(document.getElementById('ars').value),
-    deriveVrptw: document.getElementById('vrptw').checked,
+    city: el("city").value,
+    nCustomers: Number(el("n").value),
+    seed: Number(el("seed").value),
+    method: el("method").value,
+    demandType: Number(el("demand").value),
+    avgRouteSize: Number(el("ars").value),
+    deriveVrptw: el("problem").value === "vrptw",
   };
 }
 
 async function loadCities() {
-  const data = await api('/api/workbench/generation/cities');
-  const select = document.getElementById('city');
-  select.innerHTML = '';
-  data.cities.forEach((c) => { const o = document.createElement('option'); o.value = c.label; o.textContent = c.label; select.append(o); });
-  status(data.cities.length ? `${data.cities.length} city extract(s) in the workspace.` : 'No OSM extracts yet: fetch a city first.');
+  const data = await api("/api/workbench/generation/cities");
+  const select = el("city");
+  select.innerHTML = "";
+  data.cities.forEach((city) => {
+    const option = document.createElement("option");
+    option.value = city.label;
+    option.textContent = city.label;
+    select.append(option);
+  });
+  status(data.cities.length
+    ? `${data.cities.length} city extract(s) in the workspace.`
+    : "No OSM extracts yet: fetch a city first.");
+}
+
+/* ── Map drawing ── */
+function clearRouteLayers() {
+  routeLayerGroups.forEach((group) => map.removeLayer(group));
+  routeLayerGroups = [];
 }
 
 function drawPreview(geojson) {
-  layers.clearLayers();
-  const pts = [];
-  geojson.features.forEach((f) => {
-    const [lon, lat] = f.geometry.coordinates;
-    pts.push([lat, lon]);
+  previewLayers.clearLayers();
+  const colors = markerColors();
+  const bounds = [];
+  geojson.features.forEach((feature) => {
+    const [lon, lat] = feature.geometry.coordinates;
+    bounds.push([lat, lon]);
+    const role = feature.properties.role === "depot"
+      ? "depot"
+      : (feature.properties.source_tag === "poi" ? "poi" : "parametric");
     L.circleMarker([lat, lon], {
-      radius: f.properties.role === 'depot' ? 7 : 4,
-      color: f.properties.role === 'depot' ? '#ff7a6e' : (f.properties.source_tag === 'poi' ? '#45e8a5' : '#9d8bff'),
+      radius: role === "depot" ? 7 : 4,
+      color: colors[role],
+      fillColor: colors[role],
       fillOpacity: 0.85,
-    }).bindTooltip(`#${f.properties.instance_node_id} ${f.properties.source_tag}`).addTo(layers);
+      weight: role === "depot" ? 2 : 1,
+    }).bindTooltip(`#${feature.properties.instance_node_id} ${feature.properties.source_tag}`).addTo(previewLayers);
   });
-  if (pts.length) map.fitBounds(pts, { padding: [40, 40] });
+  if (bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
 }
 
-document.getElementById('preview').onclick = async () => {
-  try { status('Previewing…'); const d = await api('/api/workbench/generation/preview', requestBody());
-    drawPreview(d.geojson); status(`Preview: ${d.summary.customers} customers (${d.summary.poi_customers} POI / ${d.summary.parametric_customers} parametric).`);
-  } catch (e) { status(`Preview failed: ${e.message}`); }
-};
+function drawRoutes(rendered, fit) {
+  clearRouteLayers();
+  const bounds = [];
+  rendered.geojson.features.forEach((feature, index) => {
+    const group = L.layerGroup();
+    const line = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    bounds.push(...line);
+    L.polyline(line, { color: routeColor(index), weight: 3, opacity: 0.9 })
+      .bindTooltip(`R${feature.properties.route_index}: ${feature.properties.stops} stops, load ${feature.properties.load} (${feature.properties.render_mode})`)
+      .addTo(group);
+    routeLayerGroups.push(group);
+    if (!state.hiddenRoutes.has(index)) group.addTo(map);
+  });
+  if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
+}
 
-document.getElementById('generate').onclick = async () => {
-  try { status('Generating (matrices can take a minute on big cities)…');
-    const d = await api('/api/workbench/generation/single', requestBody());
-    lastGenerated = d; status(`Generated ${d.base_name}: capacity ${d.summary.capacity}, ~${d.summary.route_count} routes.\nFolder: ${d.folder}`);
-  } catch (e) { status(`Generation failed: ${e.message}`); }
-};
+function redrawRoutes() {
+  if (state.lastRendered) drawRoutes(state.lastRendered, false);
+  renderLegend();
+}
 
-document.getElementById('solve').onclick = async () => {
-  if (!lastGenerated) { status('Generate an instance first.'); return; }
-  try {
-    status('Solving (30 s budget)…');
-    const folder = lastGenerated.folder, base = lastGenerated.base_name;
-    const vrpJson = await fetch(`/instances-file?path=${encodeURIComponent(folder + '/' + lastGenerated.files.vrp_json.fastest)}`).then(r => r.json());
-    const solved = await api('/api/workbench/solve', { vrp_json: vrpJson, time_limit: 30 });
-    const meta = await fetch(`/instances-file?path=${encodeURIComponent(folder + '/' + lastGenerated.files.meta)}`).then(r => r.json());
-    const rendered = await api('/api/workbench/render-routes', { meta, routes: solved.routes, metric: 'fastest' });
-    layers.clearLayers();
-    const bounds = [];
-    rendered.geojson.features.forEach((f, i) => {
-      const line = f.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-      bounds.push(...line);
-      L.polyline(line, { color: PALETTE[i % PALETTE.length], weight: 3, opacity: 0.9 })
-        .bindTooltip(`R${f.properties.route_index}: ${f.properties.stops} stops, load ${f.properties.load} (${f.properties.render_mode})`).addTo(layers);
+/* ── Visualize tab list ── */
+function renderInstanceList() {
+  const list = el("instList");
+  if (!state.instances.length) {
+    list.innerHTML = '<div class="empty-note">Nothing generated yet. Use the Generate tab: generated instances appear here, ready to preview, solve and render on the map.</div>';
+    return;
+  }
+  list.innerHTML = "";
+  state.instances.forEach((instance, index) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "inst-row" + (state.selected === instance ? " selected" : "");
+    const twin = instance.vrptw ? ' <span class="chip chip-acc">VRPTW twin</span>' : "";
+    row.innerHTML = `<span class="inst-head"><span class="inst-name">${instance.base_name}</span>${twin}</span>` +
+      `<span class="inst-meta">${instance.city} · n=${instance.n} · seed ${instance.seed} · capacity ${instance.summary.capacity}</span>`;
+    row.addEventListener("click", () => selectInstance(index));
+    list.append(row);
+  });
+}
+
+/* ── Selected instance panel ── */
+function renderSelected() {
+  const instance = state.selected;
+  el("selEmpty").hidden = Boolean(instance);
+  el("selBody").hidden = !instance;
+  if (!instance) return;
+  el("selName").textContent = instance.base_name;
+  el("selMeta").textContent = `CVRP · ${instance.city} · n=${instance.n}`;
+  const facts = [
+    ["Capacity", instance.summary.capacity],
+    ["Expected routes", instance.summary.route_count != null ? `~${instance.summary.route_count}` : "n/a"],
+    ["Seed", instance.seed],
+    ["Folder", instance.folder.split("/").slice(-1)[0]],
+  ];
+  if (instance.vrptw) facts.push(["VRPTW twin", "derived"]);
+  el("selFacts").innerHTML = facts
+    .map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`)
+    .join("");
+  if (instance.solved) {
+    el("selObjective").hidden = false;
+    el("selObjLabel").textContent = "MonoCost · local solve";
+    el("selCost").textContent = String(instance.solved.cost);
+    el("selMethod").textContent = instance.solved.method || "pyvrp";
+  } else {
+    el("selObjective").hidden = true;
+  }
+  renderLegend();
+}
+
+function renderLegend() {
+  const legend = el("legend");
+  const instance = state.selected;
+  if (!instance || !instance.solved || !state.lastRendered) {
+    legend.innerHTML = '<div class="empty-note">Solve the instance to draw its routes.</div>';
+    return;
+  }
+  legend.innerHTML = "";
+  state.lastRendered.geojson.features.forEach((feature, index) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "legend-row" + (state.hiddenRoutes.has(index) ? " off" : "");
+    row.innerHTML = `<span class="dot" style="background:${routeColor(index)}"></span>` +
+      `<span class="lbl">R${feature.properties.route_index}</span>` +
+      `<span class="meta">${feature.properties.stops} stops · load ${feature.properties.load}</span>`;
+    row.addEventListener("click", () => {
+      if (state.hiddenRoutes.has(index)) {
+        state.hiddenRoutes.delete(index);
+        routeLayerGroups[index]?.addTo(map);
+      } else {
+        state.hiddenRoutes.add(index);
+        if (routeLayerGroups[index]) map.removeLayer(routeLayerGroups[index]);
+      }
+      row.classList.toggle("off", state.hiddenRoutes.has(index));
     });
-    if (bounds.length) map.fitBounds(bounds, { padding: [40, 40] });
-    status(`Solved: cost ${solved.cost} with ${solved.n_routes} routes (${solved.method || 'pyvrp'}); render ${rendered.summary.render_mode}.`);
-  } catch (e) { status(`Solve failed: ${e.message}`); }
-};
+    legend.append(row);
+  });
+}
 
-document.getElementById('fetch').onclick = async () => {
-  const name = document.getElementById('fetch-name').value.trim();
+function selectInstance(index) {
+  state.selected = state.instances[index];
+  state.hiddenRoutes = new Set();
+  state.lastRendered = state.selected.rendered || null;
+  clearRouteLayers();
+  if (state.lastRendered) drawRoutes(state.lastRendered, true);
+  renderInstanceList();
+  renderSelected();
+}
+
+/* ── Actions ── */
+el("preview").addEventListener("click", async () => {
+  try {
+    status("Previewing selection…");
+    const data = await api("/api/workbench/generation/preview", requestBody());
+    drawPreview(data.geojson);
+    status(`Preview: ${data.summary.customers} customers (${data.summary.poi_customers} POI · ${data.summary.parametric_customers} parametric).`);
+  } catch (error) { status(`Preview failed: ${error.message}`); }
+});
+
+el("generate").addEventListener("click", async () => {
+  try {
+    status("Generating (matrices can take a minute on big cities)…");
+    const body = requestBody();
+    const data = await api("/api/workbench/generation/single", body);
+    const instance = {
+      base_name: data.base_name,
+      folder: data.folder,
+      files: data.files,
+      summary: data.summary,
+      vrptw: data.vrptw || null,
+      city: body.city,
+      n: body.nCustomers,
+      seed: body.seed,
+      solved: null,
+      rendered: null,
+    };
+    state.instances.unshift(instance);
+    state.selected = instance;
+    state.hiddenRoutes = new Set();
+    state.lastRendered = null;
+    clearRouteLayers();
+    renderInstanceList();
+    renderSelected();
+    status(`Generated ${data.base_name}: capacity ${data.summary.capacity}, ~${data.summary.route_count} routes.`);
+  } catch (error) { status(`Generation failed: ${error.message}`); }
+});
+
+el("solve").addEventListener("click", async () => {
+  const instance = state.selected;
+  if (!instance) return;
+  try {
+    const budget = Math.max(1, Number(el("solve-budget").value) || 30);
+    status(`Solving ${instance.base_name} (${budget} s budget)…`);
+    const vrpJson = await fetch(`/instances-file?path=${encodeURIComponent(`${instance.folder}/${instance.files.vrp_json.fastest}`)}`).then((response) => response.json());
+    const solved = await api("/api/workbench/solve", { vrp_json: vrpJson, time_limit: budget });
+    const meta = await fetch(`/instances-file?path=${encodeURIComponent(`${instance.folder}/${instance.files.meta}`)}`).then((response) => response.json());
+    status("Rendering road-following routes…");
+    const rendered = await api("/api/workbench/render-routes", { meta, routes: solved.routes, metric: "fastest" });
+    instance.solved = solved;
+    instance.rendered = rendered;
+    state.lastRendered = rendered;
+    state.hiddenRoutes = new Set();
+    previewLayers.clearLayers();
+    drawRoutes(rendered, true);
+    renderSelected();
+    status(`Solved ${instance.base_name}: cost ${solved.cost}, ${solved.n_routes} routes (${solved.method || "pyvrp"}); render ${rendered.summary.render_mode}.`);
+  } catch (error) { status(`Solve failed: ${error.message}`); }
+});
+
+el("download").addEventListener("click", async () => {
+  const instance = state.selected;
+  if (!instance) return;
+  try {
+    status(`Zipping ${instance.base_name}…`);
+    const blob = await apiBlob("/api/workbench/generation/single-download", { folder: instance.folder, base_name: instance.base_name });
+    saveBlob(blob, `${instance.base_name}.zip`);
+    status(`Downloaded ${instance.base_name}.zip`);
+  } catch (error) { status(`Download failed: ${error.message}`); }
+});
+
+el("fetch").addEventListener("click", async () => {
+  const name = el("fetch-name").value.trim();
   if (!name) return;
-  try { status(`Fetching ${name} from Overpass (can take minutes)…`);
-    await api('/api/workbench/generation/fetch-osm-city', { city: name });
-    await loadCities(); status(`Fetched ${name}.`);
-  } catch (e) { status(`Fetch failed: ${e.message}`); }
-};
+  try {
+    status(`Fetching ${name} from Overpass (can take minutes)…`);
+    await api("/api/workbench/generation/fetch-osm-city", { city: name });
+    await loadCities();
+    status(`Fetched ${name}.`);
+  } catch (error) { status(`Fetch failed: ${error.message}`); }
+});
 
-loadCities().catch((e) => status(`Cannot reach the local server: ${e.message}`));
+el("bulk-run").addEventListener("click", async () => {
+  try {
+    status("Bulk generating (one POI pool and matrix set per city)…");
+    const body = requestBody();
+    body.nCustomersList = el("bulk-sizes").value;
+    body.demandTypesList = el("bulk-demands").value;
+    body.avgRouteSizesList = el("bulk-ars").value;
+    const data = await api("/api/workbench/generation/bulk", body);
+    const results = Array.isArray(data.results) ? data.results : [];
+    results.slice().reverse().forEach((result) => {
+      state.instances.unshift({
+        base_name: result.base_name,
+        folder: result.folder,
+        files: result.files,
+        summary: result.summary || {},
+        vrptw: result.vrptw || null,
+        city: body.city,
+        n: result.summary?.customers ?? "?",
+        seed: body.seed,
+        solved: null,
+        rendered: null,
+      });
+    });
+    state.bulkBases = results.map((result) => result.base_name).filter(Boolean);
+    el("bulk-download").disabled = state.bulkBases.length === 0;
+    renderInstanceList();
+    const skipped = (data.city_reports || []).filter((report) => report.status === "skipped").length;
+    status(`Bulk generated ${data.generated} instance(s)${skipped ? `, ${skipped} city report(s) skipped` : ""}.`);
+    activateTab("visualize");
+  } catch (error) { status(`Bulk generation failed: ${error.message}`); }
+});
+
+el("bulk-download").addEventListener("click", async () => {
+  if (!state.bulkBases?.length) return;
+  try {
+    status("Zipping the bulk batch…");
+    const blob = await apiBlob("/api/workbench/generation/bulk-download", { base_names: state.bulkBases });
+    saveBlob(blob, "mamut-generated-instances.zip");
+    status("Downloaded mamut-generated-instances.zip");
+  } catch (error) { status(`Download failed: ${error.message}`); }
+});
+
+el("clear").addEventListener("click", () => {
+  previewLayers.clearLayers();
+  clearRouteLayers();
+  state.lastRendered = null;
+  if (state.selected) state.selected.rendered = null;
+  renderLegend();
+  status("Map cleared.");
+});
+
+loadCities().catch((error) => status(`Cannot reach the local server: ${error.message}`));
 </script>
 </body>
 </html>
