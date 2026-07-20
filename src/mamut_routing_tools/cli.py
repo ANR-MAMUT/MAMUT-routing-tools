@@ -15,6 +15,37 @@ app = typer.Typer(
     add_completion=False,
 )
 
+
+def _version_callback(value: bool) -> None:
+    """Print the version and the package location, then exit.
+
+    The location matters as much as the number: it distinguishes a PyPI install
+    from an editable source checkout, which is the usual reason a command does
+    not behave the way the docs say it should.
+    """
+    if not value:
+        return
+    from mamut_routing_tools import __version__
+
+    typer.echo(f"mamut-tools {__version__} ({Path(__file__).parent})")
+    raise typer.Exit()
+
+
+@app.callback()
+def main(
+    version: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--version",
+            "-V",
+            callback=_version_callback,
+            is_eager=True,
+            help="Show the installed version and package location, then exit.",
+        ),
+    ] = None,
+) -> None:
+    """Entry point holding the global options; sub-commands do the work."""
+
 roadgraph_app = typer.Typer(help="Road-graph engine (OpenStreetMapX-compatible construction).", no_args_is_help=True)
 geometry_app = typer.Typer(help="BKS route-geometry materialization.", no_args_is_help=True)
 osm_app = typer.Typer(help="OSM city acquisition (Nominatim + Overpass).", no_args_is_help=True)

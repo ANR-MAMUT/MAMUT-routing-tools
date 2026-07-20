@@ -62,6 +62,15 @@ uv run mamut-tools gui --help          # a command group: lists its sub-commands
 uv run mamut-tools gui start --help    # a sub-command: its options and defaults
 ```
 
+To find out which build you are actually running, use `--version` (or `-V`):
+
+```bash
+uv run mamut-tools --version
+# mamut-tools 0.3.3 (/path/to/MAMUT-routing-tools/src/mamut_routing_tools)
+```
+
+It prints the version alongside the package location, which tells you whether you are on a PyPI install or an editable source checkout.
+
 The top level lists the command groups (`roadgraph`, `geometry`, `osm`, `generate`, `solve`, `gui`); drilling down one level at a time is the intended way to explore. When in doubt, add `--help` to whatever you just typed.
 
 ### Starting and stopping the workbench GUI
@@ -92,9 +101,10 @@ uv run mamut-tools gui stop     # terminate the background server
 
 ### If the tool does not behave as documented
 
-You are most likely running a different revision than you think. Two things to check, in order:
+You are most likely running a different revision than you think. Start by asking the tool itself, then bring the checkout up to date:
 
 ```bash
+uv run mamut-tools --version    # which version, and from which directory?
 git pull --recurse-submodules   # update the repo AND the vendored submodule
 uv sync                         # re-resolve dependencies afterwards
 ```
