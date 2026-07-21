@@ -182,8 +182,35 @@ def test_preview_generate_solve_render_round_trip(client: TestClient) -> None:
     assert download.status_code == 200 and download.headers["content-type"] == "application/zip"
 
 
-def test_td_build_is_explicitly_unsupported(client: TestClient) -> None:
-    assert client.post("/api/workbench/generation/td-build", json={}).status_code == 501
+def test_td_build_derives_tdvrp_and_tdvrptw_twins(client: TestClient) -> None:
+    generated = client.post(
+        "/api/workbench/generation/single",
+        json={
+            "city": "Testville",
+            "nCustomers": 3,
+            "seed": 5,
+            "method": "parametric_attach",
+            "deriveVrptw": True,
+        },
+    ).json()
+    assert generated["ok"] and generated["instance_id"]
+
+    built = client.post(
+        "/api/workbench/generation/td-build",
+        json={"instance_id": generated["instance_id"], "model": "wave", "intensity": "moderate"},
+    ).json()
+    assert built["ok"] is True
+    assert built["action"] in ("derived", "kept")
+    assert len(built["combos"]) == 1
+    combo = built["combos"][0]
+    assert combo["model"] == "wave" and combo["intensity"] == "moderate"
+    folder = Path(generated["folder"])
+    assert (folder / combo["tdvrptw_twin"]).is_file()
+    assert (folder / combo["tdvrp_twin"]).is_file()
+
+
+def test_td_build_rejects_unknown_instance(client: TestClient) -> None:
+    assert client.post("/api/workbench/generation/td-build", json={"instance_id": "nope"}).status_code == 404
 
 
 def test_instances_file_refuses_paths_outside_the_workspace(client: TestClient) -> None:

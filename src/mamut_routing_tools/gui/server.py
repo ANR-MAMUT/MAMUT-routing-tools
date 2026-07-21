@@ -314,6 +314,39 @@ def _generate_single_payload(
     return result
 
 
+def _derive_td_payload(
+    payload: dict[str, Any], workspace: Path, context: JobContext | None = None
+) -> dict[str, Any]:
+    """Derive the TDVRP + TDVRPTW twins of an already-generated instance (needs
+    its derive-vrptw twin): traffic overlay -> ATFs -> lift the provided windows."""
+    from mamut_routing_tools.generation.td import derive_td_from_vrptw
+
+    instance_id = str(payload.get("instance_id") or payload.get("instanceId") or "")
+    if instance_id:
+        record = _workspace_instance(workspace, instance_id)
+        folder = Path(record["folder"])
+        base = str(record["base_name"])
+    else:
+        folder = Path(str(payload.get("folder") or ""))
+        base = str(payload.get("base_name") or payload.get("baseName") or "")
+    if not base or not folder.is_dir() or not _contained(folder, instances_dir(workspace, create=False)):
+        raise ValueError("td-build needs a known generated instance (instance_id, or folder + base_name)")
+    if context is not None:
+        context.progress("Deriving TD twins (traffic -> ATFs -> TW lift)")
+        context.check_cancelled()
+    result = derive_td_from_vrptw(
+        folder,
+        base,
+        model=str(payload.get("model") or "bpr"),
+        intensity=str(payload.get("intensity") or "moderate"),
+        all_combos=bool(payload.get("all") or payload.get("allCombos")),
+        seed=int(payload.get("seed") or 42),
+        force=bool(payload.get("force")),
+    )
+    result["instance_id"] = instance_id or instance_id_for(folder, base)
+    return result
+
+
 def _generate_bulk_payload(
     payload: dict[str, Any], workspace: Path, context: JobContext | None = None
 ) -> dict[str, Any]:
@@ -514,12 +547,14 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         )
 
     @app.post("/api/workbench/generation/td-build")
-    async def generation_td_build() -> Any:
-        return _payload_error(
-            501,
-            "The official TD family pipeline stays in the MAMUT-routing repository for now: "
-            "run 'mamut-routing-publish workbench build-family <City>' there.",
-        )
+    async def generation_td_build(request: Request) -> Any:
+        payload = await request.json()
+        try:
+            return _derive_td_payload(payload, workspace)
+        except KeyError:
+            return _payload_error(404, "Unknown workspace instance")
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
 
     def submit_job(submission: JobSubmission) -> dict[str, Any]:
         payload = submission.payload
