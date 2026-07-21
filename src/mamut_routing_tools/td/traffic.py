@@ -11,7 +11,12 @@ Traffic models:
   by road class, distance to the city centre and a seeded per-edge jitter.
 - ``bpr``: a synthetic commuter population routed on the free-flow fastest
   path; per-edge hourly flows drive the Bureau of Public Roads volume-delay
-  function. (Ported separately; see :func:`bpr_speeds`.)
+  function. Routing is grouped by the trip's workplace endpoint (the small POI
+  pool), so Dijkstra runs ~twice per workplace instead of once per home:
+  ``work -> home`` trips keep a forward tree (bit-identical to a per-origin
+  forward routing) and ``home -> work`` trips use a reverse tree over the
+  transposed graph, which matches forward routing except on equal-cost
+  shortest-path ties. (Ported separately; see :func:`bpr_speeds`.)
 
 The bridge is a git-ignored intermediate. The canonical published data is
 whatever the publisher freezes into the road-graph speed sidecars, so speeds
@@ -266,84 +271,195 @@ def _departure_s(rng: np.random.Generator, mu_h: float, sigma_h: float) -> float
 
 def _sample_trips(
     rng: np.random.Generator, commuters: int, num_vertices: int, work_pool: list[int]
-) -> list[tuple[int, int, float]]:
-    """Commuter trip list ``(origin, destination, departure_s)``: a morning
-    home->work and evening work->home per commuter, plus a lunch round trip
-    with probability 0.25. Draw order matches the workbench for reproducibility."""
+) -> list[tuple[int, int, float, bool]]:
+    """Commuter trip list ``(origin, destination, departure_s, to_work)``: a
+    morning home->work and evening work->home per commuter, plus a lunch round
+    trip with probability 0.25. ``to_work`` is ``True`` for the home->work legs
+    (morning, lunch back) and ``False`` for the work->home legs (evening, lunch
+    return); it lets the router group trips by their workplace endpoint (which
+    stays in the small work pool) so each direction needs only a per-workplace
+    Dijkstra tree. Draw order matches the workbench for reproducibility."""
     n_work = len(work_pool)
-    trips: list[tuple[int, int, float]] = []
+    trips: list[tuple[int, int, float, bool]] = []
     for _ in range(commuters):
         home = int(rng.integers(0, num_vertices))
         work = work_pool[int(rng.integers(0, n_work))]
         if work == home:
             continue
-        trips.append((home, work, _departure_s(rng, 8.0, 0.75)))
-        trips.append((work, home, _departure_s(rng, 17.5, 1.0)))
+        trips.append((home, work, _departure_s(rng, 8.0, 0.75), True))
+        trips.append((work, home, _departure_s(rng, 17.5, 1.0), False))
         if rng.random() < 0.25:
-            trips.append((work, home, _departure_s(rng, 12.25, 0.5)))
-            trips.append((home, work, _departure_s(rng, 13.5, 0.5)))
+            trips.append((work, home, _departure_s(rng, 12.25, 0.5), False))
+            trips.append((home, work, _departure_s(rng, 13.5, 0.5), True))
     return trips
 
 
-def _accumulate_flows(
-    csr: csr_matrix,
-    origins: list[int],
-    by_origin: dict[int, list[tuple[int, float]]],
+def _reconstruct_reverse_path(pred_row: np.ndarray, home: int, work: int) -> list[int] | None:
+    """Rebuild the ``home -> work`` path (in original-graph order) from a
+    reverse-Dijkstra predecessor row rooted at ``work`` over the TRANSPOSED
+    graph.
+
+    In the transposed graph a shortest-path tree rooted at ``work`` gives, for
+    each vertex, its predecessor toward ``work``; because the graph is
+    transposed, that predecessor is the *next* vertex on the original ``home ->
+    work`` path. Walking predecessors from ``home`` therefore yields the path
+    in ``home ... work`` order directly (no reversal). Returns ``[home]`` when
+    ``home == work`` (the caller skips ``len < 2``) or ``None`` if unreachable.
+    """
+    if home == work:
+        return [home]
+    path = [home]
+    cur = home
+    while True:
+        nxt = int(pred_row[cur])
+        if nxt < 0:
+            return None
+        path.append(nxt)
+        if nxt == work:
+            break
+        cur = nxt
+    return path
+
+
+def _edge_clock_bins(
+    path: list[int],
+    departure: float,
+    times: np.ndarray,
+    edge_index: dict[tuple[int, int], int],
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Map an origin->dest ``path`` to its traversed edge ids and the hourly
+    bin each edge is *entered* at, given the trip ``departure`` (seconds).
+
+    The entry clock is a left-fold of the departure time over the traversed
+    edge free-flow times, which ``cumsum([departure, *times])`` reproduces
+    exactly. This is the single clock/bin routine shared by both routing
+    directions, so the only difference from a pure-forward routing is which
+    equal-cost shortest path the reverse tree picks. Consecutive vertex pairs
+    are looked up in ``edge_index``, breaking on the first missing edge (mirror
+    of the graph's directed-edge coverage). Returns ``(None, None)`` when no
+    edge is traversed.
+    """
+    edge_ids: list[int] = []
+    for k in range(len(path) - 1):
+        edge_id = edge_index.get((path[k], path[k + 1]))
+        if edge_id is None:
+            break
+        edge_ids.append(edge_id)
+    if not edge_ids:
+        return None, None
+    ids = np.asarray(edge_ids, dtype=np.int64)
+    # Entry clock per traversed edge: departure, then the running sum of the
+    # edge times before it -- a left-fold identical to the sequential
+    # ``clock += times[edge]`` accumulation.
+    clocks = np.cumsum(np.concatenate(([departure], times[ids])))[:-1]
+    bins = np.clip((clocks // TD_BIN_SECONDS).astype(np.int64), 0, TD_NUM_BINS - 1)
+    return ids, bins
+
+
+def _route_and_accumulate(
+    graph_csr: csr_matrix,
+    by_source: dict[int, list[tuple[int, float]]],
     edge_index: dict[tuple[int, int], int],
     times: np.ndarray,
     num_vertices: int,
-) -> np.ndarray:
-    """Per-edge hourly flows: one Dijkstra per distinct origin (batched in
-    memory-bounded chunks) over the free-flow times, walking each routed path
-    and incrementing the flow of every traversed edge at its entry-time bin
-    (the clock advances by each edge's free-flow time).
+    counts: np.ndarray,
+    *,
+    reverse: bool,
+) -> None:
+    """Route every trip grouped under a common ``source`` workplace and add its
+    per-edge entry-time flows into ``counts`` (flat ``edge_id * TD_NUM_BINS +
+    bin`` layout).
 
-    Vectorized but bit-identical to a per-edge scalar accumulation: the entry
-    clock is a left-fold of the departure time over the traversed edge times,
-    which ``cumsum([departure, *times])`` reproduces exactly; the flows are
-    integer counts, so per-chunk ``bincount`` gives the same totals as scalar
-    ``+= 1``. Accumulation order does not matter (exact integer sums).
+    One Dijkstra tree per ``source`` (batched in memory-bounded chunks) serves
+    all trips sharing that source. ``by_source[source]`` holds ``(home,
+    departure)`` pairs: with ``reverse=False`` the source is the workplace and
+    each path is the forward ``work -> home`` route; with ``reverse=True``
+    ``graph_csr`` is the transposed graph, the source is still the workplace,
+    and each path is rebuilt as the original-graph ``home -> work`` route. In
+    both cases the reconstructed ``path`` is already in origin->dest order and
+    ``departure`` is that trip's departure, so the shared clock helper applies
+    unchanged.
     """
-    n_edges = len(edge_index)
-    counts = np.zeros(n_edges * TD_NUM_BINS, dtype=np.int64)
-    if not origins:
-        return counts.reshape(n_edges, TD_NUM_BINS).astype(np.float64)
-    chunk = max(1, min(len(origins), _DIJKSTRA_CHUNK_BYTES // (12 * max(num_vertices, 1))))
-    origins_arr = np.asarray(origins, dtype=np.int64)
-    for start in range(0, len(origins_arr), chunk):
-        block = origins_arr[start : start + chunk]
-        dist, pred = dijkstra(csr, directed=True, indices=block, return_predecessors=True)
+    sources = sorted(by_source)
+    if not sources:
+        return
+    chunk = max(1, min(len(sources), _DIJKSTRA_CHUNK_BYTES // (12 * max(num_vertices, 1))))
+    sources_arr = np.asarray(sources, dtype=np.int64)
+    for start in range(0, len(sources_arr), chunk):
+        block = sources_arr[start : start + chunk]
+        dist, pred = dijkstra(graph_csr, directed=True, indices=block, return_predecessors=True)
         edge_id_parts: list[np.ndarray] = []
         bin_parts: list[np.ndarray] = []
-        for row, origin in enumerate(block):
+        for row, src in enumerate(block):
             pred_row = pred[row]
             dist_row = dist[row]
-            source = int(origin)
-            for destination, departure in by_origin[source]:
-                if not np.isfinite(dist_row[destination]):
+            source = int(src)
+            for home, departure in by_source[source]:
+                if not np.isfinite(dist_row[home]):
                     continue
-                path = _reconstruct_path(pred_row, source, destination)
+                if reverse:
+                    path = _reconstruct_reverse_path(pred_row, home, source)
+                else:
+                    path = _reconstruct_path(pred_row, source, home)
                 if path is None or len(path) < 2:
                     continue
-                edge_ids: list[int] = []
-                for k in range(len(path) - 1):
-                    edge_id = edge_index.get((path[k], path[k + 1]))
-                    if edge_id is None:
-                        break
-                    edge_ids.append(edge_id)
-                if not edge_ids:
+                ids, bins = _edge_clock_bins(path, departure, times, edge_index)
+                if ids is None:
                     continue
-                ids = np.asarray(edge_ids, dtype=np.int64)
-                # Entry clock per traversed edge: departure, then the running
-                # sum of the edge times before it -- a left-fold identical to
-                # the sequential ``clock += times[edge]`` accumulation.
-                clocks = np.cumsum(np.concatenate(([departure], times[ids])))[:-1]
-                bins = np.clip((clocks // TD_BIN_SECONDS).astype(np.int64), 0, TD_NUM_BINS - 1)
                 edge_id_parts.append(ids)
                 bin_parts.append(bins)
         if edge_id_parts:
             flat = np.concatenate(edge_id_parts) * TD_NUM_BINS + np.concatenate(bin_parts)
             counts += np.bincount(flat, minlength=counts.size)
+
+
+def _accumulate_flows(
+    csr: csr_matrix,
+    trips: list[tuple[int, int, float, bool]],
+    edge_index: dict[tuple[int, int], int],
+    times: np.ndarray,
+    num_vertices: int,
+) -> np.ndarray:
+    """Per-edge hourly flows over the free-flow times, grouped by the trip's
+    workplace endpoint so Dijkstra runs once per workplace rather than once per
+    home.
+
+    Trips come in two directions and both endpoints' workplace side is drawn
+    from the small POI pool:
+
+    - ``work -> home`` (``to_work is False``): grouped by origin = workplace and
+      routed with a FORWARD Dijkstra tree. Bit-identical to a per-origin
+      forward routing.
+    - ``home -> work`` (``to_work is True``): grouped by destination = workplace
+      and routed with a REVERSE Dijkstra tree over the transposed graph. One
+      reverse tree per workplace yields the ``home -> work`` shortest path for
+      every home. This diverges from a pure-forward routing only when several
+      shortest paths tie on cost (the reverse tree may keep a different
+      equal-cost path).
+
+    Both directions feed the same clock/bin accumulation, so the entry-time
+    flows stay a left-fold of departure over edge times. Flows are integer
+    counts, so per-chunk ``bincount`` gives the same totals as scalar ``+= 1``;
+    accumulation order does not matter (exact integer sums).
+    """
+    n_edges = len(edge_index)
+    counts = np.zeros(n_edges * TD_NUM_BINS, dtype=np.int64)
+    to_home_by_work: dict[int, list[tuple[int, float]]] = defaultdict(list)
+    to_work_by_work: dict[int, list[tuple[int, float]]] = defaultdict(list)
+    for origin, destination, departure, to_work in trips:
+        if to_work:
+            # home -> work: destination is the workplace; store (home, dep).
+            to_work_by_work[destination].append((origin, departure))
+        else:
+            # work -> home: origin is the workplace; store (home, dep).
+            to_home_by_work[origin].append((destination, departure))
+    _route_and_accumulate(
+        csr, to_home_by_work, edge_index, times, num_vertices, counts, reverse=False
+    )
+    csr_t = csr.transpose().tocsr()
+    _route_and_accumulate(
+        csr_t, to_work_by_work, edge_index, times, num_vertices, counts, reverse=True
+    )
     return counts.reshape(n_edges, TD_NUM_BINS).astype(np.float64)
 
 
@@ -374,6 +490,13 @@ def bpr_speeds(
     the free-flow fastest path, accumulates per-edge hourly flows at edge
     entry time, then applies the BPR volume-delay function with class-based
     capacities. Deterministic per seed within Python.
+
+    Routing is grouped by each trip's workplace endpoint (the small POI pool)
+    rather than by home, so Dijkstra runs ~2*|work pool| times instead of once
+    per home: ``work -> home`` trips keep a forward tree per workplace (bit-
+    identical to a per-origin forward routing) and ``home -> work`` trips use a
+    reverse tree per workplace over the transposed graph, which matches forward
+    routing except on equal-cost shortest-path ties.
     """
     num_vertices = graph.vertex_count
     rng = np.random.Generator(np.random.PCG64(seed))
@@ -387,12 +510,7 @@ def bpr_speeds(
     cols = np.fromiter((edge.v for edge in edges), dtype=np.int64, count=len(edges))
     csr = csr_matrix((times, (rows, cols)), shape=(num_vertices, num_vertices))
 
-    by_origin: dict[int, list[tuple[int, float]]] = defaultdict(list)
-    for origin, destination, departure in trips:
-        by_origin[origin].append((destination, departure))
-    origins = sorted(by_origin)
-
-    flows = _accumulate_flows(csr, origins, by_origin, edge_index, times, num_vertices)
+    flows = _accumulate_flows(csr, trips, edge_index, times, num_vertices)
     return _bpr_profiles(edges, flows), len(trips)
 
 
