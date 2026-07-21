@@ -12,7 +12,7 @@ The bridge is a git-ignored per-city intermediate under
 - ``nodes-<instance_base>.json`` — instance node -> OSM node ids, depot
   first, for one stage-1 instance.
 
-The bridge is Julia's only output surface (language-boundary tier 3): every
+The bridge is produced by mamut_routing_tools.td.traffic (Python); every
 published byte is canonicalized downstream by the Python builder.
 """
 

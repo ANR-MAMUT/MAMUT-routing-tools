@@ -3,7 +3,7 @@
 The Python side of the deliberately 3-stepped generation. Per base
 (city x n x method):
 
-1. ``build_base`` (stage ``generate-base``, after the Julia sampling +
+1. ``build_base`` (stage ``generate-base``, after the Python sampling +
    bridge export): builds the full-city road graph from the bridge, trims it
    to the union of pinned free-flow fastest-path edges (static per-edge
    ``speed_limit`` weights; bit-exact distance-preservation re-check),
@@ -28,7 +28,7 @@ The Python side of the deliberately 3-stepped generation. Per base
    rounding, and the post-lift audit holds for every overlay (hard assert).
 
 Python is the sole serializer (language-boundary tier 1): every published
-byte is canonical JSON written here; Julia only feeds the git-ignored bridge.
+byte is canonical JSON written here; the git-ignored bridge is produced in Python (mamut_routing_tools.td.traffic).
 """
 
 from __future__ import annotations
@@ -112,9 +112,9 @@ ROAD_CACHE_MAX_N = 100
 VRP_EXPORT_MAX_N = 100
 TD_MODELS = ("bpr", "wave")
 TD_INTENSITIES = ("light", "moderate", "heavy")
-GENERATOR_NAME = "mamut-routing-workbench"
+GENERATOR_NAME = "mamut-routing-tools"
 PIPELINE_VERSION = 3
-AUTHORS = "MAMUT-routing workbench (generated instance)"
+AUTHORS = "MAMUT-routing-tools (generated instance)"
 
 
 def capacity_lower_bound(demands: list[int], capacity: int) -> int:

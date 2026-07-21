@@ -1,7 +1,7 @@
 [project]
 name = "mamut-routing-tools"
-version = "0.3.3"
-description = "Local generation tool suite for MAMUT-routing: OSM acquisition, road-graph engine, route geometry, and CVRP/VRPTW instance generation."
+version = "0.4.0"
+description = "Local generation tool suite for MAMUT-routing: OSM acquisition, road-graph engine, route geometry, and CVRP / VRPTW / time-dependent (TDVRP, TDVRPTW) instance generation."
 readme = "README.md"
 authors = [
     { name = "Florian Rascoussier", email = "onyr.maintainer@gmail.com" },
@@ -15,6 +15,9 @@ keywords = [
     "VRP",
     "CVRP",
     "VRPTW",
+    "TDVRP",
+    "TDVRPTW",
+    "time-dependent routing",
     "benchmarking",
     "instance generation",
     "OpenStreetMap",

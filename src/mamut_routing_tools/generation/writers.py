@@ -222,7 +222,7 @@ def build_vrp_json_payload(
         "source_city": source_city,
         "source_seed": source_seed,
         "source_folder": source_folder,
-        "generator_version": "mamut-routing-tools.workbench-v2",
+        "generator_version": "mamut-routing-tools-v2",
         "artifact_paths": artifact_paths,
         "sibling_variant_paths": sibling_variant_paths,
         "derived_problem_paths": {},
