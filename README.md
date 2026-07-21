@@ -1,22 +1,22 @@
 # MAMUT-routing-tools
 
-Local generation tool suite for the [MAMUT-routing](https://github.com/ANR-MAMUT/MAMUT-routing) benchmark project: OSM city acquisition, a road-graph engine, BKS route-geometry materialization, and interactive CVRP/VRPTW instance generation. The public MAMUT-routing website is fully static; everything compute-heavy lives here and runs on your own machine.
+Local generation tool suite for the [MAMUT-routing](https://github.com/ANR-MAMUT/MAMUT-routing) benchmark project: OSM city acquisition, a road-graph engine, BKS route-geometry materialization, and interactive CVRP / VRPTW / time-dependent (TDVRP, TDVRPTW) instance generation. The public MAMUT-routing website is fully static; everything compute-heavy lives here and runs on your own machine.
 
 Part of the [ANR MAMUT project](https://anr.fr/Projet-ANR-22-CE22-0016).
 
 ## Status
 
-Beta. The tool suite is being extracted from the website's former Julia backend; interfaces may change between releases.
+Beta. All benchmark generation now lives here: the website's former Julia backend has been fully ported to Python and removed. Interfaces may still change between releases.
 
 ## Components
 
 - `mamut-tools roadgraph`: build and inspect drivable road graphs from OSM XML extracts. The construction is a faithful Python port of the OpenStreetMapX.jl pipeline the project previously used (same road classes, oneway rules, intersection segmentation, ENU distances, and strongly-connected trim), so graphs and route geometry stay consistent with previously published data.
 - `mamut-tools geometry`: materialize road-following polylines for Best-Known Solutions (BKS), in the exact artifact format the MAMUT-routing website consumes.
 - `mamut-tools osm fetch-city`: download and structurally validate a purpose-filtered OSM extract for a city by name, using atomic tiled road and POI acquisition plus a persistent tile cache when a single Overpass query would be too large.
-- `mamut-tools generate`: interactive CVRP/VRPTW instance generation on city road graphs (single, bulk, preview, VRPTW derivation), the port of the historical MAMUT workbench generator.
+- `mamut-tools generate`: per-instance generation on city road graphs — `single` (CVRP), `preview`, `derive-vrptw` (the fastest-metric VRPTW twin), and `derive-td` (the TDVRP + TDVRPTW twins: traffic overlay → arrival-time functions → time-window lift to time-dependent feasibility). Batch family generation (many cities × sizes) is delegated to per-campaign scripts that call the `mamut_routing_tools.family` and `mamut_routing_tools.td` library.
 - `mamut-tools solve`: PyVRP solving of generated and benchmark instances via mamut-routing-lib; with the `kayros` extra (`pip install 'mamut-routing-tools[kayros]'`), [KAYROS](https://pypi.org/project/kayros/) solves the time-dependent instances (Duration objective, anytime with exact certification tooling).
 - `mamut-tools gui`: a CLI-owned local workbench GUI (loopback server with token security) for fetching cities, previewing, generating, solving, and rendering road-following routes on a map. Long operations run as persistent jobs with real state/logs; solver runs are checker-validated, retained across restarts, and comparable by objective, fleet, loads, route edges, and customer grouping.
-- Planned: the official time-dependent benchmark campaign pipeline.
+The traffic models (`bpr` commuter simulation, `wave` rush-hour dip) and the road-graph time-dependent travel model live in `mamut_routing_tools.td`; the family build engine (base publish, VRPTW derivation, TD-twin materialization) lives in `mamut_routing_tools.family`.
 
 ## Install
 
