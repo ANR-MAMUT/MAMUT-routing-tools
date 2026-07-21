@@ -36,11 +36,17 @@ from __future__ import annotations
 import json
 import math
 import os
+import warnings
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import dijkstra
 
+from mamut_routing_tools.generation.matrices import _reconstruct_path
+from mamut_routing_tools.generation.pois import DEFAULT_CATEGORIES, find_pois
 from mamut_routing_tools.geo import haversine_m
 from mamut_routing_tools.roadgraph.build import SPEED_ROADS_URBAN, RoadGraph, load_road_graph
 
@@ -218,25 +224,155 @@ def wave_speeds(
 
 
 # ---------------------------------------------------------------------------
-# bpr model (ported in M9.2)
+# bpr model
 # ---------------------------------------------------------------------------
+
+# Memory budget for one chunked multi-source Dijkstra call: dist (float64) +
+# predecessors (int32) is 12 bytes per (source, vertex) cell. Chunking bounds
+# transient memory while amortizing the scipy C-call overhead over many
+# sources; the flow accumulation is exact and chunk-size independent.
+_DIJKSTRA_CHUNK_BYTES = 256_000_000
+
+
+def bpr_work_pool(graph: RoadGraph, osm_path: str | Path) -> list[int]:
+    """Workplace vertex pool: amenity-POI-snapped graph vertices when the OSM
+    file has enough of them (>= 50), otherwise all vertices (uniform
+    fallback). Mirrors ``td_work_pool``: each POI snaps to its nearest road
+    node, which must itself be a graph vertex (the ``findnode`` + ``md.v``
+    membership rule); first-seen dedup; sorted."""
+    pool: list[int] = []
+    seen: set[int] = set()
+    try:
+        for poi in find_pois(osm_path, DEFAULT_CATEGORIES):
+            osm_id = graph.nearest_node(poi.lat, poi.lon)
+            if osm_id is None or osm_id not in graph.vertex_of:
+                continue
+            vertex = graph.vertex_of[osm_id]
+            if vertex not in seen:
+                seen.add(vertex)
+                pool.append(vertex)
+    except Exception:  # noqa: BLE001 - keep the partial pool and warn, as td_work_pool does
+        warnings.warn("POI workplace pool failed; falling back to uniform workplaces", stacklevel=2)
+    if len(pool) >= 50:
+        return sorted(pool)
+    return list(range(graph.vertex_count))
+
+
+def _departure_s(rng: np.random.Generator, mu_h: float, sigma_h: float) -> float:
+    """A departure time in seconds: a normal hour clamped into the day."""
+    hour = min(max(mu_h + sigma_h * float(rng.standard_normal()), 0.25), 23.75)
+    return hour * TD_BIN_SECONDS
+
+
+def _sample_trips(
+    rng: np.random.Generator, commuters: int, num_vertices: int, work_pool: list[int]
+) -> list[tuple[int, int, float]]:
+    """Commuter trip list ``(origin, destination, departure_s)``: a morning
+    home->work and evening work->home per commuter, plus a lunch round trip
+    with probability 0.25. Draw order matches the workbench for reproducibility."""
+    n_work = len(work_pool)
+    trips: list[tuple[int, int, float]] = []
+    for _ in range(commuters):
+        home = int(rng.integers(0, num_vertices))
+        work = work_pool[int(rng.integers(0, n_work))]
+        if work == home:
+            continue
+        trips.append((home, work, _departure_s(rng, 8.0, 0.75)))
+        trips.append((work, home, _departure_s(rng, 17.5, 1.0)))
+        if rng.random() < 0.25:
+            trips.append((work, home, _departure_s(rng, 12.25, 0.5)))
+            trips.append((home, work, _departure_s(rng, 13.5, 0.5)))
+    return trips
+
+
+def _accumulate_flows(
+    csr: csr_matrix,
+    origins: list[int],
+    by_origin: dict[int, list[tuple[int, float]]],
+    edge_index: dict[tuple[int, int], int],
+    times: np.ndarray,
+    num_vertices: int,
+) -> np.ndarray:
+    """Per-edge hourly flows: one Dijkstra per distinct origin (batched in
+    memory-bounded chunks) over the free-flow times, walking each routed path
+    and incrementing the flow of every traversed edge at its entry-time bin
+    (the clock advances by each edge's free-flow time)."""
+    flows = np.zeros((len(edge_index), TD_NUM_BINS), dtype=np.float64)
+    if not origins:
+        return flows
+    chunk = max(1, min(len(origins), _DIJKSTRA_CHUNK_BYTES // (12 * max(num_vertices, 1))))
+    origins_arr = np.asarray(origins, dtype=np.int64)
+    for start in range(0, len(origins_arr), chunk):
+        block = origins_arr[start : start + chunk]
+        dist, pred = dijkstra(csr, directed=True, indices=block, return_predecessors=True)
+        for row, origin in enumerate(block):
+            pred_row = pred[row]
+            dist_row = dist[row]
+            source = int(origin)
+            for destination, departure in by_origin[source]:
+                if not np.isfinite(dist_row[destination]):
+                    continue
+                path = _reconstruct_path(pred_row, source, destination)
+                if path is None or len(path) < 2:
+                    continue
+                clock = departure
+                for k in range(len(path) - 1):
+                    edge_id = edge_index.get((path[k], path[k + 1]))
+                    if edge_id is None:
+                        break
+                    bin_index = min(max(int(clock // TD_BIN_SECONDS), 0), TD_NUM_BINS - 1)
+                    flows[edge_id, bin_index] += 1.0
+                    clock += times[edge_id]
+    return flows
+
+
+def _bpr_profiles(edges: list[BridgeEdge], flows: np.ndarray) -> list[list[float]]:
+    """BPR volume-delay speeds: ``t = t_free * (1 + alpha*(flow/cap)^beta)``,
+    multiplier capped, speed floored at a free-flow fraction, mm/s rounded."""
+    free = np.array([td_free_speed_ms(edge.road_class) for edge in edges], dtype=np.float64)[:, None]
+    capacity = np.array([TD_CAPACITY_VEH_H.get(edge.road_class, 600.0) for edge in edges], dtype=np.float64)[:, None]
+    multiplier = np.minimum(
+        1.0 + TD_BPR_ALPHA * (flows / capacity) ** TD_BPR_BETA, TD_BPR_MULTIPLIER_CAP
+    )
+    raw = np.maximum(free / multiplier, free * TD_MIN_SPEED_FACTOR)
+    rounded = np.maximum(np.round(raw, TD_SPEED_DECIMALS), 10.0 ** (-TD_SPEED_DECIMALS))
+    return rounded.tolist()
 
 
 def bpr_speeds(
     graph: RoadGraph,
     edges: list[BridgeEdge],
     osm_path: str | Path,
-    center_latlon: tuple[float, float],
     intensity: str,
     seed: int,
 ) -> tuple[list[list[float]], int]:
     """Per-edge 24-bin BPR speed profiles and the total number of trips routed.
 
-    Not yet ported (M9.2): commuter sampling, POI work pool, per-origin
-    Dijkstra with entry-time flow accumulation, and the BPR volume-delay
-    function.
+    Samples ``trips_per_vertex * |V|`` commuters (homes uniform on vertices,
+    workplaces from the POI pool with uniform fallback), routes every trip on
+    the free-flow fastest path, accumulates per-edge hourly flows at edge
+    entry time, then applies the BPR volume-delay function with class-based
+    capacities. Deterministic per seed within Python.
     """
-    raise NotImplementedError("bpr traffic model not yet ported (Plan 9 M9.2); use model='wave'")
+    num_vertices = graph.vertex_count
+    rng = np.random.Generator(np.random.PCG64(seed))
+    commuters = round(TD_BPR_TRIPS_PER_VERTEX[intensity] * num_vertices)
+    work_pool = bpr_work_pool(graph, osm_path)
+    trips = _sample_trips(rng, commuters, num_vertices, work_pool)
+
+    edge_index = {(edge.u, edge.v): index for index, edge in enumerate(edges)}
+    times = np.array([edge.length_m / td_free_speed_ms(edge.road_class) for edge in edges], dtype=np.float64)
+    rows = np.fromiter((edge.u for edge in edges), dtype=np.int64, count=len(edges))
+    cols = np.fromiter((edge.v for edge in edges), dtype=np.int64, count=len(edges))
+    csr = csr_matrix((times, (rows, cols)), shape=(num_vertices, num_vertices))
+
+    by_origin: dict[int, list[tuple[int, float]]] = defaultdict(list)
+    for origin, destination, departure in trips:
+        by_origin[origin].append((destination, departure))
+    origins = sorted(by_origin)
+
+    flows = _accumulate_flows(csr, origins, by_origin, edge_index, times, num_vertices)
+    return _bpr_profiles(edges, flows), len(trips)
 
 
 # ---------------------------------------------------------------------------
@@ -402,7 +538,7 @@ def export_bridge(
             if model == "wave":
                 speeds = wave_speeds(edges, vertex_ll, center, intensity, combo_seed)
             else:
-                speeds, num_trips = bpr_speeds(graph, edges, osm_path, center, intensity, combo_seed)
+                speeds, num_trips = bpr_speeds(graph, edges, osm_path, intensity, combo_seed)
             _write_json(
                 speeds_path,
                 speeds_payload(city_slug, model, intensity, combo_seed, num_trips, speeds),

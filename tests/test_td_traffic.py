@@ -18,6 +18,9 @@ from mamut_routing_tools.td.traffic import (
     TD_MIN_SPEED_FACTOR,
     TD_NUM_BINS,
     TrafficModelError,
+    _bpr_profiles,
+    bpr_speeds,
+    bpr_work_pool,
     bridge_seed,
     collect_edges,
     export_bridge,
@@ -198,6 +201,73 @@ def test_unknown_model_and_intensity_rejected(fixture_osm_path: Path, tmp_path: 
         export_bridge(osm_path=fixture_osm_path, city_slug="X", out_root=tmp_path, models=["wave"], intensities=["extreme"])
 
 
-def test_bpr_not_yet_ported(fixture_osm_path: Path, tmp_path: Path) -> None:
-    with pytest.raises(NotImplementedError):
-        export_bridge(osm_path=fixture_osm_path, city_slug="X", out_root=tmp_path, models=["bpr"], intensities=["light"])
+def test_bpr_work_pool_falls_back_to_all_vertices(fixture_osm_path: Path) -> None:
+    # The synthetic city has no amenity POIs, so the pool falls back to all
+    # graph vertices (uniform workplaces), like the Julia td_work_pool.
+    clear_caches()
+    graph = load_road_graph(fixture_osm_path, only_intersections=True, trim_to_connected=True)
+    assert bpr_work_pool(graph, fixture_osm_path) == list(range(graph.vertex_count))
+
+
+def test_bpr_volume_delay_math(fixture_osm_path: Path) -> None:
+    # Deterministic check of the BPR function itself, independent of the RNG:
+    # zero flow -> free flow; saturating flow -> the multiplier cap.
+    import numpy as np
+
+    clear_caches()
+    graph = load_road_graph(fixture_osm_path, only_intersections=True, trim_to_connected=True)
+    edges = collect_edges(graph)
+
+    zero = _bpr_profiles(edges, np.zeros((len(edges), TD_NUM_BINS)))
+    for edge, profile in zip(edges, zero):
+        free = round(td_free_speed_ms(edge.road_class), 3)
+        assert all(v == free for v in profile)  # multiplier == 1 everywhere
+
+    saturating = _bpr_profiles(edges, np.full((len(edges), TD_NUM_BINS), 1e9))
+    for edge, profile in zip(edges, saturating):
+        free = td_free_speed_ms(edge.road_class)
+        capped = round(max(free / 6.0, free * TD_MIN_SPEED_FACTOR), 3)  # cap = 6.0
+        assert all(v == capped for v in profile)
+
+
+def test_bpr_speeds_never_exceed_free_flow(fixture_osm_path: Path) -> None:
+    clear_caches()
+    graph = load_road_graph(fixture_osm_path, only_intersections=True, trim_to_connected=True)
+    edges = collect_edges(graph)
+    speeds, num_trips = bpr_speeds(graph, edges, fixture_osm_path, "heavy", bridge_seed(42, "bpr", "heavy"))
+    assert num_trips > 0
+    assert len(speeds) == len(edges)
+    for edge, profile in zip(edges, speeds):
+        free = td_free_speed_ms(edge.road_class)
+        assert len(profile) == TD_NUM_BINS
+        # BPR only slows traffic: speeds never exceed free flow (bar rounding),
+        # and never fall below the cap-implied minimum free/6.
+        assert max(profile) <= round(free, 3) + 1e-9
+        assert min(profile) >= round(free / 6.0, 3) - 1e-6
+
+
+def test_bpr_is_seed_deterministic(fixture_osm_path: Path) -> None:
+    clear_caches()
+    graph = load_road_graph(fixture_osm_path, only_intersections=True, trim_to_connected=True)
+    edges = collect_edges(graph)
+    a, ta = bpr_speeds(graph, edges, fixture_osm_path, "heavy", 777)
+    b, tb = bpr_speeds(graph, edges, fixture_osm_path, "heavy", 777)
+    assert a == b and ta == tb
+
+
+def test_export_bridge_bpr_round_trips(fixture_osm_path: Path, tmp_path: Path) -> None:
+    clear_caches()
+    out_dir = export_bridge(
+        osm_path=fixture_osm_path,
+        city_slug="Testville",
+        out_root=tmp_path / "td-bridge",
+        models=["bpr"],
+        intensities=["moderate"],
+    )
+    graph_json = json.loads((out_dir / "graph.json").read_text())
+    edges = _assert_graph_file_loadable(graph_json)
+    speeds_json = json.loads((out_dir / "speeds-bpr-moderate.json").read_text())
+    _assert_speeds_file_loadable(speeds_json, len(edges))
+    assert speeds_json["model"] == "bpr"
+    assert speeds_json["seed"] == bridge_seed(42, "bpr", "moderate")
+    assert speeds_json["num_trips"] > 0
