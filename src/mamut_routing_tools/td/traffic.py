@@ -296,15 +296,25 @@ def _accumulate_flows(
     """Per-edge hourly flows: one Dijkstra per distinct origin (batched in
     memory-bounded chunks) over the free-flow times, walking each routed path
     and incrementing the flow of every traversed edge at its entry-time bin
-    (the clock advances by each edge's free-flow time)."""
-    flows = np.zeros((len(edge_index), TD_NUM_BINS), dtype=np.float64)
+    (the clock advances by each edge's free-flow time).
+
+    Vectorized but bit-identical to a per-edge scalar accumulation: the entry
+    clock is a left-fold of the departure time over the traversed edge times,
+    which ``cumsum([departure, *times])`` reproduces exactly; the flows are
+    integer counts, so per-chunk ``bincount`` gives the same totals as scalar
+    ``+= 1``. Accumulation order does not matter (exact integer sums).
+    """
+    n_edges = len(edge_index)
+    counts = np.zeros(n_edges * TD_NUM_BINS, dtype=np.int64)
     if not origins:
-        return flows
+        return counts.reshape(n_edges, TD_NUM_BINS).astype(np.float64)
     chunk = max(1, min(len(origins), _DIJKSTRA_CHUNK_BYTES // (12 * max(num_vertices, 1))))
     origins_arr = np.asarray(origins, dtype=np.int64)
     for start in range(0, len(origins_arr), chunk):
         block = origins_arr[start : start + chunk]
         dist, pred = dijkstra(csr, directed=True, indices=block, return_predecessors=True)
+        edge_id_parts: list[np.ndarray] = []
+        bin_parts: list[np.ndarray] = []
         for row, origin in enumerate(block):
             pred_row = pred[row]
             dist_row = dist[row]
@@ -315,15 +325,26 @@ def _accumulate_flows(
                 path = _reconstruct_path(pred_row, source, destination)
                 if path is None or len(path) < 2:
                     continue
-                clock = departure
+                edge_ids: list[int] = []
                 for k in range(len(path) - 1):
                     edge_id = edge_index.get((path[k], path[k + 1]))
                     if edge_id is None:
                         break
-                    bin_index = min(max(int(clock // TD_BIN_SECONDS), 0), TD_NUM_BINS - 1)
-                    flows[edge_id, bin_index] += 1.0
-                    clock += times[edge_id]
-    return flows
+                    edge_ids.append(edge_id)
+                if not edge_ids:
+                    continue
+                ids = np.asarray(edge_ids, dtype=np.int64)
+                # Entry clock per traversed edge: departure, then the running
+                # sum of the edge times before it -- a left-fold identical to
+                # the sequential ``clock += times[edge]`` accumulation.
+                clocks = np.cumsum(np.concatenate(([departure], times[ids])))[:-1]
+                bins = np.clip((clocks // TD_BIN_SECONDS).astype(np.int64), 0, TD_NUM_BINS - 1)
+                edge_id_parts.append(ids)
+                bin_parts.append(bins)
+        if edge_id_parts:
+            flat = np.concatenate(edge_id_parts) * TD_NUM_BINS + np.concatenate(bin_parts)
+            counts += np.bincount(flat, minlength=counts.size)
+    return counts.reshape(n_edges, TD_NUM_BINS).astype(np.float64)
 
 
 def _bpr_profiles(edges: list[BridgeEdge], flows: np.ndarray) -> list[list[float]]:
