@@ -6,7 +6,59 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import NamedTuple
 
-DEFAULT_CATEGORIES = ["restaurant", "cafe", "bar", "fast_food", "pub", "school", "university"]
+POI_CATEGORIES = [
+    "restaurant",
+    "cafe",
+    "bar",
+    "fast_food",
+    "pub",
+    "school",
+    "university",
+    "hospital",
+    "clinic",
+    "pharmacy",
+    "dentist",
+    "doctors",
+    "veterinary",
+    "bank",
+    "atm",
+    "post_office",
+    "police",
+    "fire_station",
+    "townhall",
+    "courthouse",
+    "library",
+    "theatre",
+    "cinema",
+    "arts_centre",
+    "community_centre",
+    "museum",
+    "place_of_worship",
+    "marketplace",
+    "fuel",
+    "charging_station",
+    "car_wash",
+    "parking",
+    "bus_station",
+    "taxi",
+    "bicycle_rental",
+    "ferry_terminal",
+    "kindergarten",
+    "college",
+    "nightclub",
+    "biergarten",
+    "ice_cream",
+    "food_court",
+    "bench",
+    "drinking_water",
+    "toilets",
+    "shower",
+    "shelter",
+    "waste_basket",
+    "recycling",
+]
+
+DEFAULT_CATEGORIES = POI_CATEGORIES[:7]
 
 
 class Poi(NamedTuple):

@@ -166,6 +166,11 @@
 
   .tab-panel { display: none; min-height: 0; }
   .tab-panel.tab-panel-active { display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0; }
+  /* Generation is taller than the viewport once optional controls expand.
+     Let the outer panel own scrolling instead of squeezing this flex child
+     and allowing its contents to paint over the persistent Jobs section. */
+  #generatePanel.tab-panel-active { flex: none; min-height: max-content; }
+  #jobsSection { flex: none; }
 
   /* ── Forms ── */
   label.field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
@@ -242,6 +247,52 @@
   }
   details.bulk > div { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
 
+  .poi-picker { display: flex; flex-direction: column; gap: 5px; }
+  .poi-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+  .poi-count { margin-left: auto; color: var(--mut); font-size: 10.5px; }
+  .mini-btn {
+    cursor: pointer;
+    font: inherit;
+    font-size: 10px;
+    color: var(--mut);
+    background: transparent;
+    border: 1px solid var(--div);
+    border-radius: 6px;
+    padding: 3px 7px;
+  }
+  .mini-btn:hover { color: var(--acc); border-color: var(--edge); background: var(--acc-t); }
+  details.poi-menu {
+    border: 1px solid var(--div);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--s) 72%, transparent);
+  }
+  details.poi-menu > summary {
+    cursor: pointer;
+    color: var(--mut);
+    font-size: 11px;
+    padding: 6px 8px;
+    user-select: none;
+  }
+  .poi-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3px 8px;
+    max-height: 170px;
+    overflow-y: auto;
+    padding: 4px 8px 8px;
+    border-top: 1px solid var(--div);
+  }
+  .poi-option {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    color: var(--ink);
+    font-size: 10.5px;
+    cursor: pointer;
+  }
+  .poi-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
   /* ── Instance list (Visualize tab) ── */
   .inst-list {
     display: flex;
@@ -278,6 +329,45 @@
     border-radius: 8px;
     padding: 12px;
   }
+
+  .job-list, .run-controls { display: flex; flex-direction: column; gap: 6px; }
+  .job-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    gap: 7px;
+    align-items: center;
+    border: 1px solid var(--div);
+    border-radius: 8px;
+    padding: 7px 8px;
+    font-size: 11px;
+  }
+  .job-state {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--mut);
+  }
+  .job-state.running { background: var(--cy); box-shadow: 0 0 8px var(--cy); }
+  .job-state.completed { background: var(--gr); }
+  .job-state.failed, .job-state.interrupted { background: var(--cor); }
+  .job-state.cancelled { background: var(--am); }
+  .job-main { min-width: 0; }
+  .job-name { font-weight: 500; color: var(--ink); }
+  .job-progress { color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-actions { display: flex; gap: 3px; }
+  .job-actions button { padding: 3px 6px; font-size: 10px; }
+  .mono-output {
+    margin: 0;
+    max-height: 140px;
+    overflow: auto;
+    white-space: pre-wrap;
+    color: var(--mut);
+    background: color-mix(in srgb, var(--bg) 50%, transparent);
+    border: 1px solid var(--div);
+    border-radius: 8px;
+    padding: 8px;
+    font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .validation-line { font-size: 11px; color: var(--mut); }
+  .validation-line.valid { color: var(--gr); }
+  .validation-line.invalid { color: var(--cor); }
 
   /* ── Right panel: selected instance ── */
   .sel-name-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
@@ -410,6 +500,27 @@
         <option value="hybrid">Hybrid</option>
       </select>
     </label>
+    <label class="field"><span>Depot position</span>
+      <select id="depot-mode">
+        <option value="center">Centered</option>
+        <option value="random">Random</option>
+        <option value="corner">Excentered (corner)</option>
+      </select>
+    </label>
+    <div id="poi-picker" class="field poi-picker">
+      <span>POI categories</span>
+      <div class="poi-toolbar">
+        <button id="poi-default" class="mini-btn" type="button">Defaults</button>
+        <button id="poi-all" class="mini-btn" type="button">Select all</button>
+        <button id="poi-clear" class="mini-btn" type="button">Clear</button>
+        <span id="poi-count" class="poi-count"></span>
+      </div>
+      <details class="poi-menu">
+        <summary>Choose amenity types</summary>
+        <div id="poi-list" class="poi-list"></div>
+      </details>
+      <p class="note">City fetches store every listed category. These checks only filter which POIs generation may select.</p>
+    </div>
     <label class="field"><span>Problem type</span>
       <select id="problem">
         <option value="cvrp">CVRP · capacity only</option>
@@ -440,11 +551,17 @@
     </details>
     <p class="note">Runs the published Mamut2026 v2 workbench pipeline locally: 3-metric CVRPLIB artifacts with shared road / geo / distance sidecars, plus VRPTW twins on request. Everything is written to your workspace.</p>
   </section>
+
+  <section class="section" id="jobsSection">
+    <div class="kicker">Jobs · persistent history</div>
+    <div id="jobList" class="job-list"><div class="empty-note">No workbench jobs yet.</div></div>
+    <pre id="jobLog" class="mono-output" hidden></pre>
+  </section>
 </aside>
 
 <aside class="panel panel-right">
   <div class="kicker kicker-selected">Selected instance</div>
-  <div id="selEmpty" class="empty-note">Generate an instance (or pick one in the Visualize tab), then solve and render it here.</div>
+  <div id="selEmpty" class="empty-note">Generate an instance or pick one in the Visualize tab to display its depot and customers. Solving is optional.</div>
   <div id="selBody" hidden>
     <div class="sel-name-row"><span class="sel-name" id="selName"></span><span class="sel-meta" id="selMeta"></span></div>
     <div id="selObjective" hidden>
@@ -452,16 +569,30 @@
       <div class="sel-cost-row"><span class="sel-cost" id="selCost"></span><span class="chip chip-am" id="selMethod"></span></div>
     </div>
     <dl class="sel-facts" id="selFacts"></dl>
-    <div class="row" style="margin-top:6px">
-      <label class="field" style="width:90px"><span>Budget (s)</span><input id="solve-budget" type="number" value="30" min="1"></label>
-      <button id="solve" class="btn" type="button">Solve + render</button>
+    <div class="grid-2" style="margin-top:6px">
+      <label class="field"><span>Metric</span><select id="solve-metric"><option value="fastest">Fastest</option><option value="shortest">Shortest</option><option value="euclidean">Euclidean</option></select></label>
+      <label class="field"><span>Objective</span><select id="solve-objective"><option value="MonoCost">MonoCost</option><option value="HierarchicalVehicleCost">Hierarchical vehicle cost</option></select></label>
+      <label class="field"><span>Budget (s)</span><input id="solve-budget" type="number" value="30" min="1"></label>
+      <label class="field"><span>Solver seed</span><input id="solve-seed" type="number" value="0"></label>
+    </div>
+    <div class="row">
+      <button id="solve" class="btn" type="button">Queue solve</button>
     </div>
     <div class="row">
       <button id="download" class="btn btn-ghost" type="button">Download zip</button>
     </div>
     <div class="fading-rule" style="margin:8px 0"></div>
+    <div class="kicker">Validated solution runs</div>
+    <div class="run-controls">
+      <label class="field"><span>Displayed run</span><select id="solution-run"><option value="">Instance only · customer locations</option></select></label>
+      <div id="solution-validation" class="validation-line">Solve this instance to create a validated run.</div>
+      <label class="field"><span>Compare displayed run against</span><select id="comparison-run"><option value="">Select a reference run</option></select></label>
+      <button id="compare" class="btn btn-secondary" type="button" disabled>Compare runs</button>
+      <pre id="comparison-output" class="mono-output" hidden></pre>
+    </div>
+    <div class="fading-rule" style="margin:8px 0"></div>
     <div class="kicker">Routes · click to toggle</div>
-    <div id="legend" class="legend"><div class="empty-note">Solve the instance to draw its routes.</div></div>
+    <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
   </div>
 </aside>
 
@@ -485,6 +616,19 @@ const ROUTE_COLORS_LIGHT = [
   "#94940d", "#d64f4f", "#1f7fd6", "#4f9e1f", "#b8930f",
   "#7a4fd6", "#0d9e94", "#d66a9b", "#3d85ad", "#a87a4f",
 ];
+const POI_CATEGORIES = [
+  "restaurant", "cafe", "bar", "fast_food", "pub", "school", "university",
+  "hospital", "clinic", "pharmacy", "dentist", "doctors", "veterinary",
+  "bank", "atm", "post_office", "police", "fire_station", "townhall", "courthouse",
+  "library", "theatre", "cinema", "arts_centre", "community_centre", "museum",
+  "place_of_worship", "marketplace", "fuel", "charging_station", "car_wash", "parking",
+  "bus_station", "taxi", "bicycle_rental", "ferry_terminal", "kindergarten", "college",
+  "nightclub", "biergarten", "ice_cream", "food_court", "bench", "drinking_water",
+  "toilets", "shower", "shelter", "waste_basket", "recycling",
+];
+const DEFAULT_POI_CATEGORIES = new Set([
+  "restaurant", "cafe", "bar", "fast_food", "pub", "school", "university",
+]);
 
 const isDark = () => document.documentElement.dataset.theme !== "light";
 const routeColor = (index) => (isDark() ? ROUTE_COLORS_DARK : ROUTE_COLORS_LIGHT)[index % 20];
@@ -507,6 +651,7 @@ let baseLayer = isDark() ? darkMatter : positron;
 baseLayer.addTo(map);
 
 const previewLayers = L.layerGroup().addTo(map);
+const instanceNodeLayers = L.layerGroup().addTo(map);
 let routeLayerGroups = [];
 
 /* ── Theme ── */
@@ -541,6 +686,21 @@ async function apiBlob(path, body) {
   return response.blob();
 }
 
+async function apiDelete(path) {
+  const response = await fetch(path, { method: "DELETE" });
+  const data = await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }));
+  if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+async function submitJob(kind, payload) {
+  const data = await api("/api/jobs", { kind, payload });
+  state.submittedJobs.add(data.job.job_id);
+  state.jobs = [data.job, ...state.jobs.filter((job) => job.job_id !== data.job.job_id)];
+  renderJobs();
+  return data.job;
+}
+
 function saveBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -557,6 +717,13 @@ const state = {
   hiddenRoutes: new Set(),
   lastRendered: null,
   bulkBases: null,
+  jobs: [],
+  submittedJobs: new Set(),
+  handledJobs: new Set(),
+  solutionRuns: [],
+  solutionReferences: [],
+  selectedRunId: null,
+  previewGeojson: null,
 };
 
 /* ── Tabs ── */
@@ -570,12 +737,65 @@ el("tabVisualize").addEventListener("click", () => activateTab("visualize"));
 el("tabGenerate").addEventListener("click", () => activateTab("generate"));
 
 /* ── Generation inputs ── */
+function selectedPoiCategories() {
+  return [...el("poi-list").querySelectorAll("input[type='checkbox']:checked")]
+    .map((checkbox) => checkbox.value);
+}
+
+function updatePoiCount() {
+  el("poi-count").textContent = `${selectedPoiCategories().length} selected`;
+}
+
+function setPoiSelection(categories) {
+  const selected = new Set(categories);
+  el("poi-list").querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
+    checkbox.checked = selected.has(checkbox.value);
+  });
+  updatePoiCount();
+}
+
+function renderPoiCategories() {
+  const list = el("poi-list");
+  list.innerHTML = "";
+  POI_CATEGORIES.forEach((category) => {
+    const label = document.createElement("label");
+    label.className = "poi-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = category;
+    checkbox.checked = DEFAULT_POI_CATEGORIES.has(category);
+    checkbox.addEventListener("change", updatePoiCount);
+    const text = document.createElement("span");
+    text.textContent = category.replaceAll("_", " ");
+    label.title = category;
+    label.append(checkbox, text);
+    list.append(label);
+  });
+  updatePoiCount();
+}
+
+function updateGenerationControls() {
+  el("poi-picker").hidden = el("method").value === "parametric_attach";
+}
+
+el("poi-default").addEventListener("click", () => setPoiSelection(DEFAULT_POI_CATEGORIES));
+el("poi-all").addEventListener("click", () => setPoiSelection(POI_CATEGORIES));
+el("poi-clear").addEventListener("click", () => setPoiSelection([]));
+el("method").addEventListener("change", updateGenerationControls);
+
 function requestBody() {
+  const method = el("method").value;
+  const categories = selectedPoiCategories();
+  if (["poi_categories", "hybrid"].includes(method) && !categories.length) {
+    throw new Error("Select at least one POI category for this sampling method.");
+  }
   return {
     city: el("city").value,
     nCustomers: Number(el("n").value),
     seed: Number(el("seed").value),
-    method: el("method").value,
+    method,
+    depotMode: el("depot-mode").value,
+    categories,
     demandType: Number(el("demand").value),
     avgRouteSize: Number(el("ars").value),
     deriveVrptw: el("problem").value === "vrptw",
@@ -588,6 +808,7 @@ async function loadInstances(selectBase) {
   state.instances = (data.instances || []).map((entry) => {
     const kept = previous.get(`${entry.folder}/${entry.base_name}`);
     return {
+      instance_id: entry.instance_id,
       base_name: entry.base_name,
       folder: entry.folder,
       files: entry.files,
@@ -596,8 +817,10 @@ async function loadInstances(selectBase) {
       city: entry.city || "?",
       n: entry.n_customers ?? "?",
       seed: entry.seed ?? "?",
+      solution_count: entry.solution_count || 0,
       solved: kept?.solved || null,
       rendered: kept?.rendered || null,
+      mapData: kept?.mapData || null,
     };
   });
   if (selectBase) {
@@ -633,6 +856,9 @@ function clearRouteLayers() {
 }
 
 function drawPreview(geojson) {
+  state.previewGeojson = geojson;
+  clearRouteLayers();
+  instanceNodeLayers.clearLayers();
   previewLayers.clearLayers();
   const colors = markerColors();
   const bounds = [];
@@ -653,8 +879,45 @@ function drawPreview(geojson) {
   if (bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
 }
 
+function drawInstanceNodes(routes = null, fit = false) {
+  instanceNodeLayers.clearLayers();
+  const mapData = state.selected?.mapData;
+  if (!mapData?.geojson?.features) return [];
+  const assignments = new Map();
+  (routes || []).forEach((route, routeIndex) => {
+    route.forEach((modelNodeId) => assignments.set(Number(modelNodeId), routeIndex));
+  });
+  const colors = markerColors();
+  const bounds = [];
+  mapData.geojson.features.forEach((feature) => {
+    const [lon, lat] = feature.geometry.coordinates;
+    const properties = feature.properties || {};
+    const isDepot = properties.role === "depot";
+    const routeIndex = assignments.get(Number(properties.model_node_id));
+    const color = isDepot
+      ? colors.depot
+      : (routeIndex == null
+        ? (properties.source_tag === "poi" ? colors.poi : colors.parametric)
+        : routeColor(routeIndex));
+    const marker = L.circleMarker([lat, lon], {
+      radius: isDepot ? 7 : 5,
+      color,
+      fillColor: color,
+      fillOpacity: 0.9,
+      weight: isDepot ? 3 : 2,
+    });
+    const label = isDepot ? "Depot" : `Customer ${properties.model_node_id}`;
+    marker.bindTooltip(`${label} · demand ${properties.demand} · ${properties.source_tag}`);
+    marker.addTo(instanceNodeLayers);
+    bounds.push([lat, lon]);
+  });
+  if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
+  return bounds;
+}
+
 function drawRoutes(rendered, fit) {
   clearRouteLayers();
+  previewLayers.clearLayers();
   const bounds = [];
   rendered.geojson.features.forEach((feature, index) => {
     const group = L.layerGroup();
@@ -666,11 +929,18 @@ function drawRoutes(rendered, fit) {
     routeLayerGroups.push(group);
     if (!state.hiddenRoutes.has(index)) group.addTo(map);
   });
+  bounds.push(...drawInstanceNodes(state.selected?.solved?.routes || [], false));
   if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
 }
 
 function redrawRoutes() {
-  if (state.lastRendered) drawRoutes(state.lastRendered, false);
+  if (state.previewGeojson) {
+    drawPreview(state.previewGeojson);
+  } else if (state.lastRendered) {
+    drawRoutes(state.lastRendered, false);
+  } else if (state.selected?.mapData) {
+    drawInstanceNodes(null, false);
+  }
   renderLegend();
 }
 
@@ -687,7 +957,10 @@ function renderInstanceList() {
     row.type = "button";
     row.className = "inst-row" + (state.selected === instance ? " selected" : "");
     const twin = instance.vrptw ? ' <span class="chip chip-acc">VRPTW twin</span>' : "";
-    row.innerHTML = `<span class="inst-head"><span class="inst-name">${instance.base_name}</span>${twin}</span>` +
+    const saved = instance.solution_count
+      ? ` <span class="chip chip-gr">${instance.solution_count} saved solution${instance.solution_count === 1 ? "" : "s"}</span>`
+      : "";
+    row.innerHTML = `<span class="inst-head"><span class="inst-name">${instance.base_name}</span>${twin}${saved}</span>` +
       `<span class="inst-meta">${instance.city} · n=${instance.n} · seed ${instance.seed} · capacity ${instance.summary.capacity}</span>`;
     row.addEventListener("click", () => selectInstance(index));
     list.append(row);
@@ -707,6 +980,7 @@ function renderSelected() {
     ["Expected routes", instance.summary.route_count != null ? `~${instance.summary.route_count}` : "n/a"],
     ["Seed", instance.seed],
     ["Folder", instance.folder.split("/").slice(-1)[0]],
+    ["Saved solutions", instance.solution_count],
   ];
   if (instance.vrptw) facts.push(["VRPTW twin", "derived"]);
   el("selFacts").innerHTML = facts
@@ -714,7 +988,7 @@ function renderSelected() {
     .join("");
   if (instance.solved) {
     el("selObjective").hidden = false;
-    el("selObjLabel").textContent = "MonoCost · local solve";
+    el("selObjLabel").textContent = `${instance.solved.objective_function || "MonoCost"} · ${instance.solved.source === "bks" ? "BKS" : "saved run"}`;
     el("selCost").textContent = String(instance.solved.cost);
     el("selMethod").textContent = instance.solved.method || "pyvrp";
   } else {
@@ -727,7 +1001,7 @@ function renderLegend() {
   const legend = el("legend");
   const instance = state.selected;
   if (!instance || !instance.solved || !state.lastRendered) {
-    legend.innerHTML = '<div class="empty-note">Solve the instance to draw its routes.</div>';
+    legend.innerHTML = '<div class="empty-note">Customer positions are displayed on the map. Select or create a saved solution to draw routes.</div>';
     return;
   }
   legend.innerHTML = "";
@@ -752,14 +1026,296 @@ function renderLegend() {
   });
 }
 
-function selectInstance(index) {
+function selectInstance(index, preferredRunId = null) {
   state.selected = state.instances[index];
+  state.selected.solved = null;
+  state.selected.rendered = null;
+  state.solutionRuns = [];
+  state.solutionReferences = [];
+  state.selectedRunId = null;
+  state.previewGeojson = null;
   state.hiddenRoutes = new Set();
-  state.lastRendered = state.selected.rendered || null;
+  state.lastRendered = null;
+  previewLayers.clearLayers();
+  instanceNodeLayers.clearLayers();
   clearRouteLayers();
-  if (state.lastRendered) drawRoutes(state.lastRendered, true);
   renderInstanceList();
   renderSelected();
+  return loadSolutionRuns(preferredRunId).catch((error) => {
+    status(`Cannot load saved solutions: ${error.message}`);
+  });
+}
+
+async function loadInstanceMapData(instance = state.selected) {
+  if (!instance) return null;
+  if (!instance.mapData) {
+    instance.mapData = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/map-data`);
+  }
+  return state.selected === instance ? instance.mapData : null;
+}
+
+async function displayInstanceOnly(fit = true) {
+  const instance = state.selected;
+  if (!instance) return;
+  await loadInstanceMapData(instance);
+  if (state.selected !== instance) return;
+  state.selectedRunId = null;
+  instance.solved = null;
+  instance.rendered = null;
+  state.lastRendered = null;
+  state.hiddenRoutes = new Set();
+  state.previewGeojson = null;
+  previewLayers.clearLayers();
+  clearRouteLayers();
+  drawInstanceNodes(null, fit);
+  refreshSolutionControls();
+  renderSelected();
+  status(`Displayed ${instance.base_name}: depot and ${instance.n} customer positions.`);
+}
+
+/* ── Persistent solutions ── */
+function allSolutionRecords() {
+  return [...state.solutionRuns, ...state.solutionReferences];
+}
+
+function solutionLabel(run) {
+  const source = run.source === "bks" ? "BKS" : (run.created_at ? new Date(run.created_at).toLocaleString() : "saved run");
+  const validity = run.validation?.valid ? "valid" : "invalid";
+  return `${source} · ${run.objective_function} · cost ${run.cost ?? "?"} · ${run.num_routes} routes · ${validity}`;
+}
+
+function refreshSolutionControls() {
+  const runs = allSolutionRecords();
+  const runSelect = el("solution-run");
+  const comparisonSelect = el("comparison-run");
+  runSelect.innerHTML = "";
+  runSelect.append(new Option("Instance only · customer locations", ""));
+  if (!runs.length) {
+    comparisonSelect.innerHTML = '<option value="">Select a reference run</option>';
+    el("compare").disabled = true;
+    el("solution-validation").className = "validation-line";
+    el("solution-validation").textContent = "No saved solutions yet; instance data is stored locally.";
+    return;
+  }
+  runs.forEach((run) => runSelect.append(new Option(solutionLabel(run), run.run_id)));
+  if (state.selectedRunId && !runs.some((run) => run.run_id === state.selectedRunId)) {
+    state.selectedRunId = null;
+  }
+  runSelect.value = state.selectedRunId || "";
+  const selected = runs.find((run) => run.run_id === state.selectedRunId);
+  comparisonSelect.innerHTML = "";
+  comparisonSelect.append(new Option("Select a reference run", ""));
+  runs
+    .filter((run) => run.run_id !== state.selectedRunId
+      && run.objective_function === selected?.objective_function
+      && run.metadata?.metric === selected?.metadata?.metric)
+    .forEach((run) => comparisonSelect.append(new Option(solutionLabel(run), run.run_id)));
+  el("compare").disabled = !selected || comparisonSelect.options.length <= 1;
+  if (!selected) {
+    el("solution-validation").className = "validation-line";
+    el("solution-validation").textContent = `${state.solutionRuns.length} saved solution run(s) available locally.`;
+    return;
+  }
+  const validation = selected?.validation || {};
+  el("solution-validation").className = `validation-line ${validation.valid ? "valid" : "invalid"}`;
+  el("solution-validation").textContent = validation.valid
+    ? `Validated: canonical cost ${validation.routing_cost}, ${validation.num_routes} route(s).`
+    : `Invalid: ${validation.error_message || validation.status || "checker rejected this solution"}`;
+}
+
+async function displaySolutionRun(runId, fit = true) {
+  const instance = state.selected;
+  if (!instance) return;
+  if (!runId) {
+    await displayInstanceOnly(fit);
+    return;
+  }
+  const run = allSolutionRecords().find((value) => value.run_id === runId);
+  if (!run) return;
+  await loadInstanceMapData(instance);
+  if (state.selected !== instance) return;
+  state.selectedRunId = runId;
+  instance.solved = run;
+  const metric = run.metadata?.metric || el("solve-metric").value || "fastest";
+  el("solve-metric").value = metric;
+  const rendered = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/${encodeURIComponent(runId)}/render?metric=${encodeURIComponent(metric)}`, {});
+  if (state.selected !== instance) return;
+  instance.rendered = rendered;
+  state.lastRendered = rendered;
+  state.previewGeojson = null;
+  state.hiddenRoutes = new Set();
+  previewLayers.clearLayers();
+  drawRoutes(rendered, fit);
+  refreshSolutionControls();
+  renderSelected();
+  status(`Displayed ${run.source === "bks" ? "BKS" : "saved run"}: cost ${run.cost}, ${run.num_routes} routes; ${rendered.summary.render_mode}.`);
+}
+
+async function loadSolutionRuns(preferredRunId = null) {
+  const instance = state.selected;
+  if (!instance) return;
+  const [data] = await Promise.all([
+    api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions`),
+    loadInstanceMapData(instance),
+  ]);
+  if (state.selected !== instance) return;
+  state.solutionRuns = data.runs || [];
+  state.solutionReferences = data.references || [];
+  instance.solution_count = state.solutionRuns.length;
+  state.selectedRunId = preferredRunId;
+  renderInstanceList();
+  refreshSolutionControls();
+  if (state.selectedRunId) {
+    await displaySolutionRun(state.selectedRunId, true);
+  } else {
+    await displayInstanceOnly(true);
+  }
+}
+
+el("solution-run").addEventListener("change", (event) => {
+  displaySolutionRun(event.target.value, true).catch((error) => status(`Cannot display solution: ${error.message}`));
+});
+
+el("comparison-run").addEventListener("change", (event) => {
+  el("compare").disabled = !event.target.value;
+});
+
+el("compare").addEventListener("click", async () => {
+  if (!state.selected || !state.selectedRunId || !el("comparison-run").value) return;
+  try {
+    const data = await api(`/api/instances/${encodeURIComponent(state.selected.instance_id)}/solutions/compare`, {
+      candidate_run_id: state.selectedRunId,
+      reference_run_id: el("comparison-run").value,
+    });
+    const value = data.comparison;
+    const gap = value.relative_gap_percent == null ? "n/a" : `${value.relative_gap_percent.toFixed(3)}%`;
+    el("comparison-output").hidden = false;
+    el("comparison-output").textContent = [
+      `Result: ${value.ordering}`,
+      `Cost delta: ${value.cost_delta} (gap ${gap})`,
+      `Route-count delta: ${value.route_count_delta}`,
+      `Candidate loads: ${value.candidate.route_loads.join(", ")}`,
+      `Reference loads: ${value.reference.route_loads.join(", ")}`,
+      `Directed edges +${value.route_difference.directed_edges_added} / -${value.route_difference.directed_edges_removed}`,
+      `Co-routed pairs +${value.route_difference.co_routed_customer_pairs_added} / -${value.route_difference.co_routed_customer_pairs_removed}`,
+    ].join("\n");
+  } catch (error) {
+    el("comparison-output").hidden = false;
+    el("comparison-output").textContent = `Comparison failed: ${error.message}`;
+  }
+});
+
+/* ── Persistent jobs ── */
+function renderJobs() {
+  const list = el("jobList");
+  list.innerHTML = "";
+  if (!state.jobs.length) {
+    list.innerHTML = '<div class="empty-note">No workbench jobs yet.</div>';
+    return;
+  }
+  state.jobs.slice(0, 8).forEach((job) => {
+    const row = document.createElement("div");
+    row.className = "job-row";
+    const dot = document.createElement("span");
+    dot.className = `job-state ${job.status}`;
+    const main = document.createElement("div");
+    main.className = "job-main";
+    const name = document.createElement("div");
+    name.className = "job-name";
+    name.textContent = `${job.kind} · ${job.status}`;
+    const progress = document.createElement("div");
+    progress.className = "job-progress";
+    const counts = job.progress?.total ? ` ${job.progress.current || 0}/${job.progress.total}` : "";
+    progress.textContent = `${job.error || job.progress?.message || ""}${counts}`;
+    main.append(name, progress);
+    const actions = document.createElement("div");
+    actions.className = "job-actions";
+    const logButton = document.createElement("button");
+    logButton.type = "button";
+    logButton.className = "btn btn-ghost";
+    logButton.textContent = "Log";
+    logButton.addEventListener("click", async () => {
+      try {
+        const data = await api(`/api/jobs/${encodeURIComponent(job.job_id)}/log`);
+        el("jobLog").hidden = false;
+        el("jobLog").textContent = data.log || "No log output yet.";
+      } catch (error) { status(`Cannot load job log: ${error.message}`); }
+    });
+    actions.append(logButton);
+    if (["queued", "running"].includes(job.status)) {
+      const cancelButton = document.createElement("button");
+      cancelButton.type = "button";
+      cancelButton.className = "btn btn-ghost";
+      cancelButton.textContent = "Cancel";
+      cancelButton.addEventListener("click", async () => {
+        try { await apiDelete(`/api/jobs/${encodeURIComponent(job.job_id)}`); await refreshJobs(); }
+        catch (error) { status(`Cancellation failed: ${error.message}`); }
+      });
+      actions.append(cancelButton);
+    }
+    row.append(dot, main, actions);
+    list.append(row);
+  });
+}
+
+async function handleFinishedJob(job) {
+  if (state.handledJobs.has(job.job_id)) return;
+  state.handledJobs.add(job.job_id);
+  if (job.status !== "completed") {
+    status(`${job.kind} ${job.status}: ${job.error || job.progress?.message || "no result"}`);
+    return;
+  }
+  const result = job.result || {};
+  if (job.kind === "fetch-osm") {
+    await loadCities();
+    status(`Fetched ${result.city || job.request?.city || "city"}.`);
+  } else if (job.kind === "generate") {
+    state.hiddenRoutes = new Set();
+    state.lastRendered = null;
+    clearRouteLayers();
+    await loadInstances(result.base_name);
+    activateTab("visualize");
+    status(`Generated ${result.base_name}: capacity ${result.summary?.capacity}, ~${result.summary?.route_count} routes.`);
+  } else if (job.kind === "bulk-generate") {
+    const results = Array.isArray(result.results) ? result.results : [];
+    state.bulkBases = results.map((entry) => entry.base_name).filter(Boolean);
+    el("bulk-download").disabled = state.bulkBases.length === 0;
+    await loadInstances(state.bulkBases[0]);
+    activateTab("visualize");
+    status(`Bulk generated ${result.generated || 0} instance(s).`);
+  } else if (job.kind === "solve") {
+    const preferredRunId = result.solution?.run_id || null;
+    let selectedByHandler = false;
+    if (!state.selected || state.selected.instance_id !== result.instance_id) {
+      await loadInstances();
+      const index = state.instances.findIndex((instance) => instance.instance_id === result.instance_id);
+      if (index >= 0) {
+        await selectInstance(index, preferredRunId);
+        selectedByHandler = true;
+      }
+    }
+    if (!selectedByHandler) await loadSolutionRuns(preferredRunId);
+    activateTab("visualize");
+    status(`Solved ${result.solution?.instance_name || "instance"}: cost ${result.cost}; checker ${result.validation?.status}.`);
+  }
+}
+
+let refreshingJobs = false;
+async function refreshJobs() {
+  if (refreshingJobs) return;
+  refreshingJobs = true;
+  try {
+    const data = await api("/api/jobs?limit=50");
+    state.jobs = data.jobs || [];
+    renderJobs();
+    for (const job of state.jobs) {
+      if (state.submittedJobs.has(job.job_id) && ["completed", "failed", "cancelled", "interrupted"].includes(job.status)) {
+        await handleFinishedJob(job);
+      }
+    }
+  } finally {
+    refreshingJobs = false;
+  }
 }
 
 /* ── Actions ── */
@@ -774,15 +1330,9 @@ el("preview").addEventListener("click", async () => {
 
 el("generate").addEventListener("click", async () => {
   try {
-    status("Generating (matrices can take a minute on big cities)…");
-    const body = requestBody();
-    const data = await api("/api/workbench/generation/single", body);
-    state.hiddenRoutes = new Set();
-    state.lastRendered = null;
-    clearRouteLayers();
-    await loadInstances(data.base_name);
-    status(`Generated ${data.base_name}: capacity ${data.summary.capacity}, ~${data.summary.route_count} routes.`);
-  } catch (error) { status(`Generation failed: ${error.message}`); }
+    const job = await submitJob("generate", requestBody());
+    status(`Generation queued as job ${job.job_id.slice(0, 8)}.`);
+  } catch (error) { status(`Cannot queue generation: ${error.message}`); }
 });
 
 el("solve").addEventListener("click", async () => {
@@ -790,21 +1340,15 @@ el("solve").addEventListener("click", async () => {
   if (!instance) return;
   try {
     const budget = Math.max(1, Number(el("solve-budget").value) || 30);
-    status(`Solving ${instance.base_name} (${budget} s budget)…`);
-    const vrpJson = await fetch(`/instances-file?path=${encodeURIComponent(`${instance.folder}/${instance.files.vrp_json.fastest}`)}`).then((response) => response.json());
-    const solved = await api("/api/workbench/solve", { vrp_json: vrpJson, time_limit: budget });
-    const meta = await fetch(`/instances-file?path=${encodeURIComponent(`${instance.folder}/${instance.files.meta}`)}`).then((response) => response.json());
-    status("Rendering road-following routes…");
-    const rendered = await api("/api/workbench/render-routes", { meta, routes: solved.routes, metric: "fastest" });
-    instance.solved = solved;
-    instance.rendered = rendered;
-    state.lastRendered = rendered;
-    state.hiddenRoutes = new Set();
-    previewLayers.clearLayers();
-    drawRoutes(rendered, true);
-    renderSelected();
-    status(`Solved ${instance.base_name}: cost ${solved.cost}, ${solved.n_routes} routes (${solved.method || "pyvrp"}); render ${rendered.summary.render_mode}.`);
-  } catch (error) { status(`Solve failed: ${error.message}`); }
+    const job = await submitJob("solve", {
+      instance_id: instance.instance_id,
+      metric: el("solve-metric").value,
+      objective_function: el("solve-objective").value,
+      seed: Number(el("solve-seed").value) || 0,
+      time_limit: budget,
+    });
+    status(`Solve queued as job ${job.job_id.slice(0, 8)} (${budget} s budget).`);
+  } catch (error) { status(`Cannot queue solve: ${error.message}`); }
 });
 
 el("download").addEventListener("click", async () => {
@@ -822,29 +1366,23 @@ el("fetch").addEventListener("click", async () => {
   const name = el("fetch-name").value.trim();
   if (!name) return;
   try {
-    status(`Fetching ${name} from Overpass (can take minutes)…`);
-    await api("/api/workbench/generation/fetch-osm-city", { city: name });
-    await loadCities();
-    status(`Fetched ${name}.`);
-  } catch (error) { status(`Fetch failed: ${error.message}`); }
+    const job = await submitJob("fetch-osm", {
+      city: name,
+      poiCategories: [...POI_CATEGORIES],
+    });
+    status(`OSM fetch for ${name} queued with all ${POI_CATEGORIES.length} POI categories as job ${job.job_id.slice(0, 8)}.`);
+  } catch (error) { status(`Cannot queue fetch: ${error.message}`); }
 });
 
 el("bulk-run").addEventListener("click", async () => {
   try {
-    status("Bulk generating (one POI pool and matrix set per city)…");
     const body = requestBody();
     body.nCustomersList = el("bulk-sizes").value;
     body.demandTypesList = el("bulk-demands").value;
     body.avgRouteSizesList = el("bulk-ars").value;
-    const data = await api("/api/workbench/generation/bulk", body);
-    const results = Array.isArray(data.results) ? data.results : [];
-    state.bulkBases = results.map((result) => result.base_name).filter(Boolean);
-    el("bulk-download").disabled = state.bulkBases.length === 0;
-    await loadInstances(state.bulkBases[0]);
-    const skipped = (data.city_reports || []).filter((report) => report.status === "skipped").length;
-    status(`Bulk generated ${data.generated} instance(s)${skipped ? `, ${skipped} city report(s) skipped` : ""}.`);
-    activateTab("visualize");
-  } catch (error) { status(`Bulk generation failed: ${error.message}`); }
+    const job = await submitJob("bulk-generate", body);
+    status(`Bulk generation queued as job ${job.job_id.slice(0, 8)}.`);
+  } catch (error) { status(`Cannot queue bulk generation: ${error.message}`); }
 });
 
 el("bulk-download").addEventListener("click", async () => {
@@ -859,15 +1397,21 @@ el("bulk-download").addEventListener("click", async () => {
 
 el("clear").addEventListener("click", () => {
   previewLayers.clearLayers();
+  instanceNodeLayers.clearLayers();
   clearRouteLayers();
+  state.previewGeojson = null;
   state.lastRendered = null;
   if (state.selected) state.selected.rendered = null;
   renderLegend();
   status("Map cleared.");
 });
 
+renderPoiCategories();
+updateGenerationControls();
 loadCities().catch((error) => status(`Cannot reach the local server: ${error.message}`));
 loadInstances().catch((error) => console.warn("Unable to list workspace instances", error));
+refreshJobs().catch((error) => console.warn("Unable to list workbench jobs", error));
+setInterval(() => refreshJobs().catch(() => {}), 1000);
 </script>
 </body>
 </html>

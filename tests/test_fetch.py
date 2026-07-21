@@ -12,6 +12,7 @@ from mamut_routing_tools.osm.fetch import (
     FetchError,
     OverpassResult,
     _is_retryable,
+    _tile_cache_path,
     build_amenity_overpass_query,
     build_overpass_query,
     build_road_overpass_query,
@@ -57,6 +58,18 @@ def test_overpass_query_shapes() -> None:
     pois = build_amenity_overpass_query(bbox)
     assert 'node["amenity"~' in pois
     assert "restaurant" in pois and "parking" not in pois
+
+    extended_pois = build_amenity_overpass_query(
+        bbox,
+        poi_categories=("hospital", "library", "charging_station"),
+    )
+    assert "hospital" in extended_pois
+    assert "library" in extended_pois
+    assert "charging_station" in extended_pois
+    assert "restaurant" not in extended_pois
+    assert _tile_cache_path(Path("cache"), pois, kind="amenities") != _tile_cache_path(
+        Path("cache"), extended_pois, kind="amenities"
+    )
 
     combined = build_overpass_query(bbox)
     assert 'way["highway"~' in combined

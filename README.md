@@ -15,7 +15,7 @@ Beta. The tool suite is being extracted from the website's former Julia backend;
 - `mamut-tools osm fetch-city`: download and structurally validate a purpose-filtered OSM extract for a city by name, using atomic tiled road and POI acquisition plus a persistent tile cache when a single Overpass query would be too large.
 - `mamut-tools generate`: interactive CVRP/VRPTW instance generation on city road graphs (single, bulk, preview, VRPTW derivation), the port of the historical MAMUT workbench generator.
 - `mamut-tools solve`: PyVRP solving of generated and benchmark instances via mamut-routing-lib; with the `kayros` extra (`pip install 'mamut-routing-tools[kayros]'`), [KAYROS](https://pypi.org/project/kayros/) solves the time-dependent instances (Duration objective, anytime with exact certification tooling).
-- `mamut-tools gui`: a CLI-owned local workbench GUI (loopback server with token security) for fetching cities, previewing, generating, solving, and rendering road-following routes on a map.
+- `mamut-tools gui`: a CLI-owned local workbench GUI (loopback server with token security) for fetching cities, previewing, generating, solving, and rendering road-following routes on a map. Long operations run as persistent jobs with real state/logs; solver runs are checker-validated, retained across restarts, and comparable by objective, fleet, loads, route edges, and customer grouping.
 - Planned: the official time-dependent benchmark campaign pipeline.
 
 ## Install
@@ -98,6 +98,16 @@ uv run mamut-tools gui stop     # terminate the background server
 ```
 
 `gui status` reprints the tokened URL, which is the quickest way to recover it if you lose the browser tab. If you would rather watch the server logs live, `gui run` runs it in the foreground instead (development mode, stop with Ctrl-C).
+
+Generated instances remain under `<workspace>/instances/`. Generation controls include the historical POI amenity selection and random, centered, or excentered depot placement. The GUI keeps its additional durable state separately:
+
+- validated solver runs under `<workspace>/solutions/<instance-id>/`;
+- job records under `<workspace>/state/jobs/`;
+- append-only job logs under `<workspace>/state/logs/`.
+
+Both instances and solutions remain available after the GUI or machine restarts, until their workspace files are removed. Selecting an instance immediately displays its depot and customer positions without requiring a solve. Select any saved run to render it again—the customer markers then adopt their route colors—or compare two runs with the same objective and metric to inspect cost and route-count deltas, route loads, changed directed edges, and changes to customer grouping. Cancellation is cooperative: queued work stops immediately, while a running solver or matrix calculation stops at its next safe checkpoint.
+
+The GUI fetches every POI category shown in its category picker when acquiring a city. Category checkboxes filter generation only, so changing them later does not require another OSM download. The lower-level `mamut-tools osm fetch-city` command remains configurable through repeated `--poi-category` options.
 
 ### If the tool does not behave as documented
 

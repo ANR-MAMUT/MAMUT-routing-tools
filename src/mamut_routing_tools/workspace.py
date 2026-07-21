@@ -60,3 +60,35 @@ def state_dir(workspace: Path, *, create: bool = True) -> Path:
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def jobs_dir(workspace: Path, *, create: bool = True) -> Path:
+    """Persistent GUI job records.
+
+    Jobs are state rather than generated benchmark artefacts: retaining them
+    across GUI restarts makes long-running work auditable without changing the
+    existing ``instances/`` layout.
+    """
+
+    path = state_dir(workspace, create=create) / "jobs"
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def logs_dir(workspace: Path, *, create: bool = True) -> Path:
+    """Per-job text logs, kept next to the persistent job records."""
+
+    path = state_dir(workspace, create=create) / "logs"
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def solutions_dir(workspace: Path, *, create: bool = True) -> Path:
+    """Validated solution runs produced by the local workbench."""
+
+    path = workspace / "solutions"
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
