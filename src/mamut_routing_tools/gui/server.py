@@ -200,6 +200,12 @@ def create_app(workspace: Path, token: str) -> FastAPI:
                 osm_dir=osmdata_dir(workspace),
                 padding_km=float(payload.get("paddingKm") or 0.0),
                 max_radius_km=float(payload.get("maxRadiusKm") or 0.0),
+                profile=str(payload.get("profile") or "generation"),
+                poi_categories=(
+                    [str(value) for value in payload["poiCategories"]]
+                    if isinstance(payload.get("poiCategories"), list)
+                    else None
+                ),
             )
         except Exception as error:  # noqa: BLE001 - surfaced as the API error contract
             return _payload_error(400, str(error))

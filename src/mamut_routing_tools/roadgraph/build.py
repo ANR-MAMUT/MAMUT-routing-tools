@@ -20,6 +20,7 @@ import rustworkx as rx
 from scipy.spatial import cKDTree
 
 from mamut_routing_tools.geo import ENU, LLA, bounds_center, enu_distance, enu_from_lla, lla_from_enu
+from mamut_routing_tools.roadgraph.classes import ROAD_CLASSES
 from mamut_routing_tools.roadgraph.osmxml import OsmData, OsmWay, crop_to_bounds, ensure_bounds, parse_osm
 
 #: Default speed limits in km/h by road class (OpenStreetMapX SPEED_ROADS_URBAN).
@@ -33,26 +34,6 @@ SPEED_ROADS_URBAN: dict[int, float] = {
     7: 20.0,  # service
     8: 10.0,  # living street
 }
-
-ROAD_CLASSES: dict[str, int] = {
-    "motorway": 1,
-    "trunk": 2,
-    "primary": 3,
-    "secondary": 4,
-    "tertiary": 5,
-    "unclassified": 6,
-    "residential": 6,
-    "service": 7,
-    "motorway_link": 1,
-    "trunk_link": 2,
-    "primary_link": 3,
-    "secondary_link": 4,
-    "tertiary_link": 5,
-    "living_street": 8,
-    "pedestrian": 8,
-    "road": 6,
-}
-
 
 class EmptyRoadGraphError(ValueError):
     """The requested options produced no usable road graph (triggers the

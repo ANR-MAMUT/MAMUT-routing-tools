@@ -356,9 +356,22 @@ def osm_fetch_city_cmd(
     osm_dir: Annotated[Path, typer.Option("--osm-dir", help="Directory for the downloaded <city>.osm extract.")] = Path("osmdata"),
     padding_km: Annotated[float, typer.Option("--padding-km", help="Extra bbox padding in km.")] = 0.0,
     max_radius_km: Annotated[float, typer.Option("--max-radius-km", help="Clamp the administrative bbox to a square of this radius around the place's geocode point (0 = no clamp).")] = 0.0,
+    profile: Annotated[str, typer.Option("--profile", help="Data profile: generation, road_cache, or full.")] = "generation",
+    poi_category: Annotated[Optional[list[str]], typer.Option("--poi-category", help="POI amenity category to include (repeatable; generation profile only).")] = None,
+    tile_cache_dir: Annotated[Optional[Path], typer.Option("--tile-cache-dir", help="Persistent validated Overpass tile cache (default: <osm-dir>/.mamut-osm-tile-cache).")] = None,
+    tile_cache: Annotated[bool, typer.Option("--tile-cache/--no-tile-cache", help="Reuse successful tiles across interrupted or repeated downloads.")] = True,
 ) -> None:
-    """Download an OSM extract (roads + amenities) for a city by name."""
+    """Download a filtered, road-graph-compatible OSM extract for a city."""
     from mamut_routing_tools.osm import fetch_and_store_city_osm
+
+    def report_progress(event: dict) -> None:
+        cached = event.get("cache_hits", 0)
+        typer.echo(
+            f"[osm fetch] {event['phase']} tiles "
+            f"{event['current']}/{event['total']} "
+            f"(ok={event['tiles_ok']}, cached={cached})",
+            err=True,
+        )
 
     summary = fetch_and_store_city_osm(
         city,
@@ -366,8 +379,25 @@ def osm_fetch_city_cmd(
         osm_dir=osm_dir,
         padding_km=padding_km,
         max_radius_km=max_radius_km,
+        profile=profile,
+        poi_categories=poi_category,
+        progress=report_progress,
+        tile_cache_dir=tile_cache_dir,
+        use_tile_cache=tile_cache,
     )
     typer.echo(json.dumps(summary, indent=1))
+
+
+@osm_app.command("validate")
+def osm_validate_cmd(
+    osm_path: Annotated[
+        Path, typer.Argument(help="OSM XML extract to validate.")
+    ],
+) -> None:
+    """Reject incomplete or Overpass-error extracts before graph construction."""
+    from mamut_routing_tools.osm import validate_osm_extract
+
+    typer.echo(json.dumps(validate_osm_extract(osm_path), indent=1))
 
 
 @roadgraph_app.command("info")

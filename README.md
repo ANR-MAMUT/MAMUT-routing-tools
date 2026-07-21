@@ -12,7 +12,7 @@ Beta. The tool suite is being extracted from the website's former Julia backend;
 
 - `mamut-tools roadgraph`: build and inspect drivable road graphs from OSM XML extracts. The construction is a faithful Python port of the OpenStreetMapX.jl pipeline the project previously used (same road classes, oneway rules, intersection segmentation, ENU distances, and strongly-connected trim), so graphs and route geometry stay consistent with previously published data.
 - `mamut-tools geometry`: materialize road-following polylines for Best-Known Solutions (BKS), in the exact artifact format the MAMUT-routing website consumes.
-- `mamut-tools osm fetch-city`: download an OSM extract (roads + amenities) for a city by name, via Nominatim geocoding and Overpass with retry, roads-only fallback, and tiled amenity backfill.
+- `mamut-tools osm fetch-city`: download and structurally validate a purpose-filtered OSM extract for a city by name, using atomic tiled road and POI acquisition plus a persistent tile cache when a single Overpass query would be too large.
 - `mamut-tools generate`: interactive CVRP/VRPTW instance generation on city road graphs (single, bulk, preview, VRPTW derivation), the port of the historical MAMUT workbench generator.
 - `mamut-tools solve`: PyVRP solving of generated and benchmark instances via mamut-routing-lib; with the `kayros` extra (`pip install 'mamut-routing-tools[kayros]'`), [KAYROS](https://pypi.org/project/kayros/) solves the time-dependent instances (Duration objective, anytime with exact certification tooling).
 - `mamut-tools gui`: a CLI-owned local workbench GUI (loopback server with token security) for fetching cities, previewing, generating, solving, and rendering road-following routes on a map.
@@ -114,9 +114,35 @@ The `MAMUT-routing-lib` submodule is a frequent source of confusion: a conflict 
 ## Quick examples
 
 ```bash
+# Fetch Tokyo's urban area into ./osmdata (the administrative bbox includes
+# distant islands, so explicitly clamp it around the geocoded city point)
+uv run mamut-tools osm fetch-city Tokyo --country Japan --max-radius-km 15
+
+# Road-cache builds skip POIs and download only road classes used by the engine
+uv run mamut-tools osm fetch-city Tokyo --country Japan --max-radius-km 15 --profile road_cache
+
+# Generation defaults to the seven built-in POI categories; override them by
+# repeating --poi-category
+uv run mamut-tools osm fetch-city Lyon --profile generation \
+  --poi-category restaurant --poi-category cafe
+
+# When running inside MAMUT-routing-tools, target the parent site's data folder
+uv run mamut-tools osm fetch-city Tokyo --country Japan --max-radius-km 15 --osm-dir ../osmdata
+
+# Verify that an extract has bounds, nodes and ways and contains no error remark
+uv run mamut-tools osm validate ../osmdata/Tokyo.osm
+
 # Road-graph statistics for a city extract
 uv run mamut-tools roadgraph info path/to/City.osm
 
 # Materialize a route-geometry group plan (website build contract)
 uv run mamut-tools geometry materialize-plan plan.json --repo-root path/to/MAMUT-routing --result-dir out/
 ```
+
+### OSM download profiles
+
+- `generation` (default) downloads only the 16 road classes understood by the road engine, skeleton coordinates for their referenced nodes, and selected POI nodes. Roads and POIs use separate Overpass queries, so a POI failure cannot invalidate complete road data.
+- `road_cache` downloads the filtered road network without POIs. This is the profile used by the MAMUT-routing site build.
+- `full` retains the broad `highway=*` and `amenity=*` behavior for compatibility.
+
+Successful tile responses are validated and cached under `<osm-dir>/.mamut-osm-tile-cache`. Repeating an interrupted request reuses those tiles; pass `--no-tile-cache` to disable reuse or `--tile-cache-dir` to choose another location.
