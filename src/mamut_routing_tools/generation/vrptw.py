@@ -212,13 +212,14 @@ def generate_vrptw_fields(
         raise ValueError(f"Unsupported TW method '{tw_method}'. Use one of: {', '.join(TW_METHODS)}.")
 
     if method == "route_centered":
-        time_windows, _route, width_ratio_mean = generate_tw_route_centered(
+        time_windows, anchor_route, width_ratio_mean = generate_tw_route_centered(
             rng, travel_times, service_times, horizon_start, horizon_end, depot=depot
         )
     else:
         time_windows, width_ratio_mean = generate_tw_reachable_interval(
             rng, travel_times, service_times, horizon_start, horizon_end, depot=depot
         )
+        anchor_route = None
 
     repaired_count = 0
     for i in range(n):
@@ -239,6 +240,10 @@ def generate_vrptw_fields(
         "mean_service_time_horizon_ratio": mean_service_ratio,
         "time_window_ratio": width_ratio_mean,
         "tw_repaired_count": repaired_count,
+        # The capacity-agnostic nearest-neighbour anchor route the windows are
+        # centred on (route_centered only), persisted so a downstream TD
+        # derivation can lift the windows under traffic without recomputing it.
+        "anchor_route": anchor_route,
     }
     return service_times, time_windows, stochastic_params
 
