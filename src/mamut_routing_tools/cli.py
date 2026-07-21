@@ -311,6 +311,31 @@ def generate_derive_vrptw_cmd(
     typer.echo(json.dumps(result, indent=1))
 
 
+@generate_app.command("derive-td")
+def generate_derive_td_cmd(
+    folder: Annotated[Path, typer.Argument(help="Folder holding the generated instance files (meta + cvrptw + vrptw manifest).")],
+    base: Annotated[str, typer.Argument(help="Instance base name (e.g. nantes_par-n9-k2).")],
+    model: Annotated[str, typer.Option("--model", help="Traffic model: bpr or wave.")] = "bpr",
+    intensity: Annotated[str, typer.Option("--intensity", help="Traffic intensity: light, moderate, or heavy.")] = "moderate",
+    all_combos: Annotated[bool, typer.Option("--all", "--all-combos", help="Derive all model x intensity combinations (6 twins each).")] = False,
+    seed: Annotated[int, typer.Option("--seed")] = 42,
+    force: Annotated[bool, typer.Option("--force/--no-force", help="Overwrite existing twins/sidecars.")] = False,
+) -> None:
+    """Derive the TDVRP + TDVRPTW twins of a generated instance (traffic -> ATFs -> TW lift)."""
+    from mamut_routing_tools.generation.td import derive_td_from_vrptw
+
+    result = derive_td_from_vrptw(
+        folder,
+        base,
+        model=model,
+        intensity=intensity,
+        all_combos=all_combos,
+        seed=seed,
+        force=force,
+    )
+    typer.echo(json.dumps(result, indent=1))
+
+
 @osm_app.command("fetch-city")
 def osm_fetch_city_cmd(
     city: Annotated[str, typer.Argument(help="City or locality name to geocode and download.")],
