@@ -52,6 +52,26 @@ def test_capacity_formula_bounds() -> None:
     assert capacity_from_avg_route_size(4.7, [1] * 10) == 4
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"cluster_seeds": 0}, "cluster_seeds"),
+        ({"cluster_decay_meters": 0}, "cluster_decay_meters"),
+        ({"hybrid_poi_share": -0.1}, "hybrid_poi_share"),
+        ({"hybrid_poi_share": 1.1}, "hybrid_poi_share"),
+    ],
+)
+def test_generation_request_rejects_invalid_parametric_controls(
+    fixture_osm_path: Path,
+    overrides: dict,
+    message: str,
+) -> None:
+    request = GenerationRequest(city="Testville", osm_path=fixture_osm_path, **overrides)
+
+    with pytest.raises(ValueError, match=message):
+        request.validate()
+
+
 def test_repair_time_window_keeps_depot_roundtrip_feasible() -> None:
     e, latest = repair_time_window(100, 200, 400, 300, 50, 0, 1000)
     assert e >= 400 and latest <= 1000 - 50 - 300 and e <= latest

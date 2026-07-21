@@ -191,9 +191,18 @@
   input:hover, select:hover { border-color: color-mix(in srgb, var(--ink) 45%, transparent); }
   input:focus-visible, select:focus-visible { border-color: var(--acc); outline-offset: 0; }
   input[type="checkbox"] { accent-color: var(--acc); }
+  input[type="range"] { width: 100%; accent-color: var(--acc); }
 
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .row { display: flex; gap: 6px; align-items: end; flex-wrap: wrap; }
+  .option-group {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    border-left: 2px solid var(--edge);
+    padding-left: 9px;
+  }
+  .range-value { color: var(--acc); font-variant-numeric: tabular-nums; }
 
   .btn {
     display: inline-flex;
@@ -521,6 +530,27 @@
       </details>
       <p class="note">City fetches store every listed category. These checks only filter which POIs generation may select.</p>
     </div>
+    <div id="hybrid-options" class="option-group" hidden>
+      <label class="field">
+        <span>Hybrid composition · <output id="hybrid-share-value" class="range-value">50% POI / 50% parametric</output></span>
+        <input id="hybrid-poi-share" type="range" min="0" max="100" step="5" value="50">
+      </label>
+      <p class="note">Target proportion before availability fallback; missing POI customers are filled parametrically.</p>
+    </div>
+    <div id="parametric-options" class="option-group" hidden>
+      <label class="field"><span>Parametric distribution</span>
+        <select id="customer-mode">
+          <option value="random_clustered">Random + clustered</option>
+          <option value="clustered">Clustered</option>
+          <option value="random">Random</option>
+        </select>
+      </label>
+      <div id="cluster-options" class="grid-2">
+        <label class="field"><span>Number of clusters</span><input id="cluster-seeds" type="number" value="4" min="1" step="1"></label>
+        <label class="field"><span>Pool radius (m)</span><input id="cluster-decay" type="number" value="800" min="1" step="50"></label>
+      </div>
+      <p id="cluster-note" class="note">The pool radius is the exponential decay distance: cluster attraction halves at this distance.</p>
+    </div>
     <label class="field"><span>Problem type</span>
       <select id="problem">
         <option value="cvrp">CVRP · capacity only</option>
@@ -775,18 +805,38 @@ function renderPoiCategories() {
 }
 
 function updateGenerationControls() {
-  el("poi-picker").hidden = el("method").value === "parametric_attach";
+  const method = el("method").value;
+  const hybridPoiPercent = Number(el("hybrid-poi-share").value);
+  const usesPoi = method === "poi_categories" || (method === "hybrid" && hybridPoiPercent > 0);
+  const usesParametric = method === "parametric_attach" || (method === "hybrid" && hybridPoiPercent < 100);
+  el("poi-picker").hidden = !usesPoi;
+  el("hybrid-options").hidden = method !== "hybrid";
+  el("parametric-options").hidden = !usesParametric;
+  const usesClusters = usesParametric && el("customer-mode").value !== "random";
+  el("cluster-options").hidden = !usesClusters;
+  el("cluster-note").hidden = !usesClusters;
+}
+
+function updateHybridShare() {
+  const poiPercent = Number(el("hybrid-poi-share").value);
+  el("hybrid-share-value").textContent = `${poiPercent}% POI / ${100 - poiPercent}% parametric`;
 }
 
 el("poi-default").addEventListener("click", () => setPoiSelection(DEFAULT_POI_CATEGORIES));
 el("poi-all").addEventListener("click", () => setPoiSelection(POI_CATEGORIES));
 el("poi-clear").addEventListener("click", () => setPoiSelection([]));
 el("method").addEventListener("change", updateGenerationControls);
+el("customer-mode").addEventListener("change", updateGenerationControls);
+el("hybrid-poi-share").addEventListener("input", () => {
+  updateHybridShare();
+  updateGenerationControls();
+});
 
 function requestBody() {
   const method = el("method").value;
   const categories = selectedPoiCategories();
-  if (["poi_categories", "hybrid"].includes(method) && !categories.length) {
+  const hybridPoiShare = Number(el("hybrid-poi-share").value) / 100;
+  if ((method === "poi_categories" || (method === "hybrid" && hybridPoiShare > 0)) && !categories.length) {
     throw new Error("Select at least one POI category for this sampling method.");
   }
   return {
@@ -795,6 +845,10 @@ function requestBody() {
     seed: Number(el("seed").value),
     method,
     depotMode: el("depot-mode").value,
+    customerMode: el("customer-mode").value,
+    clusterSeeds: Number(el("cluster-seeds").value),
+    clusterDecayMeters: Number(el("cluster-decay").value),
+    hybridPoiShare,
     categories,
     demandType: Number(el("demand").value),
     avgRouteSize: Number(el("ars").value),
@@ -1407,6 +1461,7 @@ el("clear").addEventListener("click", () => {
 });
 
 renderPoiCategories();
+updateHybridShare();
 updateGenerationControls();
 loadCities().catch((error) => status(`Cannot reach the local server: ${error.message}`));
 loadInstances().catch((error) => console.warn("Unable to list workspace instances", error));

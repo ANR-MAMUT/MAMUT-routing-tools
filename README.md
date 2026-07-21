@@ -99,7 +99,7 @@ uv run mamut-tools gui stop     # terminate the background server
 
 `gui status` reprints the tokened URL, which is the quickest way to recover it if you lose the browser tab. If you would rather watch the server logs live, `gui run` runs it in the foreground instead (development mode, stop with Ctrl-C).
 
-Generated instances remain under `<workspace>/instances/`. Generation controls include the historical POI amenity selection and random, centered, or excentered depot placement. The GUI keeps its additional durable state separately:
+Generated instances remain under `<workspace>/instances/`. Generation controls include the historical POI amenity selection and random, centered, or excentered depot placement. Hybrid sampling exposes its target POI/parametric proportion; parametric sampling exposes the customer distribution, number of clusters, and clustering radius/decay distance. The GUI keeps its additional durable state separately:
 
 - validated solver runs under `<workspace>/solutions/<instance-id>/`;
 - job records under `<workspace>/state/jobs/`;

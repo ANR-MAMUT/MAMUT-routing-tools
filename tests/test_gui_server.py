@@ -53,6 +53,11 @@ def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client
 
     assert 'id="depot-mode"' in html
     assert 'id="poi-list"' in html
+    assert 'id="hybrid-poi-share"' in html
+    assert 'id="customer-mode"' in html
+    assert 'id="cluster-seeds"' in html
+    assert 'id="cluster-decay"' in html
+    assert "POI / ${100 - poiPercent}% parametric" in html
     assert "Excentered (corner)" in html
     assert "Instance only · customer locations" in html
     assert "City fetches store every listed category" in html
@@ -98,10 +103,27 @@ def test_preview_generate_solve_render_round_trip(client: TestClient) -> None:
         "seed": 7,
         "method": "parametric_attach",
         "depotMode": "excentered",
+        "customerMode": "clustered",
+        "clusterSeeds": 2,
+        "clusterDecayMeters": 375,
+        "hybridPoiShare": 0.65,
         "categories": ["hospital", "library"],
     }
     preview = client.post("/api/workbench/generation/preview", json=body).json()
     assert preview["ok"] and len(preview["geojson"]["features"]) == 5
+
+    parametric_only_hybrid = client.post(
+        "/api/workbench/generation/preview",
+        json={
+            **body,
+            "method": "hybrid",
+            "categories": [],
+            "hybridPoiShare": 0,
+        },
+    ).json()
+    assert parametric_only_hybrid["ok"]
+    assert parametric_only_hybrid["summary"]["poi_customers"] == 0
+    assert parametric_only_hybrid["summary"]["parametric_customers"] == 4
 
     single = client.post("/api/workbench/generation/single", json=body).json()
     assert single["ok"]
@@ -132,6 +154,10 @@ def test_preview_generate_solve_render_round_trip(client: TestClient) -> None:
 
     meta = client.get("/instances-file", params={"path": f"{folder}/{single['files']['meta']}"}).json()
     assert meta["generation_params"]["depot_mode"] == "corner"
+    assert meta["generation_params"]["customer_mode"] == "clustered"
+    assert meta["generation_params"]["cluster_seeds"] == 2
+    assert meta["generation_params"]["cluster_decay_meters"] == 375
+    assert meta["generation_params"]["hybrid_poi_share"] == 0.65
     assert meta["generation_params"]["categories"] == ["hospital", "library"]
     rendered = client.post(
         "/api/workbench/render-routes", json={"meta": meta, "routes": solved["routes"], "metric": "fastest"}

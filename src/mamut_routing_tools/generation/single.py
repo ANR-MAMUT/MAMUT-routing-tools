@@ -3,6 +3,7 @@ the port of the workbench's build_generation_selection + generate_single_instanc
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -71,6 +72,12 @@ class GenerationRequest:
             raise ValueError(f"Unsupported depot mode '{self.depot_mode}'")
         if self.customer_mode not in CUSTOMER_MODES:
             raise ValueError(f"Unsupported customer mode '{self.customer_mode}'")
+        if self.cluster_seeds is not None and self.cluster_seeds < 1:
+            raise ValueError("cluster_seeds must be >= 1")
+        if not math.isfinite(self.cluster_decay_meters) or self.cluster_decay_meters <= 0:
+            raise ValueError("cluster_decay_meters must be a positive finite number")
+        if not math.isfinite(self.hybrid_poi_share) or not 0.0 <= self.hybrid_poi_share <= 1.0:
+            raise ValueError("hybrid_poi_share must be between 0 and 1")
 
 
 @dataclass
