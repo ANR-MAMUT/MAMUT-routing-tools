@@ -143,49 +143,11 @@ def generate_preview_cmd(
     typer.echo(json.dumps(preview_geojson(build_generation_selection(request)), indent=1))
 
 
-@generate_app.command("bulk")
-def generate_bulk_cmd(
-    cities: Annotated[list[str], typer.Argument(help="City names (extracts under <workspace>/osmdata/).")],
-    n_list: Annotated[str, typer.Option("--n-list", help="Comma-separated customer counts, e.g. 10,25,50.")] = "50",
-    demand_types: Annotated[str, typer.Option("--demand-types", help="Comma-separated demand types (1-7).")] = "7",
-    avg_route_sizes: Annotated[str, typer.Option("--avg-route-sizes", help="Comma-separated route-size bands (1-7).")] = "4",
-    method: Annotated[str, typer.Option("--method")] = "poi_categories",
-    seed: Annotated[int, typer.Option("--seed", help="Base seed; per-instance seeds derive from it.")] = 0,
-    depot_mode: Annotated[str, typer.Option("--depot-mode")] = "center",
-    customer_mode: Annotated[str, typer.Option("--customer-mode")] = "random_clustered",
-    output_dir: Annotated[Optional[Path], typer.Option("--output-dir")] = None,
-) -> None:
-    """Bulk-generate over cities x sizes x demand types x route-size bands."""
-    from mamut_routing_tools.generation.bulk import generate_bulk_instances
-    from mamut_routing_tools.generation.single import GenerationRequest
-    from mamut_routing_tools.workspace import instances_dir, resolve_workspace
-
-    workspace = resolve_workspace(output_dir)
-    parsed_cities = [(name, _resolve_city_osm(name, None, workspace)) for name in cities]
-    base_request = GenerationRequest(
-        city=parsed_cities[0][0],
-        osm_path=parsed_cities[0][1],
-        method=method,
-        seed=seed,
-        depot_mode=depot_mode,
-        customer_mode=customer_mode,
-    )
-    result = generate_bulk_instances(
-        base_request,
-        cities=parsed_cities,
-        n_list=[int(part) for part in n_list.split(",") if part.strip()],
-        demand_types=[int(part) for part in demand_types.split(",") if part.strip()],
-        avg_route_sizes=[int(part) for part in avg_route_sizes.split(",") if part.strip()],
-        output_root=instances_dir(workspace),
-    )
-    summary = {
-        "ok": result["ok"],
-        "generated": result["generated"],
-        "city_reports": result["city_reports"],
-        "bases": [item["base_name"] for item in result["results"]],
-    }
-    typer.echo(json.dumps(summary, indent=1))
-
+# NB: bulk (batch over cities x sizes x ...) is intentionally not a CLI command.
+# The tool CLI is per-instance (single -> derive-vrptw -> derive-td); batch
+# family generation is delegated to per-campaign scripts calling the tool as a
+# library. generation.bulk.generate_bulk_instances remains available for those
+# scripts and for the GUI.
 
 gui_app = typer.Typer(help="Local workbench GUI (loopback server owned by the CLI).", no_args_is_help=True)
 app.add_typer(gui_app, name="gui")
