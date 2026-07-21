@@ -255,6 +255,92 @@ def test_bpr_is_seed_deterministic(fixture_osm_path: Path) -> None:
     assert a == b and ta == tb
 
 
+def _fake_meta(graph, vertices: list[int], base: str) -> dict:
+    """A minimal stage-1 meta for the given graph vertices (depot first)."""
+    return {
+        "schema_version": 2,
+        "city": "Testville",
+        "instance_name": base,
+        "map_options": {"only_intersections": True, "trim_to_connected_graph": True},
+        "nodes": [
+            {
+                "instance_node_id": i + 1,
+                "graph_vertex_id": v,
+                "poi_lat": 0.0,
+                "poi_lon": 0.0,
+                "enu_x": 0.0,
+                "enu_y": 0.0,
+                "demand": 0 if i == 0 else 5,
+                "source_tag": "depot" if i == 0 else "param",
+            }
+            for i, v in enumerate(vertices)
+        ],
+    }
+
+
+def test_nodes_emitter_maps_to_osm_ids(fixture_osm_path: Path, tmp_path: Path) -> None:
+    clear_caches()
+    graph = load_road_graph(fixture_osm_path, only_intersections=True, trim_to_connected=True)
+    vertices = [0, 1, 2]
+    base = "Testville_par-n2-k1"
+    meta_path = tmp_path / f"{base}_meta.json"
+    meta_path.write_text(json.dumps(_fake_meta(graph, vertices, base)))
+
+    out_dir = export_bridge(
+        osm_path=fixture_osm_path,
+        city_slug="Testville",
+        out_root=tmp_path / "td-bridge",
+        models=["wave"],
+        intensities=["moderate"],
+        meta_paths=[meta_path],
+    )
+    nodes_json = json.loads((out_dir / f"nodes-{base}.json").read_text())
+    assert nodes_json["schema_version"] == 2
+    assert nodes_json["instance_base"] == base
+    assert nodes_json["depot_first"] is True
+    assert nodes_json["node_osm_ids"] == [graph.node_of[v] for v in vertices]
+    # The publisher's load_bridge_nodes contract: >= 2, distinct, depot first.
+    assert len(nodes_json["node_osm_ids"]) >= 2
+    assert len(set(nodes_json["node_osm_ids"])) == len(nodes_json["node_osm_ids"])
+    manifest = json.loads((out_dir / "bridge-manifest.json").read_text())
+    assert manifest["node_files"] == [f"nodes-{base}.json"]
+
+
+def test_nodes_emitter_rejects_option_mismatch(fixture_osm_path: Path, tmp_path: Path) -> None:
+    clear_caches()
+    graph = load_road_graph(fixture_osm_path, only_intersections=True, trim_to_connected=True)
+    meta = _fake_meta(graph, [0, 1], "Testville_par-n1-k1")
+    meta["map_options"]["only_intersections"] = False  # numbering would not align
+    meta_path = tmp_path / "bad_meta.json"
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(TrafficModelError):
+        export_bridge(
+            osm_path=fixture_osm_path,
+            city_slug="Testville",
+            out_root=tmp_path / "td-bridge",
+            models=["wave"],
+            intensities=["moderate"],
+            meta_paths=[meta_path],
+        )
+
+
+def test_nodes_emitter_rejects_out_of_range_vertex(fixture_osm_path: Path, tmp_path: Path) -> None:
+    clear_caches()
+    graph = load_road_graph(fixture_osm_path, only_intersections=True, trim_to_connected=True)
+    meta = _fake_meta(graph, [0, graph.vertex_count + 10], "Testville_par-n1-k1")
+    meta_path = tmp_path / "oob_meta.json"
+    meta_path.write_text(json.dumps(meta))
+    with pytest.raises(TrafficModelError):
+        export_bridge(
+            osm_path=fixture_osm_path,
+            city_slug="Testville",
+            out_root=tmp_path / "td-bridge",
+            models=["wave"],
+            intensities=["moderate"],
+            meta_paths=[meta_path],
+        )
+
+
 def test_export_bridge_bpr_round_trips(fixture_osm_path: Path, tmp_path: Path) -> None:
     clear_caches()
     out_dir = export_bridge(

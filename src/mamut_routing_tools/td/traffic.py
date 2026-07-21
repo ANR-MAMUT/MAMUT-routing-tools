@@ -481,6 +481,67 @@ def _write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 
+def node_osm_ids_from_meta(
+    graph: RoadGraph, meta: dict, *, only_intersections: bool, trim_to_connected: bool
+) -> list[int]:
+    """Map a stage-1 meta's instance nodes (depot first) to OSM node ids on
+    ``graph``.
+
+    The meta's ``graph_vertex_id`` values are indices into the road graph the
+    instance was sampled on, so the meta's ``map_options`` must match the graph
+    the bridge is built on for the numbering to align (this is the stage-1a /
+    stage-3 shared-numbering invariant).
+    """
+    options = meta.get("map_options", {})
+    if (
+        bool(options.get("only_intersections", only_intersections)) != only_intersections
+        or bool(options.get("trim_to_connected_graph", trim_to_connected)) != trim_to_connected
+    ):
+        raise TrafficModelError(
+            f"meta {meta.get('instance_name')!r} map_options {options} do not match the bridge graph "
+            f"options (only_intersections={only_intersections}, trim_to_connected_graph={trim_to_connected}); "
+            "the graph_vertex_id numbering would not align"
+        )
+    node_osm_ids: list[int] = []
+    for node in meta["nodes"]:
+        gvid = int(node["graph_vertex_id"])
+        if not 0 <= gvid < graph.vertex_count:
+            raise TrafficModelError(
+                f"meta {meta.get('instance_name')!r} graph_vertex_id {gvid} out of range [0, {graph.vertex_count})"
+            )
+        node_osm_ids.append(graph.node_of[gvid])
+    return node_osm_ids
+
+
+def _emit_nodes_file(
+    graph: RoadGraph,
+    out_dir: Path,
+    city_slug: str,
+    meta_path: str | Path,
+    *,
+    only_intersections: bool,
+    trim_to_connected: bool,
+) -> str:
+    """Write one ``nodes-<instance_base>.json`` from a stage-1 meta file."""
+    meta = json.loads(Path(meta_path).read_text())
+    base = str(meta["instance_name"])
+    node_osm_ids = node_osm_ids_from_meta(
+        graph, meta, only_intersections=only_intersections, trim_to_connected=trim_to_connected
+    )
+    nodes_path = out_dir / f"nodes-{base}.json"
+    _write_json(
+        nodes_path,
+        {
+            "schema_version": TD_BRIDGE_SCHEMA_VERSION,
+            "city": city_slug,
+            "instance_base": base,
+            "depot_first": True,
+            "node_osm_ids": node_osm_ids,
+        },
+    )
+    return nodes_path.name
+
+
 def export_bridge(
     *,
     osm_path: str | Path,
@@ -492,18 +553,21 @@ def export_bridge(
     force: bool = False,
     only_intersections: bool = True,
     trim_to_connected: bool = True,
+    meta_paths: list[str | Path] | tuple[str | Path, ...] = (),
 ) -> Path:
     """Write the TD bridge for one city under ``<out_root>/<city_slug>/``.
 
     Writes ``graph.json`` (deduplicated directed edges keyed by OSM node ids),
     ``speeds-<model>-<intensity>.json`` for every requested combination (speed
-    profiles aligned with the graph edge order, m/s), and a
-    ``bridge-manifest.json``. Existing per-combination speed files are reused
-    unless ``force=True``. Returns the city output directory.
+    profiles aligned with the graph edge order, m/s), one
+    ``nodes-<instance_base>.json`` per stage-1 meta in ``meta_paths`` (instance
+    node -> OSM node ids, depot first), and a ``bridge-manifest.json``. Existing
+    per-combination speed files are reused unless ``force=True``. Returns the
+    city output directory.
 
-    ``nodes-<instance_base>.json`` (instance node -> OSM node ids) is not
-    emitted here; it depends on the stage-1 meta numbering and is wired in a
-    later milestone.
+    Each meta's ``graph_vertex_id`` values must index the same road graph the
+    bridge is built on, so the metas' ``map_options`` must match
+    ``only_intersections`` / ``trim_to_connected``.
     """
     for model in models:
         if model not in TD_MODELS:
@@ -545,6 +609,18 @@ def export_bridge(
             )
             written.append(speeds_path.name)
 
+    node_files: list[str] = [
+        _emit_nodes_file(
+            graph,
+            out_dir,
+            city_slug,
+            meta_path,
+            only_intersections=only_intersections,
+            trim_to_connected=trim_to_connected,
+        )
+        for meta_path in meta_paths
+    ]
+
     _write_json(
         out_dir / "bridge-manifest.json",
         {
@@ -553,7 +629,7 @@ def export_bridge(
             "num_vertices": graph.vertex_count,
             "num_edges": len(edges),
             "speed_files": written,
-            "node_files": [],
+            "node_files": node_files,
         },
     )
     return out_dir
