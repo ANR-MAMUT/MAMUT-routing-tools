@@ -38,7 +38,7 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "mamut-routing-lib[pyvrp]>=0.7.0",
+    "mamut-routing-lib[pyvrp]>=0.8.0",
     "typer>=0.12",
     "pydantic>=2.7",
     "numpy>=1.26",
