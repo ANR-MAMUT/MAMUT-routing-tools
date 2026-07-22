@@ -8,7 +8,7 @@ now lives in the generation tool. Consumes the TD bridge produced by
 ``mamut_routing_tools.generation``.
 """
 
-from mamut_routing_tools.family.bridge import (
+from mamut_routing_tools.td.bridge import (
     BridgeGraph,
     BridgeNodes,
     BridgeSpeeds,

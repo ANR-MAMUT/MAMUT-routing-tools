@@ -1,19 +1,25 @@
-"""Parsing and validation of the TD bridge written by ``webapp/td_traffic.jl``.
+"""The TD-bridge contract: in-memory types and their JSON serialization.
 
-The bridge is a git-ignored per-city intermediate under
-``instances_v2/td-bridge/<city>/`` (schema v2, Stream 12'):
+The bridge is the hand-off between the traffic generator (the producer,
+:mod:`mamut_routing_tools.td.traffic`) and the family builder (the consumer,
+:mod:`mamut_routing_tools.family`). Three record types carry it:
 
-- ``graph.json`` — deduplicated directed edges ``[osm_u, osm_v, length_m,
-  class, free_speed_ms]`` (OSM node ids are the stable keys; the free-flow
-  limit uses the same 3-decimal rounding as the speed profiles) plus
-  ``vertices`` ``[osm_id, lon, lat]`` for every vertex incident to an edge;
-- ``speeds-<model>-<intensity>.json`` — per-edge speed profiles (m/s, one
-  value per hourly bin) aligned with the graph edge order;
-- ``nodes-<instance_base>.json`` — instance node -> OSM node ids, depot
-  first, for one stage-1 instance.
+- :class:`BridgeGraph` — deduplicated directed edges ``(osm_u, osm_v,
+  length_m, class, free_speed_ms)`` keyed by OSM node ids (the free-flow limit
+  uses the same 3-decimal rounding as the speed profiles) plus every incident
+  vertex's WGS84 position;
+- :class:`BridgeSpeeds` — per-edge hourly speed profiles (m/s), aligned with
+  ``BridgeGraph.edges``;
+- :class:`BridgeNodes` — one stage-1 instance's nodes mapped to OSM node ids,
+  depot first.
 
-The bridge is produced by mamut_routing_tools.td.traffic (Python); every
-published byte is canonicalized downstream by the Python builder.
+These records ARE the contract; the ``graph.json`` /
+``speeds-<model>-<intensity>.json`` / ``nodes-<instance_base>.json`` files are
+just their serialized form. ``serialize_bridge_*`` and ``load_bridge_*`` are
+exact inverses, so building the records in memory (the streamlined default) and
+round-tripping them through disk (the cached / inspectable path) yield equal
+records. The JSON is a git-ignored intermediate; every published byte is
+canonicalized downstream by the Python builder.
 """
 
 from __future__ import annotations
@@ -56,6 +62,71 @@ class BridgeNodes:
     city: str
     instance_base: str
     node_osm_ids: list[int]  # depot first
+
+
+# ---------------------------------------------------------------------------
+# serialization (record -> JSON-ready dict)
+# ---------------------------------------------------------------------------
+
+
+def serialize_bridge_graph(graph: BridgeGraph) -> dict:
+    """The ``graph.json`` payload for a :class:`BridgeGraph`.
+
+    Vertices ship as ``[osm_id, lon, lat]`` sorted by OSM id (the consumer
+    reads them into a dict, so order is cosmetic but kept stable); edges ship as
+    ``[osm_u, osm_v, length_m, class, free_speed_ms]`` in ``BridgeGraph.edges``
+    order (the speed profiles align with it).
+    """
+    vertices = sorted(
+        ([int(osm_id), float(lon), float(lat)] for osm_id, (lon, lat) in graph.vertex_lonlat.items()),
+        key=lambda row: row[0],
+    )
+    edges = [
+        [int(osm_u), int(osm_v), float(length_m), int(road_class), float(free_speed)]
+        for osm_u, osm_v, length_m, road_class, free_speed in graph.edges
+    ]
+    return {
+        "schema_version": BRIDGE_SCHEMA_VERSION,
+        "city": graph.city,
+        "osm_file": graph.osm_file,
+        "map_options": dict(graph.map_options),
+        "num_bins": graph.num_bins,
+        "bin_seconds": graph.bin_seconds,
+        "speed_unit": "m/s",
+        "length_unit": "m",
+        "vertices": vertices,
+        "edges": edges,
+    }
+
+
+def serialize_bridge_speeds(speeds: BridgeSpeeds) -> dict:
+    """The ``speeds-<model>-<intensity>.json`` payload for a :class:`BridgeSpeeds`."""
+    return {
+        "schema_version": BRIDGE_SCHEMA_VERSION,
+        "city": speeds.city,
+        "model": speeds.model,
+        "intensity": speeds.intensity,
+        "seed": speeds.seed,
+        "num_trips": speeds.num_trips,
+        "params": dict(speeds.params),
+        "speeds": [list(row) for row in speeds.speeds],
+    }
+
+
+def serialize_bridge_nodes(nodes: BridgeNodes) -> dict:
+    """The ``nodes-<instance_base>.json`` payload for a :class:`BridgeNodes`."""
+    return {
+        "schema_version": BRIDGE_SCHEMA_VERSION,
+        "city": nodes.city,
+        "instance_base": nodes.instance_base,
+        "depot_first": True,
+        "node_osm_ids": [int(v) for v in nodes.node_osm_ids],
+    }
+
+
+# ---------------------------------------------------------------------------
+# deserialization (JSON -> record) with the consumer's validity checks
+# ---------------------------------------------------------------------------
 
 
 def _read_bridge_payload(path: Path) -> dict:

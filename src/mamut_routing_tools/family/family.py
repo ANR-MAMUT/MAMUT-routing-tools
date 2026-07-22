@@ -75,7 +75,7 @@ from mamut_routing_lib.td import (
     td_instance_from_payload,
 )
 
-from mamut_routing_tools.family.bridge import BridgeGraph, BridgeNodes, BridgeSpeeds
+from mamut_routing_tools.td.bridge import BridgeGraph, BridgeNodes, BridgeSpeeds
 from mamut_routing_tools.family.naming import (
     ALL_TW_SETS,
     FAMILY,

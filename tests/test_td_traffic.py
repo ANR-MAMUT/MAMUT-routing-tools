@@ -14,6 +14,12 @@ from pathlib import Path
 import pytest
 
 from mamut_routing_tools.roadgraph.build import SPEED_ROADS_URBAN, clear_caches, load_road_graph
+from mamut_routing_tools.td import (
+    build_bridge,
+    load_bridge_graph,
+    load_bridge_nodes,
+    load_bridge_speeds,
+)
 from mamut_routing_tools.td.traffic import (
     TD_MIN_SPEED_FACTOR,
     TD_NUM_BINS,
@@ -339,6 +345,46 @@ def test_nodes_emitter_rejects_out_of_range_vertex(fixture_osm_path: Path, tmp_p
             intensities=["moderate"],
             meta_paths=[meta_path],
         )
+
+
+def test_build_bridge_matches_disk_round_trip(fixture_osm_path: Path, tmp_path: Path) -> None:
+    # The streamlined in-memory build must equal the serialize-then-load path,
+    # so the per-instance derivation (build_bridge) and any cached disk export
+    # (export_bridge + load_bridge_*) never diverge. Both models exercised.
+    clear_caches()
+    graph = load_road_graph(fixture_osm_path, only_intersections=True, trim_to_connected=True)
+    base = "Testville_par-n2-k1"
+    meta = _fake_meta(graph, [0, 1, 2], base)
+    meta_path = tmp_path / f"{base}_meta.json"
+    meta_path.write_text(json.dumps(meta))
+    models = ["wave", "bpr"]
+    intensities = ["moderate"]
+
+    built = build_bridge(
+        osm_path=fixture_osm_path,
+        city_slug="Testville",
+        models=models,
+        intensities=intensities,
+        metas=[meta],
+    )
+
+    out_dir = export_bridge(
+        osm_path=fixture_osm_path,
+        city_slug="Testville",
+        out_root=tmp_path / "td-bridge",
+        models=models,
+        intensities=intensities,
+        meta_paths=[meta_path],
+    )
+    disk_graph = load_bridge_graph(out_dir / "graph.json")
+    disk_nodes = load_bridge_nodes(out_dir / f"nodes-{base}.json")
+
+    assert built.graph == disk_graph
+    assert built.nodes[base] == disk_nodes
+    for model in models:
+        for intensity in intensities:
+            disk_speeds = load_bridge_speeds(out_dir / f"speeds-{model}-{intensity}.json", disk_graph)
+            assert built.speeds[(model, intensity)] == disk_speeds
 
 
 def test_export_bridge_bpr_round_trips(fixture_osm_path: Path, tmp_path: Path) -> None:

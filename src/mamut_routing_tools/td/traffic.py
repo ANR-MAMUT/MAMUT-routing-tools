@@ -1,9 +1,9 @@
 """Time-dependent traffic generation on the tool's own road graph.
 
 A Python port of the workbench's stage-3 traffic stage: per-edge hourly speed
-profiles over a 24 h day from two traffic models, plus the "TD bridge" export
-(plain-JSON intermediates the MAMUT-routing publisher turns into TDVRP/TDVRPTW
-instances).
+profiles over a 24 h day from two traffic models, exposed as the "TD bridge"
+records (:mod:`mamut_routing_tools.td.bridge`) the family builder turns into
+TDVRP/TDVRPTW instances.
 
 Traffic models:
 
@@ -18,22 +18,23 @@ Traffic models:
   transposed graph, which matches forward routing except on equal-cost
   shortest-path ties. (Ported separately; see :func:`bpr_speeds`.)
 
-The bridge is a git-ignored intermediate. The canonical published data is
-whatever the publisher freezes into the road-graph speed sidecars, so speeds
-are rounded here to keep sidecar size down. This generator is additive: cross-
-language RNG means numpy cannot reproduce the original Julia MersenneTwister
-stream, so regenerated speeds differ from any previously frozen overlays by
-design. Validation is therefore structural (same edge set and bin count,
-free-flow clamp, plausible per-intensity speed distributions) and downstream
-(materialize ATFs, run the Duration checker), never a byte-for-byte diff.
+:func:`build_bridge` assembles the bridge records in memory (the streamlined
+path a per-instance derivation uses); :func:`export_bridge` serializes the same
+records to the git-ignored ``graph.json`` / ``speeds-*.json`` / ``nodes-*.json``
+intermediate for the cached / inspectable path. The canonical published data is
+whatever the family builder freezes into the road-graph speed sidecars, so
+speeds are rounded here to keep sidecar size down. This generator is additive:
+cross-language RNG means numpy cannot reproduce the original Julia
+MersenneTwister stream, so regenerated speeds differ from any previously frozen
+overlays by design. Validation is therefore structural (same edge set and bin
+count, free-flow clamp, plausible per-intensity speed distributions) and
+downstream (materialize ATFs, run the Duration checker), never a byte-for-byte
+diff.
 
-The emitted files round-trip unchanged through the publisher's bridge loaders;
-that JSON contract is fixed and this module emits exactly what those loaders
-read. Wave speeds may exceed the static free-flow limit by up to the jitter
-fraction; the publisher clamps every bridge speed to its edge's free-flow
-limit when it canonicalizes the overlay sidecar (overlays are slowdowns by
-contract), so over-limit bridge speeds are expected and match the Julia
-bridge.
+Wave speeds may exceed the static free-flow limit by up to the jitter fraction;
+the builder clamps every bridge speed to its edge's free-flow limit when it
+canonicalizes the overlay sidecar (overlays are slowdowns by contract), so
+over-limit bridge speeds are expected.
 """
 
 from __future__ import annotations
@@ -54,9 +55,17 @@ from mamut_routing_tools.generation.matrices import _reconstruct_path
 from mamut_routing_tools.generation.pois import DEFAULT_CATEGORIES, find_pois
 from mamut_routing_tools.geo import haversine_m
 from mamut_routing_tools.roadgraph.build import SPEED_ROADS_URBAN, RoadGraph, load_road_graph
+from mamut_routing_tools.td.bridge import (
+    BRIDGE_SCHEMA_VERSION,
+    BridgeGraph,
+    BridgeNodes,
+    BridgeSpeeds,
+    serialize_bridge_graph,
+    serialize_bridge_nodes,
+    serialize_bridge_speeds,
+)
 
 # --- bridge schema / time discretization -----------------------------------
-TD_BRIDGE_SCHEMA_VERSION = 2
 TD_NUM_BINS = 24
 TD_BIN_SECONDS = 3600.0
 TD_SPEED_DECIMALS = 3  # exported speeds are rounded to mm/s
@@ -535,7 +544,9 @@ def model_params(model: str, intensity: str) -> dict:
             "bpr_alpha": TD_BPR_ALPHA,
             "bpr_beta": TD_BPR_BETA,
             "multiplier_cap": TD_BPR_MULTIPLIER_CAP,
-            "capacity_veh_h": TD_CAPACITY_VEH_H,
+            # String keys so the record equals its JSON-serialized form (JSON
+            # object keys are strings); this is a provenance record only.
+            "capacity_veh_h": {str(cls): cap for cls, cap in TD_CAPACITY_VEH_H.items()},
             "min_speed_factor": TD_MIN_SPEED_FACTOR,
             "departures": {
                 "morning": [8.0, 0.75],
@@ -548,68 +559,71 @@ def model_params(model: str, intensity: str) -> dict:
     raise TrafficModelError(f"unknown traffic model {model!r}; known: {TD_MODELS}")
 
 
-def graph_payload(
+def build_bridge_graph(
     graph: RoadGraph,
     edges: list[BridgeEdge],
     city_slug: str,
     osm_path: str | Path,
     only_intersections: bool,
     trim_to_connected: bool,
-) -> dict:
-    """The ``graph.json`` payload: bridge schema v2.
+) -> BridgeGraph:
+    """Assemble the shared :class:`BridgeGraph` for a road graph and its edges.
 
     Edges carry the static free-flow limit (m/s, same rounding as the speed
     profiles) so the consumer never needs the class table; every vertex
-    incident to an edge ships its WGS84 position ``[osm_id, lon, lat]`` (sorted
-    by osm_id) for the consumer's geo cache.
+    incident to an edge ships its WGS84 position for the consumer's geo cache.
+    Serializing this record (``serialize_bridge_graph``) then loading it back
+    (``load_bridge_graph``) returns an equal record, so the in-memory and disk
+    paths never diverge.
     """
     used = sorted({v for edge in edges for v in (edge.u, edge.v)})
-    vertices: list[list] = []
+    vertex_lonlat: dict[int, tuple[float, float]] = {}
     for graph_vertex in used:
-        osm_id = graph.node_of[graph_vertex]
+        osm_id = int(graph.node_of[graph_vertex])
         lon, lat = graph.node_lonlat(osm_id)
-        vertices.append([osm_id, lon, lat])
-    vertices.sort(key=lambda row: row[0])
-    edge_rows = [
-        [edge.osm_u, edge.osm_v, edge.length_m, edge.road_class, td_round_speed(td_free_speed_ms(edge.road_class))]
+        vertex_lonlat[osm_id] = (float(lon), float(lat))
+    edge_tuples = [
+        (
+            int(edge.osm_u),
+            int(edge.osm_v),
+            float(edge.length_m),
+            int(edge.road_class),
+            td_round_speed(td_free_speed_ms(edge.road_class)),
+        )
         for edge in edges
     ]
-    return {
-        "schema_version": TD_BRIDGE_SCHEMA_VERSION,
-        "city": city_slug,
-        "osm_file": Path(osm_path).name,
-        "map_options": {
+    return BridgeGraph(
+        city=city_slug,
+        osm_file=Path(osm_path).name,
+        map_options={
             "only_intersections": only_intersections,
             "trim_to_connected_graph": trim_to_connected,
         },
-        "num_bins": TD_NUM_BINS,
-        "bin_seconds": TD_BIN_SECONDS,
-        "speed_unit": "m/s",
-        "length_unit": "m",
-        "vertices": vertices,
-        "edges": edge_rows,
-    }
+        num_bins=TD_NUM_BINS,
+        bin_seconds=TD_BIN_SECONDS,
+        edges=edge_tuples,
+        vertex_lonlat=vertex_lonlat,
+    )
 
 
-def speeds_payload(
+def build_bridge_speeds(
     city_slug: str,
     model: str,
     intensity: str,
     seed: int,
     num_trips: int,
     speeds: list[list[float]],
-) -> dict:
-    """The ``speeds-<model>-<intensity>.json`` payload."""
-    return {
-        "schema_version": TD_BRIDGE_SCHEMA_VERSION,
-        "city": city_slug,
-        "model": model,
-        "intensity": intensity,
-        "seed": seed,
-        "num_trips": num_trips,
-        "params": model_params(model, intensity),
-        "speeds": speeds,
-    }
+) -> BridgeSpeeds:
+    """Wrap one combination's per-edge speed profiles in a :class:`BridgeSpeeds`."""
+    return BridgeSpeeds(
+        city=city_slug,
+        model=model,
+        intensity=intensity,
+        seed=seed,
+        num_trips=num_trips,
+        params=model_params(model, intensity),
+        speeds=speeds,
+    )
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -652,33 +666,134 @@ def node_osm_ids_from_meta(
     return node_osm_ids
 
 
-def _emit_nodes_file(
+def build_bridge_nodes(
     graph: RoadGraph,
-    out_dir: Path,
+    meta: dict,
     city_slug: str,
-    meta_path: str | Path,
     *,
     only_intersections: bool,
     trim_to_connected: bool,
-) -> str:
-    """Write one ``nodes-<instance_base>.json`` from a stage-1 meta file."""
-    meta = json.loads(Path(meta_path).read_text())
-    base = str(meta["instance_name"])
-    node_osm_ids = node_osm_ids_from_meta(
-        graph, meta, only_intersections=only_intersections, trim_to_connected=trim_to_connected
+) -> BridgeNodes:
+    """Map one stage-1 ``meta``'s instance nodes (depot first) to a :class:`BridgeNodes`."""
+    return BridgeNodes(
+        city=city_slug,
+        instance_base=str(meta["instance_name"]),
+        node_osm_ids=node_osm_ids_from_meta(
+            graph, meta, only_intersections=only_intersections, trim_to_connected=trim_to_connected
+        ),
     )
-    nodes_path = out_dir / f"nodes-{base}.json"
-    _write_json(
-        nodes_path,
-        {
-            "schema_version": TD_BRIDGE_SCHEMA_VERSION,
-            "city": city_slug,
-            "instance_base": base,
-            "depot_first": True,
-            "node_osm_ids": node_osm_ids,
-        },
+
+
+def _compute_speeds(
+    graph: RoadGraph,
+    edges: list[BridgeEdge],
+    vertex_ll: list[tuple[float, float]],
+    center: tuple[float, float],
+    osm_path: str | Path,
+    model: str,
+    intensity: str,
+    combo_seed: int,
+) -> tuple[list[list[float]], int]:
+    """One combination's per-edge speed profiles and trip count (0 for ``wave``)."""
+    if model == "wave":
+        return wave_speeds(edges, vertex_ll, center, intensity, combo_seed), 0
+    return bpr_speeds(graph, edges, osm_path, intensity, combo_seed)
+
+
+def _validate_combos(
+    models: list[str] | tuple[str, ...], intensities: list[str] | tuple[str, ...]
+) -> None:
+    for model in models:
+        if model not in TD_MODELS:
+            raise TrafficModelError(f"unknown traffic model {model!r}; known: {TD_MODELS}")
+    for intensity in intensities:
+        if intensity not in TD_INTENSITIES:
+            raise TrafficModelError(f"unknown intensity {intensity!r}; known: {TD_INTENSITIES}")
+
+
+def _load_bridge_road_graph(
+    osm_path: str | Path, only_intersections: bool, trim_to_connected: bool
+) -> tuple[RoadGraph, list[BridgeEdge], list[tuple[float, float]], tuple[float, float]]:
+    """Load the city road graph and derive the shared bridge inputs once."""
+    graph = load_road_graph(
+        osm_path, only_intersections=only_intersections, trim_to_connected=trim_to_connected
     )
-    return nodes_path.name
+    edges = collect_edges(graph)
+    if not edges:
+        raise TrafficModelError(f"road graph for {Path(osm_path).name} produced no usable edges")
+    vertex_ll = vertex_latlon(graph)
+    return graph, edges, vertex_ll, _center_latlon(vertex_ll)
+
+
+@dataclass
+class BridgeBuild:
+    """The full TD bridge for one city, held in memory.
+
+    ``graph`` is shared by every combination; ``speeds`` is keyed by ``(model,
+    intensity)``; ``nodes`` is keyed by instance base name (one entry per
+    stage-1 meta). The consumer (``mamut_routing_tools.family``) takes these
+    records directly, so a per-instance derivation skips the JSON round-trip
+    entirely; :func:`export_bridge` serializes the same records to disk for the
+    cached / inspectable path.
+    """
+
+    graph: BridgeGraph
+    speeds: dict[tuple[str, str], BridgeSpeeds]
+    nodes: dict[str, BridgeNodes]
+
+
+def build_bridge(
+    *,
+    osm_path: str | Path,
+    city_slug: str,
+    models: list[str] | tuple[str, ...] = TD_MODELS,
+    intensities: list[str] | tuple[str, ...] = TD_INTENSITIES,
+    seed: int = 42,
+    only_intersections: bool = True,
+    trim_to_connected: bool = True,
+    metas: list[dict] | tuple[dict, ...] = (),
+) -> BridgeBuild:
+    """Build the full TD bridge for one city in memory (no disk round-trip).
+
+    Loads the city road graph once, collects its deduplicated edges, then
+    assembles the shared :class:`BridgeGraph`, a :class:`BridgeSpeeds` for every
+    ``model x intensity`` combination, and a :class:`BridgeNodes` for every
+    stage-1 ``meta`` dict in ``metas`` (keyed by instance base name). This is the
+    streamlined path the per-instance TD derivation uses; it produces exactly the
+    records :func:`export_bridge` writes to and reads back from disk.
+
+    Each meta's ``graph_vertex_id`` values must index the same road graph the
+    bridge is built on, so the metas' ``map_options`` must match
+    ``only_intersections`` / ``trim_to_connected``.
+    """
+    _validate_combos(models, intensities)
+    graph, edges, vertex_ll, center = _load_bridge_road_graph(
+        osm_path, only_intersections, trim_to_connected
+    )
+    bridge_graph = build_bridge_graph(
+        graph, edges, city_slug, osm_path, only_intersections, trim_to_connected
+    )
+    speeds: dict[tuple[str, str], BridgeSpeeds] = {}
+    for model in models:
+        for intensity in intensities:
+            combo_seed = bridge_seed(seed, model, intensity)
+            profiles, num_trips = _compute_speeds(
+                graph, edges, vertex_ll, center, osm_path, model, intensity, combo_seed
+            )
+            speeds[(model, intensity)] = build_bridge_speeds(
+                city_slug, model, intensity, combo_seed, num_trips, profiles
+            )
+    nodes: dict[str, BridgeNodes] = {}
+    for meta in metas:
+        record = build_bridge_nodes(
+            graph,
+            meta,
+            city_slug,
+            only_intersections=only_intersections,
+            trim_to_connected=trim_to_connected,
+        )
+        nodes[record.instance_base] = record
+    return BridgeBuild(graph=bridge_graph, speeds=speeds, nodes=nodes)
 
 
 def export_bridge(
@@ -694,39 +809,35 @@ def export_bridge(
     trim_to_connected: bool = True,
     meta_paths: list[str | Path] | tuple[str | Path, ...] = (),
 ) -> Path:
-    """Write the TD bridge for one city under ``<out_root>/<city_slug>/``.
+    """Serialize the TD bridge for one city under ``<out_root>/<city_slug>/``.
 
     Writes ``graph.json`` (deduplicated directed edges keyed by OSM node ids),
     ``speeds-<model>-<intensity>.json`` for every requested combination (speed
     profiles aligned with the graph edge order, m/s), one
     ``nodes-<instance_base>.json`` per stage-1 meta in ``meta_paths`` (instance
-    node -> OSM node ids, depot first), and a ``bridge-manifest.json``. Existing
-    per-combination speed files are reused unless ``force=True``. Returns the
-    city output directory.
+    node -> OSM node ids, depot first), and a ``bridge-manifest.json``. The bytes
+    written are exactly the serialized :func:`build_bridge` records, so
+    ``load_bridge_*`` reads them back unchanged. Existing per-combination speed
+    files are reused unless ``force=True`` (the disk path's only advantage over
+    building in memory: skipping an expensive recompute). Returns the city output
+    directory.
 
     Each meta's ``graph_vertex_id`` values must index the same road graph the
     bridge is built on, so the metas' ``map_options`` must match
     ``only_intersections`` / ``trim_to_connected``.
     """
-    for model in models:
-        if model not in TD_MODELS:
-            raise TrafficModelError(f"unknown traffic model {model!r}; known: {TD_MODELS}")
-    for intensity in intensities:
-        if intensity not in TD_INTENSITIES:
-            raise TrafficModelError(f"unknown intensity {intensity!r}; known: {TD_INTENSITIES}")
-
-    graph = load_road_graph(osm_path, only_intersections=only_intersections, trim_to_connected=trim_to_connected)
-    edges = collect_edges(graph)
-    if not edges:
-        raise TrafficModelError(f"road graph for {Path(osm_path).name} produced no usable edges")
-    vertex_ll = vertex_latlon(graph)
-    center = _center_latlon(vertex_ll)
+    _validate_combos(models, intensities)
+    graph, edges, vertex_ll, center = _load_bridge_road_graph(
+        osm_path, only_intersections, trim_to_connected
+    )
 
     out_dir = Path(out_root) / city_slug
     out_dir.mkdir(parents=True, exist_ok=True)
     _write_json(
         out_dir / "graph.json",
-        graph_payload(graph, edges, city_slug, osm_path, only_intersections, trim_to_connected),
+        serialize_bridge_graph(
+            build_bridge_graph(graph, edges, city_slug, osm_path, only_intersections, trim_to_connected)
+        ),
     )
 
     written: list[str] = []
@@ -737,33 +848,31 @@ def export_bridge(
                 written.append(f"{speeds_path.name} (kept)")
                 continue
             combo_seed = bridge_seed(seed, model, intensity)
-            num_trips = 0
-            if model == "wave":
-                speeds = wave_speeds(edges, vertex_ll, center, intensity, combo_seed)
-            else:
-                speeds, num_trips = bpr_speeds(graph, edges, osm_path, intensity, combo_seed)
+            profiles, num_trips = _compute_speeds(
+                graph, edges, vertex_ll, center, osm_path, model, intensity, combo_seed
+            )
             _write_json(
                 speeds_path,
-                speeds_payload(city_slug, model, intensity, combo_seed, num_trips, speeds),
+                serialize_bridge_speeds(
+                    build_bridge_speeds(city_slug, model, intensity, combo_seed, num_trips, profiles)
+                ),
             )
             written.append(speeds_path.name)
 
-    node_files: list[str] = [
-        _emit_nodes_file(
-            graph,
-            out_dir,
-            city_slug,
-            meta_path,
-            only_intersections=only_intersections,
-            trim_to_connected=trim_to_connected,
+    node_files: list[str] = []
+    for meta_path in meta_paths:
+        meta = json.loads(Path(meta_path).read_text())
+        record = build_bridge_nodes(
+            graph, meta, city_slug, only_intersections=only_intersections, trim_to_connected=trim_to_connected
         )
-        for meta_path in meta_paths
-    ]
+        nodes_path = out_dir / f"nodes-{record.instance_base}.json"
+        _write_json(nodes_path, serialize_bridge_nodes(record))
+        node_files.append(nodes_path.name)
 
     _write_json(
         out_dir / "bridge-manifest.json",
         {
-            "schema_version": TD_BRIDGE_SCHEMA_VERSION,
+            "schema_version": BRIDGE_SCHEMA_VERSION,
             "city": city_slug,
             "num_vertices": graph.vertex_count,
             "num_edges": len(edges),

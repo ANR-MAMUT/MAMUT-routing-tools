@@ -48,11 +48,6 @@ from mamut_routing_lib.td import (
     td_instance_from_payload,
 )
 
-from mamut_routing_tools.family.bridge import (
-    load_bridge_graph,
-    load_bridge_nodes,
-    load_bridge_speeds,
-)
 from mamut_routing_tools.family.family import (
     AUTHORS,
     DEFAULT_EXTENSION_END,
@@ -72,10 +67,8 @@ from mamut_routing_tools.family.family import (
 from mamut_routing_tools.family.naming import subinstance_name, td_instance_name
 from mamut_routing_tools.generation.vrptw import nearest_neighbour_route
 from mamut_routing_tools.generation.writers import slugify
-from mamut_routing_tools.roadgraph.build import load_road_graph
-from mamut_routing_tools.td.traffic import export_bridge
+from mamut_routing_tools.td.traffic import build_bridge
 
-BRIDGE_DIRNAME = ".td-bridge"
 GENERATOR_NAME = "mamut-routing-tools"
 
 
@@ -322,25 +315,23 @@ def derive_td_from_vrptw(
 
     osm_path = _resolve_osm_path(str(meta["source_osm_file"]))
 
-    # 1. TD bridge for this city (graph + requested speed profiles + this
-    #    instance's node -> OSM mapping), under a per-folder temp root.
-    bridge_root = folder / BRIDGE_DIRNAME
+    # 1. TD bridge for this city, built in memory (shared graph + one speed
+    #    profile per requested combination + this instance's node -> OSM
+    #    mapping); the family records are consumed directly, no JSON round-trip.
     bridge_models = sorted({m for m, _ in combos})
     bridge_intensities = sorted({i for _, i in combos})
-    bridge_dir = export_bridge(
+    bridge = build_bridge(
         osm_path=osm_path,
         city_slug=city_slug,
-        out_root=bridge_root,
         models=bridge_models,
         intensities=bridge_intensities,
-        meta_paths=[meta_path],
+        metas=[meta],
         seed=seed,
-        force=force,
         only_intersections=only_intersections,
         trim_to_connected=trim_to_connected,
     )
-    bridge_graph = load_bridge_graph(bridge_dir / "graph.json")
-    bridge_nodes = load_bridge_nodes(bridge_dir / f"nodes-{base}.json")
+    bridge_graph = bridge.graph
+    bridge_nodes = bridge.nodes[base]
 
     # 2. Instance road graph: full city graph from the bridge, trimmed to the
     #    union of pinned free-flow fastest paths, saved next to the instance.
@@ -379,7 +370,7 @@ def derive_td_from_vrptw(
     anchor_arcs_by_sub: dict[str, dict[tuple[int, int], Any]] = {}
     for m, i in combos:
         sub = subinstance_name(m, i)
-        speeds = load_bridge_speeds(bridge_dir / f"speeds-{m}-{i}.json", bridge_graph)
+        speeds = bridge.speeds[(m, i)]
         overlay = _align_overlay(road, bridge_graph, speeds)
         overlay_file = f"{base}.traffic-{sub}.json.gz"
         save_traffic_overlay(overlay, folder / overlay_file)
