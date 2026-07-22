@@ -233,7 +233,7 @@ def build_vrp_json_payload(
     payload: dict[str, Any] = {
         "instance_name": instance_name,
         "instance_origin": "OsmCvrpGen",
-        "benchmark_name": "Mamut2026",
+        "benchmark_name": "Poryos2026",
         "num_customers": parsed.dimension - 1,
         "vehicle_capacity": parsed.capacity,
         "coordinates": [[x, y] for x, y in parsed.coordinates],

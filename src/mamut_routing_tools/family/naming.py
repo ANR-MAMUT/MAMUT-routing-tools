@@ -1,12 +1,12 @@
-"""Naming and on-disk layout of the Mamut2026 collection (v2, Stream 12').
+"""Naming and on-disk layout of the Poryos2026 collection (v2, Stream 12').
 
 One base instance = one customer set = one name across every problem type:
-``mamut-<city>-n<N>-<method>`` (method in {poi, hyb}). TD subinstances append
+``poryos-<city>-n<N>-<method>`` (method in {poi, hyb}). TD subinstances append
 ``-<model>-<intensity>`` (6 per base). Extra static-only VRPTW TW sets append
 ``-tw-<set>`` (the ``tw-`` prefix cannot collide with the TD tags); the
 TD-paired VRPTW instance keeps the bare base name, mirroring the TDVRPTW
 twins that embed the same windows. The family lives in a single family-first
-collection repo mounted at ``benchmarks/Mamut2026/``:
+collection repo mounted at ``benchmarks/Poryos2026/``:
 
     sidecars/<city>/n=<N>/<base>/            shared sidecars of the base
     CVRP/<metric>/<city>/n=<N>/<base>/
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-FAMILY = "Mamut2026"
+FAMILY = "Poryos2026"
 METHOD_TAGS = {"poi_categories": "poi", "parametric_attach": "par", "hybrid": "hyb"}
 
 TW_SET_TD_SHARED = "td-shared"
@@ -30,7 +30,7 @@ ALL_TW_SETS = (TW_SET_TD_SHARED, *EXTRA_TW_SETS)
 
 
 def base_instance_name(city: str, n: int, method_tag: str) -> str:
-    return f"mamut-{city}-n{n}-{method_tag}".lower()
+    return f"poryos-{city}-n{n}-{method_tag}".lower()
 
 
 def subinstance_name(model: str, intensity: str) -> str:

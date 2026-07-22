@@ -1,4 +1,4 @@
-"""Mamut2026 collection builder (v2, Stream 12').
+"""Poryos2026 collection builder (v2, Stream 12').
 
 The Python side of the deliberately 3-stepped generation. Per base
 (city x n x method):
@@ -412,7 +412,7 @@ def _static_instance_payload(
     capacity = int(manifest["capacity"])
     lb_cap = capacity_lower_bound(demands, capacity)
     if lb_cap < 2:
-        raise ValueError(f"{base}: LB_cap={lb_cap}; Mamut2026 instances must be genuine VRPs")
+        raise ValueError(f"{base}: LB_cap={lb_cap}; Poryos2026 instances must be genuine VRPs")
     if max(demands[1:], default=0) > capacity:
         raise ValueError(f"{base}: a customer demand exceeds vehicle capacity")
     return {

@@ -900,7 +900,7 @@ def _instance_from_vrp_text(vrp_text: str) -> Any:
     return BenchmarkInstanceCVRP(
         instance_name=parsed.name or "uploaded",
         instance_origin="OsmCvrpGen",
-        benchmark_name="Mamut2026",
+        benchmark_name="Poryos2026",
         num_customers=parsed.dimension - 1,
         vehicle_capacity=parsed.capacity,
         coordinates=parsed.coordinates,

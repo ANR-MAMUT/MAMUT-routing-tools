@@ -2,7 +2,7 @@
 
 The per-instance counterpart of the family builder's ``build_td`` stage
 (``mamut_routing_tools.family.family``). Where ``build_td`` publishes the whole
-Mamut2026 family into a marker-rooted collection tree, this module derives the
+Poryos2026 family into a marker-rooted collection tree, this module derives the
 time-dependent twins of a *single* already-generated instance in place, next to
 its ``generate single`` / ``derive-vrptw`` artifacts.
 
