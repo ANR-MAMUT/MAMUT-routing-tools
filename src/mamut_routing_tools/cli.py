@@ -50,10 +50,12 @@ roadgraph_app = typer.Typer(help="Road-graph engine (OpenStreetMapX-compatible c
 geometry_app = typer.Typer(help="BKS route-geometry materialization.", no_args_is_help=True)
 osm_app = typer.Typer(help="OSM city acquisition (Nominatim + Overpass).", no_args_is_help=True)
 generate_app = typer.Typer(help="Interactive CVRP/VRPTW instance generation on city road graphs.", no_args_is_help=True)
+convert_app = typer.Typer(help="Converters for external benchmark distributions.", no_args_is_help=True)
 app.add_typer(roadgraph_app, name="roadgraph")
 app.add_typer(geometry_app, name="geometry")
 app.add_typer(osm_app, name="osm")
 app.add_typer(generate_app, name="generate")
+app.add_typer(convert_app, name="convert")
 
 
 def _resolve_city_osm(city: str, osm_path: Path | None, workspace: Path) -> Path:
@@ -440,6 +442,59 @@ def geometry_materialize_plan_cmd(
         target = result_dir / result_file
         target.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
         typer.echo(str(target))
+
+
+@convert_app.command("blauth2024")
+def convert_blauth2024_cmd(
+    upstream: Annotated[Path, typer.Argument(help="Checkout of gitlab.com/muelleratorunibonnde/vrptdt-benchmark (holds instances/).")],
+    output_dir: Annotated[Path, typer.Option("--output-dir", help="Family directory to write into (benchmarks/TDVRPTW/Blauth2024 or a preview dir).")],
+    sizes: Annotated[str, typer.Option("--sizes", help="Comma-separated sizes to convert.")] = "10,500",
+    cities: Annotated[str, typer.Option("--cities", help="Comma-separated upstream city names, or 'all'.")] = "all",
+    upstream_commit: Annotated[Optional[str], typer.Option("--upstream-commit", help="Upstream git commit recorded in provenance (default: read from the checkout).")] = None,
+    verify: Annotated[bool, typer.Option("--verify/--no-verify", help="Re-load every emitted instance and re-check the atf_sha256 pin.")] = True,
+) -> None:
+    """Convert the Blauth et al. 2024 delivery-only instances into the canonical Blauth2024 family."""
+    import subprocess
+
+    from mamut_routing_tools.conversion.blauth2024 import UPSTREAM_CITIES, UPSTREAM_SIZES, convert_family
+
+    size_list = tuple(int(part) for part in sizes.split(","))
+    unknown_sizes = set(size_list) - set(UPSTREAM_SIZES)
+    if unknown_sizes:
+        raise typer.BadParameter(f"unknown sizes {sorted(unknown_sizes)}; upstream has {UPSTREAM_SIZES}")
+    city_list = UPSTREAM_CITIES if cities == "all" else tuple(cities.split(","))
+    unknown_cities = set(city_list) - set(UPSTREAM_CITIES)
+    if unknown_cities:
+        raise typer.BadParameter(f"unknown cities {sorted(unknown_cities)}; upstream has {UPSTREAM_CITIES}")
+    if upstream_commit is None:
+        probe = subprocess.run(
+            ["git", "-C", str(upstream), "rev-parse", "HEAD"], capture_output=True, text=True
+        )
+        upstream_commit = probe.stdout.strip() if probe.returncode == 0 else None
+
+    results = convert_family(
+        upstream,
+        output_dir,
+        cities=city_list,
+        sizes=size_list,
+        upstream_commit=upstream_commit,
+        verify_roundtrip=verify,
+    )
+    typer.echo(
+        json.dumps(
+            [
+                {
+                    "instance": item.instance_name,
+                    "n": item.n,
+                    "vrp_json": str(item.instance_path),
+                    "atf_sha256": item.atf_sha256,
+                    "max_arc_arrival": item.max_arrival,
+                }
+                for item in results
+            ],
+            indent=1,
+        )
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
