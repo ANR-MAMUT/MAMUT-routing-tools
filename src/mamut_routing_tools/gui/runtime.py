@@ -39,11 +39,53 @@ def read_state(workspace: Path) -> dict[str, Any] | None:
 
 
 def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
         return True
     except (ProcessLookupError, PermissionError):
         return False
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """Return whether *pid* is active without sending it a signal.
+
+    Windows does not support the POSIX ``kill(pid, 0)`` existence probe:
+    ``os.kill(pid, 0)`` raises ``OSError(87)`` even for a live process.
+    Querying the process handle also lets us distinguish an active process
+    from one whose PID is present briefly while its handle is being reaped.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    error_access_denied = 5
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+    if not handle:
+        # A protected process still exists even when it cannot be queried.
+        return ctypes.get_last_error() == error_access_denied
+
+    exit_code = wintypes.DWORD()
+    try:
+        return (
+            bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)))
+            and exit_code.value == still_active
+        )
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def _free_port(host: str) -> int:
