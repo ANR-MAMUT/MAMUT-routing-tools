@@ -98,6 +98,7 @@ class RoadGraph:
     graph: rx.PyDiGraph = field(repr=False)
     _kdtree: cKDTree | None = field(default=None, repr=False)
     _kdtree_nodes: list[int] = field(default_factory=list, repr=False)
+    _vertex_kdtree: cKDTree | None = field(default=None, repr=False)
 
     @property
     def vertex_count(self) -> int:
@@ -138,6 +139,32 @@ class RoadGraph:
             return None
         best_index = min(hits, key=lambda i: float(np.sum((self._kdtree.data[i] - query) ** 2)))
         return self._kdtree_nodes[int(best_index)]
+
+    def nearest_vertex(
+        self, lat: float, lon: float, max_radius_m: float = 2000.0
+    ) -> tuple[int, float] | None:
+        """Nearest GRAPH VERTEX to a point, as ``(vertex, distance_m)``.
+
+        Deliberately different from :meth:`nearest_node`: that one indexes every
+        road node and honours the Julia findnode box contract, so a POI whose
+        closest node sits mid-segment resolves to something absent from
+        ``vertex_of``. Manual picks must always land on a routable vertex, so
+        this indexes ``node_of`` only and searches by true Euclidean distance,
+        growing the radius until it finds one or gives up at ``max_radius_m``.
+        """
+        if not self.node_of:
+            return None
+        if self._vertex_kdtree is None:
+            points = np.array(
+                [(self.node_enu[node][0], self.node_enu[node][1]) for node in self.node_of]
+            )
+            self._vertex_kdtree = cKDTree(points)
+        enu = enu_from_lla(LLA(lat, lon), self.ref_lla)
+        query = np.array([enu.east, enu.north])
+        distance, index = self._vertex_kdtree.query(query, k=1)
+        if not np.isfinite(distance) or float(distance) > max_radius_m:
+            return None
+        return int(index), float(distance)
 
 
 def _add_intersection_edges(

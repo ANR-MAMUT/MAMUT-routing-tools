@@ -8,7 +8,7 @@ import warnings
 from pathlib import Path
 
 from mamut_routing_tools.geo import LLA, haversine_m
-from mamut_routing_tools.generation.pois import DEFAULT_CATEGORIES, find_pois
+from mamut_routing_tools.generation.pois import DEFAULT_CATEGORIES, Poi, find_pois
 from mamut_routing_tools.roadgraph.build import RoadGraph
 
 
@@ -134,7 +134,12 @@ def select_customers_poi(
     n_customers: int,
     categories: list[str],
     rng: random.Random,
-) -> tuple[list[int], list[float], list[float], list[str]]:
+) -> tuple[list[int], list[float], list[float], list[str], list[Poi | None]]:
+    """Chosen vertices plus, per vertex, the POI it came from.
+
+    The trailing ``list[Poi | None]`` carries the amenity value, OSM node id and
+    display name so callers can persist them; ``None`` marks a non-POI customer.
+    """
     cats = categories or DEFAULT_CATEGORIES
     pois = find_pois(osm_path, cats)
     if not pois:
@@ -147,6 +152,7 @@ def select_customers_poi(
     verts: list[int] = []
     poi_lats: list[float] = []
     poi_lons: list[float] = []
+    sources: list[Poi | None] = []
     for i in rows:
         # The nearest ROAD NODE must itself be a graph vertex, matching the
         # Julia findnode + md.v membership semantic (POIs whose nearest node
@@ -161,6 +167,7 @@ def select_customers_poi(
         verts.append(v)
         poi_lats.append(pois[i].lat)
         poi_lons.append(pois[i].lon)
+        sources.append(pois[i])
         if len(verts) >= n_customers:
             break
 
@@ -170,7 +177,13 @@ def select_customers_poi(
             stacklevel=2,
         )
     n_actual = min(n_customers, len(verts))
-    return verts[:n_actual], poi_lats[:n_actual], poi_lons[:n_actual], ["poi"] * n_actual
+    return (
+        verts[:n_actual],
+        poi_lats[:n_actual],
+        poi_lons[:n_actual],
+        ["poi"] * n_actual,
+        sources[:n_actual],
+    )
 
 
 def select_customers_hybrid(
@@ -185,7 +198,7 @@ def select_customers_hybrid(
     n_seeds: int,
     decay_m: float,
     rng: random.Random,
-) -> tuple[list[int], list[float], list[float], list[str]]:
+) -> tuple[list[int], list[float], list[float], list[str], list[Poi | None]]:
     n_poi = min(n_customers, max(0, round(n_customers * poi_share)))
     n_param = n_customers - n_poi
 
@@ -193,8 +206,11 @@ def select_customers_hybrid(
     poi_lat: list[float] = []
     poi_lon: list[float] = []
     poi_src: list[str] = []
+    poi_meta: list[Poi | None] = []
     if n_poi > 0:
-        poi_v, poi_lat, poi_lon, poi_src = select_customers_poi(graph, osm_path, n_poi, categories, rng)
+        poi_v, poi_lat, poi_lon, poi_src, poi_meta = select_customers_poi(
+            graph, osm_path, n_poi, categories, rng
+        )
 
     param_v, _ = select_customers_parametric(
         graph, vertex_ll, depot_vertex, max(n_param, 0), customer_mode, n_seeds, decay_m, rng
@@ -205,6 +221,7 @@ def select_customers_hybrid(
     out_lat: list[float] = []
     out_lon: list[float] = []
     out_src: list[str] = []
+    out_meta: list[Poi | None] = []
     for i, v in enumerate(poi_v):
         if v not in seen:
             seen.add(v)
@@ -212,6 +229,7 @@ def select_customers_hybrid(
             out_lat.append(poi_lat[i])
             out_lon.append(poi_lon[i])
             out_src.append(poi_src[i])
+            out_meta.append(poi_meta[i])
     for v in param_v:
         if v not in seen:
             seen.add(v)
@@ -220,6 +238,7 @@ def select_customers_hybrid(
             out_lat.append(lat)
             out_lon.append(lon)
             out_src.append("param")
+            out_meta.append(None)
 
     if len(out_v) < n_customers:
         candidates = [v for v in range(graph.vertex_count) if v not in seen]
@@ -230,9 +249,16 @@ def select_customers_hybrid(
             out_lat.append(lat)
             out_lon.append(lon)
             out_src.append("param_fill")
+            out_meta.append(None)
             if len(out_v) >= n_customers:
                 break
 
     if len(out_v) < n_customers:
         raise ValueError("Hybrid method could not gather enough unique customers")
-    return out_v[:n_customers], out_lat[:n_customers], out_lon[:n_customers], out_src[:n_customers]
+    return (
+        out_v[:n_customers],
+        out_lat[:n_customers],
+        out_lon[:n_customers],
+        out_src[:n_customers],
+        out_meta[:n_customers],
+    )

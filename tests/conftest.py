@@ -11,14 +11,33 @@ import pytest
 FIXTURE_OSM = """<?xml version="1.0" encoding="UTF-8"?>
 <osm version="0.6" generator="test">
   <bounds minlat="44.99" minlon="3.99" maxlat="45.01" maxlon="4.01"/>
-  <node id="1" lat="45.000" lon="4.000"/>
-  <node id="2" lat="45.000" lon="4.005"/>
-  <node id="3" lat="45.000" lon="4.008"/>
-  <node id="4" lat="45.005" lon="4.005"/>
-  <node id="5" lat="44.995" lon="4.005"/>
+  <node id="1" lat="45.000" lon="4.000">
+    <tag k="amenity" v="restaurant"/>
+    <tag k="name" v="Chez Un"/>
+  </node>
+  <node id="2" lat="45.000" lon="4.005">
+    <tag k="amenity" v="cafe"/>
+    <tag k="name" v="Caf&#233; Deux"/>
+  </node>
+  <node id="3" lat="45.000" lon="4.008">
+    <tag k="amenity" v="pharmacy"/>
+  </node>
+  <node id="4" lat="45.005" lon="4.005">
+    <tag k="amenity" v="school"/>
+    <tag k="name" v="&#201;cole Quatre"/>
+  </node>
+  <node id="5" lat="44.995" lon="4.005">
+    <tag k="amenity" v="bar"/>
+    <tag k="name" v="Bar Cinq"/>
+  </node>
   <node id="6" lat="45.000" lon="4.020"/>
   <node id="7" lat="45.007" lon="4.001"/>
   <node id="8" lat="45.007" lon="4.002"/>
+  <!-- An amenity nowhere near a road: exercises the unreachable-pick path. -->
+  <node id="9" lat="45.500" lon="4.500">
+    <tag k="amenity" v="museum"/>
+    <tag k="name" v="Mus&#233;e Lointain"/>
+  </node>
   <way id="10">
     <nd ref="1"/><nd ref="2"/><nd ref="3"/>
     <tag k="highway" v="residential"/>

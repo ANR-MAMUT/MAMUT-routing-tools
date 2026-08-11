@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import string
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,110 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+_ROUTE_LINE = re.compile(r"^\s*Route\s*#\s*\d+\s*:\s*(.*)$", re.IGNORECASE)
+_COST_LINE = re.compile(r"^\s*cost\s*[:=]?\s*(-?\d+(?:\.\d+)?)\s*$", re.IGNORECASE)
+
+
+class SolutionImportError(ValueError):
+    """A pasted or uploaded solution that cannot be read or does not fit."""
+
+
+def parse_solution_text(text: str, *, filename: str = "") -> tuple[list[list[int]], float | None]:
+    """Routes and declared cost from a CVRPLIB ``.sol`` or a JSON solution.
+
+    Accepts ``Route #k: a b c`` lines with an optional ``Cost <value>`` line, or
+    JSON as either ``{"routes": [[...]]}`` or a bare array of routes.
+    """
+    stripped = text.strip()
+    if not stripped:
+        raise SolutionImportError("The solution is empty.")
+
+    looks_json = stripped[0] in "[{" or filename.lower().endswith(".json")
+    if looks_json:
+        try:
+            payload = json.loads(stripped)
+        except ValueError as error:
+            raise SolutionImportError(f"Not valid JSON: {error}") from error
+        raw_routes = payload if isinstance(payload, list) else payload.get("routes")
+        if not isinstance(raw_routes, list):
+            raise SolutionImportError("JSON solution has no 'routes' array.")
+        declared = None if isinstance(payload, list) else payload.get("cost")
+        routes = []
+        for route in raw_routes:
+            if not isinstance(route, list):
+                raise SolutionImportError("Every entry of 'routes' must be a list of stops.")
+            try:
+                routes.append([int(stop) for stop in route])
+            except (TypeError, ValueError) as error:
+                raise SolutionImportError(f"Route stops must be integers: {error}") from error
+        return routes, (float(declared) if declared is not None else None)
+
+    routes = []
+    declared_cost: float | None = None
+    for line in stripped.splitlines():
+        match = _ROUTE_LINE.match(line)
+        if match:
+            try:
+                routes.append([int(part) for part in match.group(1).split()])
+            except ValueError as error:
+                raise SolutionImportError(f"Unreadable stop id in '{line.strip()}': {error}") from error
+            continue
+        cost_match = _COST_LINE.match(line)
+        if cost_match:
+            declared_cost = float(cost_match.group(1))
+    if not routes:
+        raise SolutionImportError(
+            "No 'Route #k: ...' lines found. Provide a CVRPLIB .sol file or JSON routes."
+        )
+    return routes, declared_cost
+
+
+def normalize_imported_routes(routes: list[list[int]], num_customers: int) -> list[list[int]]:
+    """Map an external stop-id convention onto library model ids (depot 0).
+
+    External files disagree on whether customers are numbered 1..n (CVRPLIB, the
+    common case) or 0..n-1, and some include the depot at the route ends. The id
+    range decides, so a file is either understood exactly or rejected -- never
+    silently reinterpreted into a different instance.
+    """
+    stops = [stop for route in routes for stop in route]
+    if not stops:
+        raise SolutionImportError("The solution contains no customer stops.")
+
+    depot_stripped = [[stop for stop in route if stop != 0] for route in routes]
+    if any(len(route) != len(original) for route, original in zip(depot_stripped, routes)):
+        # Depot 0 written explicitly at route boundaries: drop it, ids are 1..n.
+        routes = depot_stripped
+        stops = [stop for route in routes for stop in route]
+
+    low, high = min(stops), max(stops)
+    if low >= 1 and high <= num_customers:
+        normalized = routes  # already 1..n, which is the model id of customers
+    elif low >= 0 and high <= num_customers - 1:
+        normalized = [[stop + 1 for stop in route] for route in routes]
+    else:
+        raise SolutionImportError(
+            f"Stop ids run {low}..{high}, which fits neither 1..{num_customers} nor "
+            f"0..{num_customers - 1}; this solution is not for an instance with "
+            f"{num_customers} customers."
+        )
+
+    flat = [stop for route in normalized if route for stop in route]
+    seen = Counter(flat)
+    duplicates = sorted(stop for stop, count in seen.items() if count > 1)
+    if duplicates:
+        raise SolutionImportError(
+            f"Customer(s) {', '.join(str(value) for value in duplicates[:10])} visited more than once."
+        )
+    missing = sorted(set(range(1, num_customers + 1)) - set(flat))
+    if missing:
+        raise SolutionImportError(
+            f"{len(missing)} customer(s) never visited (first missing: "
+            f"{', '.join(str(value) for value in missing[:10])})."
+        )
+    return [route for route in normalized if route]
 
 
 def validate_solution(

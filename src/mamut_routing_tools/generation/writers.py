@@ -20,7 +20,12 @@ def slugify(value: str) -> str:
 
 def method_abbrev(method: str) -> str:
     m = method.strip().lower()
-    return {"poi_categories": "poi", "parametric_attach": "par", "hybrid": "hyb"}.get(m, slugify(m))
+    return {
+        "poi_categories": "poi",
+        "parametric_attach": "par",
+        "hybrid": "hyb",
+        "manual": "man",
+    }.get(m, slugify(m))
 
 
 def instance_path_plan(
@@ -29,11 +34,18 @@ def instance_path_plan(
     n_customers: int,
     route_count: int,
     output_root: str | Path,
+    name_suffix: str = "",
 ) -> tuple[Path, str]:
+    """Folder and base name of an instance.
+
+    ``name_suffix`` disambiguates instances that would otherwise share a name --
+    bulk rows differing only by seed, for example. It is empty in the common
+    case, so the established ``<city>_<abbr>-n<N>-k<K>`` naming is unchanged.
+    """
     city_slug = slugify(city)
     n_nodes = n_customers + 1
     folder = Path(output_root) / "osm" / city_slug / f"n{n_nodes}"
-    base = f"{city_slug}_{method_abbrev(method)}-n{n_nodes}-k{route_count}"
+    base = f"{city_slug}_{method_abbrev(method)}-n{n_nodes}-k{route_count}{name_suffix}"
     return folder, base
 
 
@@ -84,9 +96,19 @@ def write_instance_metadata(
     trim_to_connected_graph: bool = True,
     generation_params: dict[str, Any] | None = None,
     road_cache: dict[str, Any] | None = None,
+    poi_categories: list[str | None] | None = None,
+    poi_osm_ids: list[int | None] | None = None,
+    poi_names: list[str | None] | None = None,
+    snap_distances_m: list[float] | None = None,
 ) -> None:
     n = len(vertices)
     assert n == len(coords) == len(demands) == len(poi_lats) == len(poi_lons) == len(source_tags)
+
+    def at(values: list[Any] | None, index: int, fallback: Any = None) -> Any:
+        if values is None or index >= len(values):
+            return fallback
+        return values[index]
+
     nodes = [
         {
             "instance_node_id": i + 1,
@@ -97,11 +119,17 @@ def write_instance_metadata(
             "enu_y": coords[i][1],
             "demand": demands[i],
             "source_tag": source_tags[i],
+            # Null for the depot and for parametrically sampled customers.
+            "poi_category": at(poi_categories, i),
+            "poi_osm_id": at(poi_osm_ids, i),
+            "poi_name": at(poi_names, i),
+            "snap_distance_m": at(snap_distances_m, i, 0.0),
         }
         for i in range(n)
     ]
     payload: dict[str, Any] = {
-        "schema_version": 2,
+        # v3 adds poi_category / poi_osm_id / poi_name / snap_distance_m per node.
+        "schema_version": 3,
         "city": city,
         "instance_name": instance_name,
         "source_osm_file": osm_file,

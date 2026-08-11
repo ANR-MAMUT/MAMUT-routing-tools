@@ -12,7 +12,13 @@ from typing import Any
 
 from mamut_routing_tools.generation.demands import capacity_from_avg_route_size, generate_demands
 from mamut_routing_tools.generation.matrices import compute_matrices, euclidean_matrix_from_vertices
-from mamut_routing_tools.generation.pois import DEFAULT_CATEGORIES
+from mamut_routing_tools.generation.pois import (
+    DEFAULT_CATEGORIES,
+    POI_CATEGORIES,
+    Poi,
+    find_pois,
+    is_poi_source_tag,
+)
 from mamut_routing_tools.generation.select import (
     pick_depot_vertex,
     select_customers_hybrid,
@@ -31,7 +37,10 @@ from mamut_routing_tools.generation.writers import (
 )
 from mamut_routing_tools.roadgraph.build import RoadGraph, load_road_graph
 
-METHODS = ("poi_categories", "parametric_attach", "hybrid")
+METHODS = ("poi_categories", "parametric_attach", "hybrid", "manual")
+# Distance beyond which a hand-picked POI is reported as unreachable rather than
+# snapped; generous, because the picker only offers POIs inside the extract.
+MANUAL_SNAP_MAX_M = 2000.0
 DEPOT_MODES = ("random", "center", "corner")
 CUSTOMER_MODES = ("random", "clustered", "random_clustered")
 METRICS = ("shortest", "fastest", "euclidean")
@@ -54,6 +63,10 @@ class GenerationRequest:
     hybrid_poi_share: float = 0.5
     only_intersections: bool = True
     trim_to_connected_graph: bool = True
+    # method="manual" only: OSM node ids of the hand-picked POIs, and optionally
+    # the one to use as the depot (falls back to depot_mode when unset).
+    manual_poi_ids: list[int] = field(default_factory=list)
+    manual_depot_poi_id: int | None = None
 
     def validate(self) -> None:
         if not self.city:
@@ -62,6 +75,12 @@ class GenerationRequest:
             raise FileNotFoundError(f"OSM file not found: {self.osm_path}")
         if self.method not in METHODS:
             raise ValueError(f"Unsupported method '{self.method}'")
+        if self.method == "manual":
+            picked = set(self.manual_poi_ids) - {self.manual_depot_poi_id}
+            if len(picked) < 2:
+                raise ValueError(
+                    "Manual selection needs at least 2 picked POIs besides the depot"
+                )
         if self.n_customers < 2:
             raise ValueError("n_customers must be >= 2")
         if self.demand_type not in range(1, 8):
@@ -88,6 +107,12 @@ class Selection:
     poi_lons: list[float]
     source_tags: list[str]  # ["depot", ...]
     params: dict[str, Any]
+    # Per-vertex originating POI (None for the depot and parametric customers),
+    # parallel to ``vertices``. Carries amenity value, OSM id and display name.
+    poi_meta: list[Poi | None] = field(default_factory=list)
+    # Manual mode only: metres between the picked POI and the vertex it snapped
+    # to, parallel to ``vertices`` (0.0 elsewhere).
+    snap_distances_m: list[float] = field(default_factory=list)
 
 
 def build_generation_selection(request: GenerationRequest) -> Selection:
@@ -105,18 +130,29 @@ def build_generation_selection(request: GenerationRequest) -> Selection:
     categories = request.categories or list(DEFAULT_CATEGORIES)
     poi_share = min(1.0, max(0.0, request.hybrid_poi_share))
 
+    cust_meta: list[Poi | None] = []
+    snap_distances: list[float] = []
+
+    if request.method == "manual":
+        return _build_manual_selection(request, graph, vertex_ll, categories, rng, n_seeds, poi_share)
+
     depot_vertex = pick_depot_vertex(request.depot_mode, vertex_ll, rng)
     depot_lat, depot_lon = vertex_ll[depot_vertex]
 
     if request.method == "poi_categories":
-        verts, lats, lons, sources = select_customers_poi(
+        verts, lats, lons, sources, metas = select_customers_poi(
             graph, request.osm_path, request.n_customers, categories, rng
         )
-        cust = [(v, lats[i], lons[i], sources[i]) for i, v in enumerate(verts) if v != depot_vertex]
+        cust = [
+            (v, lats[i], lons[i], sources[i], metas[i])
+            for i, v in enumerate(verts)
+            if v != depot_vertex
+        ]
         cust_vertices = [c[0] for c in cust]
         cust_lat = [c[1] for c in cust]
         cust_lon = [c[2] for c in cust]
         cust_src = [c[3] for c in cust]
+        cust_meta = [c[4] for c in cust]
         if len(cust_vertices) < request.n_customers:
             # Parametric top-up must not duplicate POI-chosen vertices.
             chosen = set(cust_vertices) | {depot_vertex}
@@ -135,6 +171,7 @@ def build_generation_selection(request: GenerationRequest) -> Selection:
                     cust_lat.append(vertex_ll[vtx][0])
                     cust_lon.append(vertex_ll[vtx][1])
                     cust_src.append(src)
+                    cust_meta.append(None)
                     if len(cust_vertices) >= request.n_customers:
                         break
                 attempts += 1
@@ -145,13 +182,15 @@ def build_generation_selection(request: GenerationRequest) -> Selection:
         )
         cust_lat = [vertex_ll[v][0] for v in cust_vertices]
         cust_lon = [vertex_ll[v][1] for v in cust_vertices]
+        cust_meta = [None] * len(cust_vertices)
     else:
-        cust_vertices, cust_lat, cust_lon, cust_src = select_customers_hybrid(
+        cust_vertices, cust_lat, cust_lon, cust_src, cust_meta = select_customers_hybrid(
             graph, request.osm_path, vertex_ll, depot_vertex, request.n_customers,
             categories, poi_share, request.customer_mode, n_seeds, request.cluster_decay_meters, rng,
         )
 
     n_actual = min(request.n_customers, len(cust_vertices))
+    snap_distances = [0.0] * (n_actual + 1)
     params: dict[str, Any] = {
         "city": request.city,
         "osm_path": str(request.osm_path),
@@ -176,7 +215,134 @@ def build_generation_selection(request: GenerationRequest) -> Selection:
         poi_lons=[depot_lon, *cust_lon[:n_actual]],
         source_tags=["depot", *cust_src[:n_actual]],
         params=params,
+        poi_meta=[None, *cust_meta[:n_actual]],
+        snap_distances_m=snap_distances,
     )
+
+
+def _build_manual_selection(
+    request: GenerationRequest,
+    graph: RoadGraph,
+    vertex_ll: list[tuple[float, float]],
+    categories: list[str],
+    rng: random.Random,
+    n_seeds: int,
+    poi_share: float,
+) -> Selection:
+    """Selection from hand-picked POIs, snapping each to its nearest vertex.
+
+    Unlike ``select_customers_poi``, which drops a POI whose nearest road node
+    is not a graph vertex, a manual pick is never discarded silently: it snaps
+    to the nearest routable vertex and the distance is recorded per node. Two
+    picks that snap to the same vertex necessarily collapse into one customer,
+    which is reported rather than raised.
+    """
+    # Resolved against the whole catalog, not the current category filter, so a
+    # pick stays valid when the user unticks its category afterwards.
+    by_id = {poi.osm_id: poi for poi in find_pois(request.osm_path, list(POI_CATEGORIES)) if poi.osm_id is not None}
+
+    unknown_ids: list[int] = []
+    unreachable_ids: list[int] = []
+    collapsed_ids: list[int] = []
+
+    def snap(osm_id: int) -> tuple[int, float, Poi] | None:
+        poi = by_id.get(osm_id)
+        if poi is None:
+            unknown_ids.append(osm_id)
+            return None
+        hit = graph.nearest_vertex(poi.lat, poi.lon, MANUAL_SNAP_MAX_M)
+        if hit is None:
+            unreachable_ids.append(osm_id)
+            return None
+        vertex, distance = hit
+        return vertex, distance, poi
+
+    depot_meta: Poi | None = None
+    depot_snap = 0.0
+    depot_resolved = snap(request.manual_depot_poi_id) if request.manual_depot_poi_id else None
+    if depot_resolved is not None:
+        depot_vertex, depot_snap, depot_meta = depot_resolved
+        depot_lat, depot_lon = depot_meta.lat, depot_meta.lon
+    else:
+        depot_vertex = pick_depot_vertex(request.depot_mode, vertex_ll, rng)
+        depot_lat, depot_lon = vertex_ll[depot_vertex]
+
+    taken = {depot_vertex}
+    cust_vertices: list[int] = []
+    cust_lat: list[float] = []
+    cust_lon: list[float] = []
+    cust_src: list[str] = []
+    cust_meta: list[Poi | None] = []
+    cust_snap: list[float] = []
+    for osm_id in request.manual_poi_ids:
+        if osm_id == request.manual_depot_poi_id:
+            continue
+        resolved = snap(osm_id)
+        if resolved is None:
+            continue
+        vertex, distance, poi = resolved
+        if vertex in taken:
+            collapsed_ids.append(osm_id)
+            continue
+        taken.add(vertex)
+        cust_vertices.append(vertex)
+        cust_lat.append(poi.lat)
+        cust_lon.append(poi.lon)
+        cust_src.append("poi_manual")
+        cust_meta.append(poi)
+        cust_snap.append(distance)
+
+    if len(cust_vertices) < 2:
+        raise ValueError(
+            "Manual selection resolved fewer than 2 customers "
+            f"({len(unknown_ids)} unknown, {len(unreachable_ids)} unreachable, "
+            f"{len(collapsed_ids)} collapsed onto an already-used vertex)"
+        )
+
+    params: dict[str, Any] = {
+        "city": request.city,
+        "osm_path": str(request.osm_path),
+        "method": request.method,
+        # The picks are the instance size; a requested n is meaningless here.
+        "n_customers": len(cust_vertices),
+        "seed": request.seed,
+        "demand_type": request.demand_type,
+        "avg_route_size": request.avg_route_size,
+        "depot_mode": "manual" if depot_resolved is not None else request.depot_mode,
+        "customer_mode": request.customer_mode,
+        "cluster_seeds": n_seeds,
+        "cluster_decay_meters": request.cluster_decay_meters,
+        "categories": categories,
+        "hybrid_poi_share": poi_share,
+        "only_intersections": request.only_intersections,
+        "trim_to_connected_graph": request.trim_to_connected_graph,
+        "manual_selection": {
+            "requested": len(request.manual_poi_ids),
+            "resolved": len(cust_vertices),
+            "depot_poi_osm_id": request.manual_depot_poi_id,
+            "unknown_poi_ids": unknown_ids,
+            "unreachable_poi_ids": unreachable_ids,
+            "collapsed_poi_ids": collapsed_ids,
+        },
+    }
+    return Selection(
+        graph=graph,
+        vertices=[depot_vertex, *cust_vertices],
+        poi_lats=[depot_lat, *cust_lat],
+        poi_lons=[depot_lon, *cust_lon],
+        source_tags=["depot", *cust_src],
+        params=params,
+        poi_meta=[depot_meta, *cust_meta],
+        snap_distances_m=[depot_snap, *cust_snap],
+    )
+
+
+def poi_attributes(selection: Selection, index: int) -> tuple[str | None, int | None, str | None]:
+    """``(category, osm_id, name)`` of the POI behind a selected vertex."""
+    poi = selection.poi_meta[index] if index < len(selection.poi_meta) else None
+    if poi is None:
+        return None, None, None
+    return poi.category, poi.osm_id, poi.name
 
 
 def preview_geojson(selection: Selection) -> dict[str, Any]:
@@ -184,6 +350,7 @@ def preview_geojson(selection: Selection) -> dict[str, Any]:
     features = []
     for i, vertex in enumerate(selection.vertices):
         lon, lat = graph.node_lonlat(graph.node_of[vertex])
+        category, osm_id, name = poi_attributes(selection, i)
         features.append(
             {
                 "type": "Feature",
@@ -193,16 +360,27 @@ def preview_geojson(selection: Selection) -> dict[str, Any]:
                     "graph_vertex_id": vertex,
                     "role": "depot" if i == 0 else "customer",
                     "source_tag": selection.source_tags[i],
+                    "poi_category": category,
+                    "poi_osm_id": osm_id,
+                    "poi_name": name,
+                    "snap_distance_m": (
+                        selection.snap_distances_m[i]
+                        if i < len(selection.snap_distances_m)
+                        else 0.0
+                    ),
                 },
             }
         )
     return {"type": "FeatureCollection", "features": features}
 
 
-def generate_single_instance(request: GenerationRequest, output_root: str | Path) -> dict[str, Any]:
+def generate_single_instance(
+    request: GenerationRequest, output_root: str | Path, *, name_suffix: str = ""
+) -> dict[str, Any]:
     selection = build_generation_selection(request)
     n_got = len(selection.vertices) - 1
-    if n_got < request.n_customers:
+    # Manual mode is sized by the picks themselves, so a requested n never applies.
+    if request.method != "manual" and n_got < request.n_customers:
         raise ValueError(
             f"Generation method produced only {n_got} customers out of requested {request.n_customers}"
         )
@@ -212,6 +390,7 @@ def generate_single_instance(request: GenerationRequest, output_root: str | Path
         demand_type=request.demand_type,
         avg_route_size=request.avg_route_size,
         rng=random.Random(request.seed),
+        name_suffix=name_suffix,
     )
 
 
@@ -223,10 +402,12 @@ def materialize_instance(
     avg_route_size: int,
     rng: random.Random,
     precomputed: dict[str, Any] | None = None,
+    name_suffix: str = "",
 ) -> dict[str, Any]:
     """Write the 3-metric .vrp set, _meta.json, _manifest.json and .vrp.json
     files for a selection; ``precomputed`` lets the bulk driver pass sliced
-    matrices/geometry instead of recomputing them."""
+    matrices/geometry instead of recomputing them, and ``name_suffix`` keeps
+    same-parameter-different-seed instances from overwriting one another."""
     graph = selection.graph
     params = selection.params
     vertices = selection.vertices
@@ -250,7 +431,14 @@ def materialize_instance(
         coords = precomputed["coords"]
 
     n_customers = len(vertices) - 1
-    folder, base = instance_path_plan(str(params["city"]), str(params["method"]), n_customers, route_count, output_root)
+    folder, base = instance_path_plan(
+        str(params["city"]),
+        str(params["method"]),
+        n_customers,
+        route_count,
+        output_root,
+        name_suffix,
+    )
     folder.mkdir(parents=True, exist_ok=True)
 
     files = {
@@ -285,6 +473,13 @@ def materialize_instance(
         only_intersections=bool(params["only_intersections"]),
         trim_to_connected_graph=bool(params["trim_to_connected_graph"]),
         generation_params=generation_params,
+        poi_categories=[poi_attributes(selection, i)[0] for i in range(len(vertices))],
+        poi_osm_ids=[poi_attributes(selection, i)[1] for i in range(len(vertices))],
+        poi_names=[poi_attributes(selection, i)[2] for i in range(len(vertices))],
+        snap_distances_m=[
+            selection.snap_distances_m[i] if i < len(selection.snap_distances_m) else 0.0
+            for i in range(len(vertices))
+        ],
         road_cache={"shortest": geom_short, "fastest": geom_fast},
     )
 
@@ -329,7 +524,7 @@ def materialize_instance(
     }
     write_json(folder / manifest_name, manifest)
 
-    poi_count = sum(1 for tag in selection.source_tags[1:] if tag == "poi")
+    poi_count = sum(1 for tag in selection.source_tags[1:] if is_poi_source_tag(tag))
     return {
         "ok": True,
         "base_name": base,

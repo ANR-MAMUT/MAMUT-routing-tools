@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -22,9 +23,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from mamut_routing_tools.gui.jobs import JobContext, JobManager
 from mamut_routing_tools.gui.solutions import (
+    SolutionImportError,
     SolutionStore,
     compare_solution_records,
     instance_id_for,
+    normalize_imported_routes,
+    parse_solution_text,
     validate_solution,
 )
 from mamut_routing_tools.workspace import instances_dir, osmdata_dir
@@ -99,7 +103,44 @@ def _request_to_generation(payload: dict[str, Any], workspace: Path) -> "Any":
         )
     if payload.get("hybridPoiShare") is not None:
         request.hybrid_poi_share = float(payload["hybridPoiShare"])
+    if payload.get("onlyIntersections") is not None:
+        request.only_intersections = bool(payload["onlyIntersections"])
+    if payload.get("trimToConnectedGraph") is not None:
+        request.trim_to_connected_graph = bool(payload["trimToConnectedGraph"])
+    if payload.get("manualPoiIds"):
+        raw_ids = payload["manualPoiIds"]
+        if isinstance(raw_ids, str):
+            raw_ids = [part for part in raw_ids.split(",") if part.strip()]
+        request.manual_poi_ids = [int(value) for value in raw_ids]
+    if payload.get("manualDepotPoiId") is not None:
+        request.manual_depot_poi_id = int(payload["manualDepotPoiId"])
     return request
+
+
+# Parsed POI pools keyed by (path, mtime, size); one entry per extract, since
+# the picker asks again on every category toggle and re-parsing a 100+ MB city
+# each time would make the mode unusable. Bounded so a long session that
+# browses many cities cannot grow it without limit.
+_POI_CACHE: "OrderedDict[tuple[str, int, int], list[Any]]" = OrderedDict()
+_POI_CACHE_MAX_CITIES = 4
+
+
+def _cached_pois(osm_path: Path) -> list[Any]:
+    from mamut_routing_tools.generation.pois import POI_CATEGORIES, find_pois
+
+    stat = osm_path.stat()
+    key = (str(osm_path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    cached = _POI_CACHE.get(key)
+    if cached is not None:
+        _POI_CACHE.move_to_end(key)
+        return cached
+    # The whole catalog is parsed once and filtered per request, so toggling a
+    # category never costs another pass over the file.
+    pois = find_pois(osm_path, list(POI_CATEGORIES))
+    _POI_CACHE[key] = pois
+    while len(_POI_CACHE) > _POI_CACHE_MAX_CITIES:
+        _POI_CACHE.popitem(last=False)
+    return pois
 
 
 def _find_city_osm(city: str, workspace: Path) -> Path:
@@ -209,6 +250,10 @@ def _instance_map_payload(record: dict[str, Any]) -> dict[str, Any]:
                     "role": "depot" if metadata_node_id == depot_id else "customer",
                     "demand": int(node.get("demand") or 0),
                     "source_tag": str(node.get("source_tag") or "unknown"),
+                    # Present from meta schema v3 on; older instances stay null.
+                    "poi_name": node.get("poi_name"),
+                    "poi_category": node.get("poi_category"),
+                    "poi_osm_id": node.get("poi_osm_id"),
                 },
             }
         )
@@ -347,14 +392,69 @@ def _derive_td_payload(
     return result
 
 
+def _bulk_rows_from_payload(payload: dict[str, Any], workspace: Path) -> list[Any]:
+    """Build BulkRow objects from an explicit ``instances`` row list.
+
+    Each row is merged over the payload's top-level fields, so the modal can
+    send only what a row overrides while shared settings stay at the top.
+    """
+    from mamut_routing_tools.generation.bulk import BulkRow
+
+    raw_rows = payload.get("instances") or []
+    if not raw_rows:
+        raise ValueError("Bulk generation requires at least one instance row")
+    shared = {key: value for key, value in payload.items() if key != "instances"}
+    rows = []
+    for raw in raw_rows:
+        merged = {**shared, **{k: v for k, v in raw.items() if v is not None}}
+        request = _request_to_generation(merged, workspace)
+        problem_type = str(merged.get("problemType") or "cvrp").lower()
+        if merged.get("deriveVrptw"):
+            problem_type = "vrptw"
+        explicit_seed = raw.get("seed")
+        rows.append(
+            BulkRow(
+                request=request,
+                problem_type=problem_type,
+                tw_method=str(merged.get("twMethod") or "route_centered").lower(),
+                explicit_seed=int(explicit_seed) if explicit_seed is not None else None,
+            )
+        )
+    return rows
+
+
+def _bulk_preflight_payload(payload: dict[str, Any], workspace: Path) -> dict[str, Any]:
+    from mamut_routing_tools.generation.bulk import preflight_rows
+
+    return preflight_rows(
+        _bulk_rows_from_payload(payload, workspace),
+        base_seed=int(payload.get("seed") or 0),
+    )
+
+
 def _generate_bulk_payload(
     payload: dict[str, Any], workspace: Path, context: JobContext | None = None
 ) -> dict[str, Any]:
-    from mamut_routing_tools.generation.bulk import generate_bulk_instances
+    from mamut_routing_tools.generation.bulk import generate_bulk_from_rows, generate_bulk_instances
 
     if context is not None:
         context.progress("Preparing bulk generation")
         context.check_cancelled()
+
+    # Explicit per-instance rows (the bulk configuration table) take precedence
+    # over the cartesian lists, which stay for the CLI and older callers.
+    if payload.get("instances"):
+        rows = _bulk_rows_from_payload(payload, workspace)
+        result = generate_bulk_from_rows(
+            rows,
+            output_root=instances_dir(workspace),
+            base_seed=int(payload.get("seed") or 0),
+            context=context,
+        )
+        for item in result.get("results", []):
+            item["instance_id"] = instance_id_for(Path(item["folder"]), item["base_name"])
+        return result
+
     base_request = _request_to_generation(payload, workspace)
     raw_cities = payload.get("cities") or [payload.get("city")]
     if isinstance(raw_cities, str):
@@ -376,6 +476,11 @@ def _generate_bulk_payload(
         demand_types=int_list("demandTypesList", base_request.demand_type),
         avg_route_sizes=int_list("avgRouteSizesList", base_request.avg_route_size),
         output_root=instances_dir(workspace),
+        # Honoured at last: the Generate form has always sent this, and bulk
+        # used to drop it and emit CVRP-only instances.
+        problem_type="vrptw" if payload.get("deriveVrptw") else "cvrp",
+        tw_method=str(payload.get("twMethod") or "route_centered").lower(),
+        context=context,
     )
     for item in result.get("results", []):
         item["instance_id"] = instance_id_for(Path(item["folder"]), item["base_name"])
@@ -447,6 +552,60 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             "cities": cities,
         }
 
+    @app.get("/api/workbench/generation/pois")
+    async def generation_pois(city: str, categories: str = "") -> Any:
+        """The POI pool of a city extract, for the hand-pick generation mode.
+
+        A pure XML pass with no road-graph load, cached per extract because the
+        picker re-queries on every category toggle and big cities are 100+ MB.
+        """
+        from mamut_routing_tools.generation.pois import POI_CATEGORIES
+
+        try:
+            osm_path = _find_city_osm(city, workspace)
+        except (ValueError, FileNotFoundError) as error:
+            return _payload_error(400, str(error))
+        wanted = [part.strip() for part in categories.split(",") if part.strip()]
+        unknown = [value for value in wanted if value not in POI_CATEGORIES]
+        if unknown:
+            return _payload_error(400, f"Unknown POI categories: {', '.join(unknown)}")
+        pois = _cached_pois(osm_path)
+        selected = set(wanted) if wanted else None
+        features = [
+            {
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [poi.lon, poi.lat]},
+                "properties": {
+                    "osm_id": poi.osm_id,
+                    "name": poi.name,
+                    "category": poi.category,
+                },
+            }
+            for poi in pois
+            if poi.osm_id is not None and (selected is None or poi.category in selected)
+        ]
+        counts: dict[str, int] = {}
+        for poi in pois:
+            counts[poi.category] = counts.get(poi.category, 0) + 1
+        return {
+            "ok": True,
+            "city": city,
+            "osm_path": str(osm_path),
+            "total_in_extract": len(pois),
+            "returned": len(features),
+            "named": sum(1 for feature in features if feature["properties"]["name"]),
+            "category_counts": counts,
+            "geojson": {"type": "FeatureCollection", "features": features},
+        }
+
+    @app.post("/api/workbench/generation/bulk-preflight")
+    async def generation_bulk_preflight(request: Request) -> Any:
+        payload = await request.json()
+        try:
+            return _bulk_preflight_payload(payload, workspace)
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
+
     @app.get("/api/workbench/instances")
     async def workbench_instances() -> dict[str, Any]:
         """List generated instances already on disk (workspace instances/),
@@ -467,6 +626,7 @@ def create_app(workspace: Path, token: str) -> FastAPI:
 
     async def _preview(request: Request) -> Any:
         payload = await request.json()
+        from mamut_routing_tools.generation.pois import is_poi_source_tag
         from mamut_routing_tools.generation.single import build_generation_selection, preview_geojson
 
         try:
@@ -475,7 +635,7 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         except Exception as error:  # noqa: BLE001
             return _payload_error(400, str(error))
         tags = selection.source_tags[1:]
-        poi_count = sum(1 for tag in tags if tag == "poi")
+        poi_count = sum(1 for tag in tags if is_poi_source_tag(tag))
         return {
             "ok": True,
             "geojson": preview_geojson(selection),
@@ -674,6 +834,25 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         except Exception as error:  # noqa: BLE001
             return _payload_error(400, str(error))
 
+    @app.post("/api/instances/{instance_id}/solutions/import")
+    async def import_solution_run(instance_id: str, request: Request) -> Any:
+        """Store an externally produced solution, but only if the checker accepts it.
+
+        Nothing is written or drawn until the canonical checker has validated the
+        routes against the exact metric variant they claim to solve.
+        """
+        payload = await request.json()
+        try:
+            record = _workspace_instance(workspace, instance_id)
+        except KeyError:
+            return _payload_error(404, "Unknown instance")
+        try:
+            return _import_solution_payload(record, instance_id, payload, solutions)
+        except SolutionImportError as error:
+            return _payload_error(400, str(error))
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
+
     @app.post("/api/workbench/solve")
     async def workbench_solve(request: Request) -> Any:
         payload = await request.json()
@@ -714,6 +893,74 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         return FileResponse(target)
 
     return app
+
+
+def _import_solution_payload(
+    record: dict[str, Any],
+    instance_id: str,
+    payload: dict[str, Any],
+    store: SolutionStore,
+) -> dict[str, Any]:
+    """Parse, check and persist an externally found solution."""
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.enums import ObjectiveFunction
+
+    text = str(payload.get("text") or "")
+    filename = str(payload.get("filename") or "")
+    if not text.strip():
+        raise SolutionImportError("Paste a solution or choose a file to import.")
+
+    metric = str(payload.get("metric") or "fastest").lower()
+    instance_path = _instance_variant_path(record, metric)
+    objective = ObjectiveFunction(str(payload.get("objective_function") or "MonoCost"))
+    instance = load_benchmark_instance(instance_path)
+
+    routes, declared_cost = parse_solution_text(text, filename=filename)
+    normalized = normalize_imported_routes(routes, int(instance.num_customers))
+    validation = validate_solution(instance, normalized, instance_path=instance_path)
+    if not validation.get("valid"):
+        raise SolutionImportError(
+            validation.get("error_message")
+            or validation.get("status")
+            or "The checker rejected this solution."
+        )
+
+    # The checker's own cost is authoritative; a mismatching declared cost is
+    # surfaced rather than stored, because it usually means a different metric.
+    canonical_cost = validation.get("routing_cost")
+    warning = None
+    if declared_cost is not None and canonical_cost is not None:
+        if abs(float(declared_cost) - float(canonical_cost)) > 1e-6:
+            warning = (
+                f"The file declares cost {declared_cost} but this instance's "
+                f"{metric} variant gives {canonical_cost}; the checked value was stored."
+            )
+
+    label = str(payload.get("label") or "").strip()
+    solution = store.record(
+        instance_id=instance_id,
+        instance_name=str(record["base_name"]),
+        instance_path=instance_path,
+        routes=normalized,
+        cost=canonical_cost,
+        objective_function=objective.value,
+        solver=label or "external",
+        method="imported",
+        seed=-1,
+        time_limit_s=0,
+        wall_time_s=0.0,
+        validation=validation,
+        metadata={"metric": metric, "imported_from": filename or "pasted", "label": label},
+        source="imported",
+    )
+    return {
+        "ok": True,
+        "instance_id": instance_id,
+        "metric": metric,
+        "warning": warning,
+        "declared_cost": declared_cost,
+        "solution": solution,
+    }
 
 
 def _solve_payload(payload: dict[str, Any], *, instance_path: Path | None = None) -> dict[str, Any]:

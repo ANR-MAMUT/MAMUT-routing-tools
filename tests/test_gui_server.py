@@ -63,6 +63,39 @@ def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client
     assert "City fetches store every listed category" in html
     assert "poiCategories: [...POI_CATEGORIES]" in html
 
+    # Bulk configuration overlay with the per-instance table.
+    assert 'id="bulk-modal"' in html and 'id="bulk-table-body"' in html
+    for control in ("bulk-expand", "bulk-add-row", "bulk-import-csv", "bulk-export-csv", "bulk-check"):
+        assert f'id="{control}"' in html
+    # Manual POI picking and the solution import panel.
+    assert 'id="manual-options"' in html and 'id="manual-list"' in html
+    assert 'value="manual"' in html
+    assert 'id="import-panel"' in html and 'id="import-run"' in html
+    # Inline help for the dials that used to be bare numbers.
+    for help_id in ("help-demand", "help-band", "help-method", "help-depot", "help-metric"):
+        assert f'id="{help_id}"' in html
+    # The right panel must reflow on narrow screens instead of disappearing.
+    assert ".panel-right { display: none; }" not in html
+    assert 'id="sheet-toggle"' in html
+
+
+def test_frontend_demand_and_band_labels_match_the_generator(client: TestClient) -> None:
+    """The JS tables are a copy of demands.py; keep them honest."""
+    from mamut_routing_tools.generation.demands import (
+        DEMAND_TYPES,
+        avg_route_size_bounds,
+        demand_distribution_bounds,
+    )
+
+    html = client.get("/").text
+    for demand_type in DEMAND_TYPES:
+        assert f"{{ value: {demand_type}," in html
+        low, high = demand_distribution_bounds(demand_type)
+        band_low, band_high = avg_route_size_bounds(demand_type)
+        # Every bound is quoted somewhere in the help tables (en dash separated).
+        assert f"{low}–{high}" in html or demand_type in (1, 6, 7)
+        assert f"{int(band_low)}–{int(band_high)}" in html
+
 
 def test_fetch_job_acquires_the_full_poi_catalog(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -322,3 +355,159 @@ def test_restart_marks_unfinished_jobs_as_interrupted(tmp_path: Path) -> None:
     assert job["status"] == "interrupted"
     assert job["finished_at"]
     assert job["error"] == "GUI server stopped before this job finished."
+
+
+def test_poi_endpoint_serves_named_pois_and_filters_by_category(client: TestClient) -> None:
+    everything = client.get("/api/workbench/generation/pois", params={"city": "Testville"}).json()
+    assert everything["ok"]
+    by_id = {
+        feature["properties"]["osm_id"]: feature["properties"]
+        for feature in everything["geojson"]["features"]
+    }
+    assert by_id[1]["name"] == "Chez Un" and by_id[1]["category"] == "restaurant"
+    # A nameless amenity is still offered; the picker labels it itself.
+    assert by_id[3]["name"] is None and by_id[3]["category"] == "pharmacy"
+    assert everything["category_counts"]["cafe"] == 1
+
+    filtered = client.get(
+        "/api/workbench/generation/pois", params={"city": "Testville", "categories": "cafe,bar"}
+    ).json()
+    assert {feature["properties"]["category"] for feature in filtered["geojson"]["features"]} == {
+        "cafe",
+        "bar",
+    }
+
+    unknown = client.get(
+        "/api/workbench/generation/pois", params={"city": "Testville", "categories": "not_an_amenity"}
+    )
+    assert unknown.status_code == 400
+
+
+def test_manual_generation_uses_the_picked_pois(client: TestClient) -> None:
+    body = {
+        "city": "Testville",
+        "method": "manual",
+        "seed": 3,
+        "manualPoiIds": [2, 3, 4],
+        "manualDepotPoiId": 1,
+    }
+    preview = client.post("/api/workbench/generation/preview", json=body).json()
+    assert preview["ok"]
+    features = preview["geojson"]["features"]
+    assert [feature["properties"]["role"] for feature in features].count("depot") == 1
+    assert [feature["properties"]["poi_name"] for feature in features] == [
+        "Chez Un",
+        "Café Deux",
+        None,
+        "École Quatre",
+    ]
+
+    generated = client.post("/api/workbench/generation/single", json=body).json()
+    assert generated["ok"] and generated["summary"]["customers"] == 3
+    map_data = client.get(f"/api/instances/{generated['instance_id']}/map-data").json()
+    named = [feature["properties"]["poi_name"] for feature in map_data["geojson"]["features"]]
+    assert "École Quatre" in named
+
+
+def test_bulk_preflight_reports_sizes_the_pool_cannot_serve(client: TestClient) -> None:
+    report = client.post(
+        "/api/workbench/generation/bulk-preflight",
+        json={
+            "city": "Testville",
+            "method": "parametric_attach",
+            "instances": [
+                {"city": "Testville", "nCustomers": 3},
+                {"city": "Testville", "nCustomers": 900},
+            ],
+        },
+    ).json()
+    assert report["ok"] and report["instances"] == 2
+    group = report["groups"][0]
+    assert group["skipped_sizes"] == [900] and group["status"] == "partial"
+
+
+def test_bulk_rows_generate_per_row_instances(client: TestClient) -> None:
+    job = client.post(
+        "/api/jobs",
+        json={
+            "kind": "bulk-generate",
+            "payload": {
+                "city": "Testville",
+                "method": "parametric_attach",
+                "seed": 0,
+                "instances": [
+                    {"city": "Testville", "nCustomers": 3, "demandType": 1, "avgRouteSize": 1},
+                    {
+                        "city": "Testville",
+                        "nCustomers": 4,
+                        "demandType": 5,
+                        "avgRouteSize": 2,
+                        "problemType": "vrptw",
+                    },
+                ],
+            },
+        },
+    ).json()["job"]
+    finished = _wait_for_job(client, job["job_id"])
+    assert finished["status"] == "completed", finished
+    result = finished["result"]
+    assert result["generated"] == 2
+    assert [bool(entry.get("vrptw")) for entry in result["results"]] == [False, True]
+    # Per-row demand type and size really reached the generator.
+    assert [entry["summary"]["demand_type"] for entry in result["results"]] == [1, 5]
+    assert [entry["summary"]["customers"] for entry in result["results"]] == [3, 4]
+
+    listed = {entry["base_name"] for entry in client.get("/api/workbench/instances").json()["instances"]}
+    assert {entry["base_name"] for entry in result["results"]} <= listed
+
+
+def _generate_for_import(client: TestClient) -> dict:
+    body = {"city": "Testville", "nCustomers": 4, "seed": 7, "method": "parametric_attach"}
+    return client.post("/api/workbench/generation/single", json=body).json()
+
+
+def test_importing_an_external_solution_validates_before_storing(client: TestClient) -> None:
+    instance = _generate_for_import(client)
+    instance_id = instance["instance_id"]
+
+    accepted = client.post(
+        f"/api/instances/{instance_id}/solutions/import",
+        json={
+            "metric": "fastest",
+            "text": "Route #1: 1 2\nRoute #2: 3 4\nCost 999\n",
+            "filename": "external.sol",
+            "label": "some-other-solver",
+        },
+    ).json()
+    assert accepted["ok"], accepted
+    run = accepted["solution"]
+    assert run["source"] == "imported" and run["metadata"]["metric"] == "fastest"
+    assert run["validation"]["valid"] and run["num_routes"] == 2
+    # The declared cost was wrong, so the checked value is stored and flagged.
+    assert accepted["warning"] and run["cost"] == run["validation"]["routing_cost"]
+
+    runs = client.get(f"/api/instances/{instance_id}/solutions").json()["runs"]
+    assert [entry["run_id"] for entry in runs] == [run["run_id"]]
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("Route #1: 1 2\nRoute #2: 3 3\n", "more than once"),
+        ("Route #1: 1 2\n", "never visited"),
+        ("Route #1: 1 2 3 4 77\n", "fits neither"),
+        ("nothing useful here\n", "No 'Route #k"),
+        ("", "Paste a solution"),
+    ],
+)
+def test_importing_a_broken_solution_is_refused(client: TestClient, text: str, message: str) -> None:
+    instance = _generate_for_import(client)
+    instance_id = instance["instance_id"]
+    response = client.post(
+        f"/api/instances/{instance_id}/solutions/import",
+        json={"metric": "fastest", "text": text},
+    )
+    assert response.status_code == 400
+    assert message in response.json()["error"]
+    # Nothing is stored when the import is refused.
+    assert client.get(f"/api/instances/{instance_id}/solutions").json()["runs"] == []

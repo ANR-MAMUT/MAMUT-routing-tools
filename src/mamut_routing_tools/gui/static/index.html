@@ -245,16 +245,169 @@
   .chip-gr { background: var(--gr-t); color: var(--gr); }
   .chip-acc { background: var(--acc-t); color: var(--acc); }
 
-  details.bulk { border: none; }
-  details.bulk > summary {
+  /* ── Inline help ── */
+  .field-head { display: flex; align-items: center; gap: 6px; }
+  .help-btn {
     cursor: pointer;
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+    font: inherit;
+    font-size: 9.5px;
+    font-weight: 700;
+    line-height: 1;
+    width: 14px;
+    height: 14px;
+    flex: none;
+    border-radius: 50%;
+    border: 1px solid var(--div);
+    background: transparent;
     color: var(--mut);
-    user-select: none;
+    padding: 0;
   }
-  details.bulk > div { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; }
+  .help-btn:hover, .help-btn[aria-expanded="true"] { color: var(--acc); border-color: var(--edge); background: var(--acc-t); }
+  .help-body {
+    font-size: 11px;
+    line-height: 1.55;
+    color: var(--mut);
+    margin: 2px 0 0;
+    padding-left: 9px;
+    border-left: 2px solid var(--edge);
+  }
+  .help-body[hidden] { display: none; }
+  .help-body dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 4px 0 0; }
+  .help-body dt { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .help-body dd { margin: 0; }
+
+  /* ── Bulk configuration overlay ── */
+  .bulk-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: color-mix(in srgb, var(--bg) 72%, transparent);
+    backdrop-filter: blur(4px);
+  }
+  .bulk-modal-overlay[hidden] { display: none; }
+  .bulk-modal {
+    display: flex;
+    flex-direction: column;
+    width: min(1240px, 100%);
+    height: min(820px, 100%);
+    background: var(--panel);
+    backdrop-filter: blur(14px);
+    border-radius: 14px;
+    box-shadow: var(--shadow), 0 0 0 1px var(--div);
+    overflow: hidden;
+  }
+  .bulk-modal-header, .bulk-modal-footer {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    flex: none;
+  }
+  .bulk-modal-header { border-bottom: 1px solid var(--div); }
+  .bulk-modal-footer { border-top: 1px solid var(--div); }
+  .bulk-modal-header h2 { margin: 0; font-size: 14px; font-weight: 600; }
+  .bulk-modal-close {
+    margin-left: auto;
+    cursor: pointer;
+    font: inherit;
+    font-size: 18px;
+    line-height: 1;
+    border: none;
+    background: transparent;
+    color: var(--mut);
+    padding: 2px 6px;
+    border-radius: 6px;
+  }
+  .bulk-modal-close:hover { color: var(--cor); background: var(--cor-t); }
+  .bulk-modal-body { display: flex; min-height: 0; flex: 1; }
+  .bulk-modal-left {
+    width: 292px;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px 18px;
+    overflow-y: auto;
+    border-right: 1px solid var(--div);
+  }
+  .bulk-modal-right {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px 18px;
+  }
+  .bulk-city-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 168px;
+    overflow-y: auto;
+    border: 1px solid var(--div);
+    border-radius: 8px;
+    padding: 5px;
+  }
+  .bulk-checkbox-row { display: flex; flex-direction: column; gap: 1px; }
+  .bulk-checkbox-row label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11.5px;
+    padding: 2px 3px;
+    border-radius: 5px;
+    cursor: pointer;
+  }
+  .bulk-checkbox-row label:hover, .bulk-city-list label:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+  .bulk-checkbox-row .band { color: var(--mut); margin-left: auto; font-variant-numeric: tabular-nums; }
+  .bulk-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; flex: none; }
+  .bulk-table-wrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--div); border-radius: 8px; }
+  /* Columns size to their content and the wrapper scrolls; a plain width:100%
+     squeezes the selects down to a bare chevron. */
+  .bulk-table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 11.5px; }
+  .bulk-table th, .bulk-table td { padding: 3px 5px; text-align: left; white-space: nowrap; }
+  .bulk-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--s);
+    color: var(--mut);
+    font-weight: 500;
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--div);
+  }
+  .bulk-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--ink) 3%, transparent); }
+  .bulk-table td select, .bulk-table td input[type="text"], .bulk-table td input[type="number"] {
+    min-height: 24px;
+    padding: 2px 5px;
+    font-size: 11.5px;
+    border-radius: 5px;
+    width: auto;
+  }
+  .bulk-table td select { min-width: 104px; }
+  .bulk-table td input[type="number"] { width: 74px; }
+  .bulk-table td.cat-cell input[type="text"] { min-width: 190px; }
+  .bulk-delete-btn {
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    color: var(--mut);
+    font: inherit;
+    padding: 2px 5px;
+    border-radius: 5px;
+  }
+  .bulk-delete-btn:hover { color: var(--cor); background: var(--cor-t); }
+  .bulk-empty { padding: 22px; text-align: center; }
+  .preflight-line { font-size: 11px; line-height: 1.5; }
+  .preflight-line.warn { color: var(--am); }
+  .preflight-line.bad { color: var(--cor); }
+  .preflight-line.good { color: var(--gr); }
 
   .poi-picker { display: flex; flex-direction: column; gap: 5px; }
   .poi-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
@@ -461,9 +614,70 @@
   }
   .map-clear-btn:hover { color: var(--cor); box-shadow: 0 0 0 1px var(--cor); }
 
-  @media (max-width: 1000px) {
-    .panel-right { display: none; }
+  /* ── Map POI picker ── */
+  .poi-marker {
+    border-radius: 50%;
+    border: 2px solid var(--svg);
+    box-sizing: content-box;
+    cursor: pointer;
   }
+  .poi-marker.picked { box-shadow: 0 0 0 3px var(--acc); }
+  .poi-pick-summary { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+  .poi-pick-summary .count { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .picked-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 190px;
+    overflow-y: auto;
+    border: 1px solid var(--div);
+    border-radius: 8px;
+    padding: 4px;
+  }
+  .picked-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11.5px;
+    padding: 3px 4px;
+    border-radius: 5px;
+  }
+  .picked-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+  .picked-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .picked-row .cat { color: var(--mut); font-size: 10px; margin-left: auto; flex: none; }
+  .picked-row .depot-flag { color: var(--cor); font-size: 10px; flex: none; }
+
+  /* ── Import solution ── */
+  #import-text { width: 100%; min-height: 92px; resize: vertical; font-family: ui-monospace, monospace; font-size: 11px; }
+
+  /* Below this width the right panel becomes a bottom sheet instead of
+     disappearing: solve controls, saved runs and compare must stay reachable. */
+  @media (max-width: 1000px) {
+    .panel-right {
+      top: auto;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      width: auto;
+      max-height: 52vh;
+    }
+    .panel-right.sheet-collapsed { max-height: 46px; overflow: hidden; }
+    .sheet-toggle { display: inline-flex; }
+    .footer, .map-clear-btn { display: none; }
+  }
+  .sheet-toggle {
+    display: none;
+    margin-left: auto;
+    cursor: pointer;
+    font: inherit;
+    font-size: 10px;
+    color: var(--mut);
+    background: transparent;
+    border: 1px solid var(--div);
+    border-radius: 6px;
+    padding: 2px 7px;
+  }
+  .sheet-toggle:hover { color: var(--acc); border-color: var(--edge); }
 </style>
 </head>
 <body>
@@ -502,20 +716,47 @@
       <label class="field"><span>Customers</span><input id="n" type="number" value="30" min="2"></label>
       <label class="field"><span>Seed</span><input id="seed" type="number" value="0"></label>
     </div>
-    <label class="field"><span>Sampling method</span>
+    <div class="field">
+      <div class="field-head">
+        <span>Sampling method</span>
+        <button class="help-btn" type="button" data-help="help-method" aria-expanded="false" aria-label="What the sampling methods do">i</button>
+      </div>
       <select id="method">
         <option value="poi_categories">POI categories</option>
         <option value="parametric_attach">Parametric attach</option>
         <option value="hybrid">Hybrid</option>
+        <option value="manual">Manual · pick POIs on the map</option>
       </select>
-    </label>
-    <label class="field"><span>Depot position</span>
+      <div class="help-body" id="help-method" hidden>
+        How customer locations are chosen on the road graph.
+        <dl>
+          <dt>POI categories</dt><dd>Customers sit on real amenities of the ticked categories.</dd>
+          <dt>Parametric attach</dt><dd>Customers are sampled from road intersections, ignoring amenities.</dd>
+          <dt>Hybrid</dt><dd>Mixes both by the share below; missing POIs are filled parametrically.</dd>
+          <dt>Manual</dt><dd>You pick the exact POIs on the map. Each pick snaps to its nearest road intersection.</dd>
+        </dl>
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-head">
+        <span>Depot position</span>
+        <button class="help-btn" type="button" data-help="help-depot" aria-expanded="false" aria-label="What the depot positions mean">i</button>
+      </div>
       <select id="depot-mode">
         <option value="center">Centered</option>
         <option value="random">Random</option>
         <option value="corner">Excentered (corner)</option>
       </select>
-    </label>
+      <div class="help-body" id="help-depot" hidden>
+        Which road intersection becomes node 1, the depot.
+        <dl>
+          <dt>Centered</dt><dd>Closest vertex to the mean of all vertices — short, balanced routes.</dd>
+          <dt>Random</dt><dd>A uniformly drawn vertex, so difficulty varies with the seed.</dd>
+          <dt>Excentered</dt><dd>Closest vertex to the south-west corner — long approach legs.</dd>
+        </dl>
+        In manual mode you can instead click a POI and mark it as the depot.
+      </div>
+    </div>
     <div id="poi-picker" class="field poi-picker">
       <span>POI categories</span>
       <div class="poi-toolbar">
@@ -529,6 +770,21 @@
         <div id="poi-list" class="poi-list"></div>
       </details>
       <p class="note">City fetches store every listed category. These checks only filter which POIs generation may select.</p>
+    </div>
+    <div id="manual-options" class="option-group" hidden>
+      <div class="poi-pick-summary">
+        <span class="count" id="manual-count">0</span>
+        <span class="note" id="manual-available">Click POIs on the map to add them.</span>
+      </div>
+      <div class="poi-toolbar">
+        <button id="manual-load" class="mini-btn" type="button">Show POIs on map</button>
+        <button id="manual-clear" class="mini-btn" type="button">Clear picks</button>
+        <button id="manual-depot-clear" class="mini-btn" type="button">Unset depot</button>
+      </div>
+      <div id="manual-list" class="picked-list"></div>
+      <p class="note">Click a marker to pick or unpick it; shift-click sets it as the depot. Names come from
+        OpenStreetMap where available. Picks are snapped to the nearest road intersection, so two POIs on the
+        same corner collapse into one customer.</p>
     </div>
     <div id="hybrid-options" class="option-group" hidden>
       <label class="field">
@@ -557,28 +813,40 @@
         <option value="vrptw">VRPTW · capacity + time windows</option>
       </select>
     </label>
-    <div class="grid-2">
-      <label class="field"><span>Demand type (1-7)</span><input id="demand" type="number" value="7" min="1" max="7"></label>
-      <label class="field"><span>Route size band (1-7)</span><input id="ars" type="number" value="4" min="1" max="7"></label>
+    <div class="field">
+      <div class="field-head">
+        <span>Demand type</span>
+        <button class="help-btn" type="button" data-help="help-demand" aria-expanded="false" aria-label="What the demand types mean">i</button>
+      </div>
+      <select id="demand"></select>
+      <div class="help-body" id="help-demand" hidden>
+        The distribution the per-customer demand is drawn from. Type 6 is spatially correlated
+        (heavy customers cluster on one diagonal), type 7 mixes a few bulky customers into many small ones.
+        <dl id="help-demand-table"></dl>
+      </div>
+    </div>
+    <div class="field">
+      <div class="field-head">
+        <span>Route size band</span>
+        <button class="help-btn" type="button" data-help="help-band" aria-expanded="false" aria-label="What the route size bands mean">i</button>
+      </div>
+      <select id="ars"></select>
+      <div class="help-body" id="help-band" hidden>
+        The target number of customers per route. A value <em>r</em> is drawn uniformly from the band and
+        sets the <strong>vehicle capacity</strong>, which in turn gives the fleet size
+        (<code>ceil(total demand / capacity)</code>). It is a target, not a hard route count.
+        <dl id="help-band-table"></dl>
+      </div>
     </div>
     <div class="row">
       <button id="preview" class="btn btn-secondary" type="button">Preview</button>
       <button id="generate" class="btn" type="button">Generate</button>
     </div>
-    <details class="bulk">
-      <summary>Bulk generation</summary>
-      <div>
-        <label class="field"><span>Sizes n (comma-separated)</span><input id="bulk-sizes" type="text" value="10,50,100"></label>
-        <div class="grid-2">
-          <label class="field"><span>Demand types</span><input id="bulk-demands" type="text" value="7"></label>
-          <label class="field"><span>Route size bands</span><input id="bulk-ars" type="text" value="4"></label>
-        </div>
-        <div class="row">
-          <button id="bulk-run" class="btn btn-secondary" type="button">Generate bulk</button>
-          <button id="bulk-download" class="btn btn-ghost" type="button" disabled>Download zip</button>
-        </div>
-      </div>
-    </details>
+    <div class="row">
+      <button id="bulk-open" class="btn btn-secondary" type="button">Bulk generation…</button>
+      <span id="bulk-count-badge" class="poi-count">0 instances</span>
+      <button id="bulk-download" class="btn btn-ghost" type="button" disabled>Download zip</button>
+    </div>
     <p class="note">Runs the published Poryos2026 v2 workbench pipeline locally: 3-metric CVRPLIB artifacts with shared road / geo / distance sidecars, plus VRPTW twins on request. Everything is written to your workspace.</p>
   </section>
 
@@ -590,7 +858,9 @@
 </aside>
 
 <aside class="panel panel-right">
-  <div class="kicker kicker-selected">Selected instance</div>
+  <div class="kicker kicker-selected">Selected instance
+    <button id="sheet-toggle" class="sheet-toggle" type="button" aria-expanded="true">Hide</button>
+  </div>
   <div id="selEmpty" class="empty-note">Generate an instance or pick one in the Visualize tab to display its depot and customers. Solving is optional.</div>
   <div id="selBody" hidden>
     <div class="sel-name-row"><span class="sel-name" id="selName"></span><span class="sel-meta" id="selMeta"></span></div>
@@ -599,7 +869,22 @@
       <div class="sel-cost-row"><span class="sel-cost" id="selCost"></span><span class="chip chip-am" id="selMethod"></span></div>
     </div>
     <dl class="sel-facts" id="selFacts"></dl>
-    <div class="grid-2" style="margin-top:6px">
+    <div class="field-head" style="margin-top:6px">
+      <span class="kicker" style="margin:0">Solve target</span>
+      <button class="help-btn" type="button" data-help="help-metric" aria-expanded="false" aria-label="What the metric and objective mean">i</button>
+    </div>
+    <div class="help-body" id="help-metric" hidden>
+      Every instance is written as three variants that differ only in arc costs, so a solution
+      belongs to <em>one</em> of them and its cost is not comparable across the others.
+      <dl>
+        <dt>Fastest</dt><dd>Arc costs are travel times in seconds.</dd>
+        <dt>Shortest</dt><dd>Arc costs are road distances in metres.</dd>
+        <dt>Euclidean</dt><dd>Arc costs are straight-line distances, ignoring the road network.</dd>
+        <dt>MonoCost</dt><dd>Minimise total routing cost.</dd>
+        <dt>Hierarchical</dt><dd>Minimise the fleet size first, then the routing cost.</dd>
+      </dl>
+    </div>
+    <div class="grid-2">
       <label class="field"><span>Metric</span><select id="solve-metric"><option value="fastest">Fastest</option><option value="shortest">Shortest</option><option value="euclidean">Euclidean</option></select></label>
       <label class="field"><span>Objective</span><select id="solve-objective"><option value="MonoCost">MonoCost</option><option value="HierarchicalVehicleCost">Hierarchical vehicle cost</option></select></label>
       <label class="field"><span>Budget (s)</span><input id="solve-budget" type="number" value="30" min="1"></label>
@@ -607,6 +892,17 @@
     </div>
     <div class="row">
       <button id="solve" class="btn" type="button">Queue solve</button>
+      <button id="import-open" class="btn btn-secondary" type="button">Import solution…</button>
+    </div>
+    <div id="import-panel" class="option-group" hidden>
+      <label class="field"><span>Solution file (.sol or .json)</span><input id="import-file" type="file" accept=".sol,.txt,.json"></label>
+      <label class="field"><span>…or paste the routes</span><textarea id="import-text" placeholder="Route #1: 3 7 1&#10;Route #2: 2 5 4"></textarea></label>
+      <label class="field"><span>Source label</span><input id="import-label" type="text" placeholder="e.g. LKH-3, or a paper"></label>
+      <div id="import-validation" class="validation-line">Imported solutions are checked against the metric selected above before they are stored.</div>
+      <div class="row">
+        <button id="import-run" class="btn" type="button">Check and import</button>
+        <button id="import-cancel" class="btn btn-ghost" type="button">Cancel</button>
+      </div>
     </div>
     <div class="row">
       <button id="download" class="btn btn-ghost" type="button">Download zip</button>
@@ -625,6 +921,85 @@
     <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
   </div>
 </aside>
+
+<div id="bulk-modal" class="bulk-modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="bulk-modal-title">
+  <div class="bulk-modal">
+    <div class="bulk-modal-header">
+      <h2 id="bulk-modal-title">Bulk generation</h2>
+      <span class="note">Build combinations on the left, then edit any row individually.</span>
+      <button id="bulk-close" class="bulk-modal-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="bulk-modal-body">
+      <div class="bulk-modal-left">
+        <div class="kicker">Combination builder</div>
+        <div class="field">
+          <div class="field-head"><span>Cities</span></div>
+          <div class="poi-toolbar">
+            <button id="bulk-city-all" class="mini-btn" type="button">All</button>
+            <button id="bulk-city-none" class="mini-btn" type="button">None</button>
+            <span id="bulk-city-count" class="poi-count">0 selected</span>
+          </div>
+          <div id="bulk-cities" class="bulk-city-list"></div>
+        </div>
+        <label class="field"><span>Customers n (comma-separated)</span><input id="bulk-sizes" type="text" value="10,50,100"></label>
+        <div class="field">
+          <div class="field-head"><span>Demand types</span></div>
+          <div class="bulk-checkbox-row" id="bulk-demand-checks"></div>
+        </div>
+        <div class="field">
+          <div class="field-head"><span>Route size bands</span></div>
+          <div class="bulk-checkbox-row" id="bulk-band-checks"></div>
+        </div>
+        <label class="field"><span>Problem type</span>
+          <select id="bulk-problem">
+            <option value="cvrp">CVRP</option>
+            <option value="vrptw">VRPTW</option>
+          </select>
+        </label>
+        <label class="field"><span>Time window method</span>
+          <select id="bulk-tw">
+            <option value="route_centered">Route centered</option>
+            <option value="reachable_interval">Reachable interval</option>
+          </select>
+        </label>
+        <button id="bulk-expand" class="btn btn-secondary" type="button">Expand to table</button>
+        <p class="note">Rows inherit the Generate form's method, categories and cluster settings; change any of
+          them per row in the table. Duplicate combinations are skipped.</p>
+      </div>
+      <div class="bulk-modal-right">
+        <div class="bulk-toolbar">
+          <button id="bulk-add-row" class="mini-btn" type="button">Add row</button>
+          <button id="bulk-delete-selected" class="mini-btn" type="button">Delete selected</button>
+          <button id="bulk-clear" class="mini-btn" type="button">Clear all</button>
+          <button id="bulk-import-csv" class="mini-btn" type="button">Import CSV</button>
+          <button id="bulk-export-csv" class="mini-btn" type="button">Export CSV</button>
+          <input id="bulk-csv-file" type="file" accept=".csv,.txt" hidden>
+          <span id="bulk-modal-count" class="poi-count">0 instances</span>
+        </div>
+        <div class="bulk-table-wrap">
+          <table class="bulk-table" id="bulk-table">
+            <thead>
+              <tr>
+                <th><input type="checkbox" id="bulk-select-all" aria-label="Select every row"></th>
+                <th>Type</th><th>City</th><th>n</th><th>Demand</th><th>Route size</th>
+                <th>Method</th><th>Seed</th><th>Depot</th><th>Customer</th><th>TW method</th>
+                <th>Intersections</th><th>Clusters</th><th>Decay (m)</th><th>Hybrid</th>
+                <th>Categories</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="bulk-table-body"></tbody>
+          </table>
+        </div>
+        <div id="bulk-preflight" class="preflight-line"></div>
+      </div>
+    </div>
+    <div class="bulk-modal-footer">
+      <button id="bulk-run" class="btn" type="button">Generate all</button>
+      <button id="bulk-check" class="btn btn-secondary" type="button">Check feasibility</button>
+      <button id="bulk-close-2" class="btn btn-ghost" type="button">Close</button>
+    </div>
+  </div>
+</div>
 
 <div class="footer"><span class="dot" aria-hidden="true"></span><p id="status" title="">Ready.</p></div>
 <button id="clear" class="map-clear-btn" type="button">Clear map</button>
@@ -660,6 +1035,40 @@ const DEFAULT_POI_CATEGORIES = new Set([
   "restaurant", "cafe", "bar", "fast_food", "pub", "school", "university",
 ]);
 
+/* Mirrors generation/demands.py: demand_distribution_bounds and
+   avg_route_size_bounds. Kept in sync by tests/test_gui_server.py. */
+const DEMAND_TYPES = [
+  { value: 1, label: "Unitary", detail: "every demand = 1" },
+  { value: 2, label: "Small, large variance", detail: "1–10" },
+  { value: 3, label: "Small, small variance", detail: "5–10" },
+  { value: 4, label: "Large, large variance", detail: "1–100" },
+  { value: 5, label: "Large, small variance", detail: "50–100" },
+  { value: 6, label: "Quadrant-dependent", detail: "51–100 on one diagonal, 1–50 elsewhere" },
+  { value: 7, label: "Few large, many small", detail: "50–100 for ~1.5n/r of them, 1–10 for the rest" },
+];
+const ROUTE_SIZE_BANDS = [
+  { value: 1, label: "Ultra short", detail: "3–5 customers per route" },
+  { value: 2, label: "Very short", detail: "5–8" },
+  { value: 3, label: "Short", detail: "8–12" },
+  { value: 4, label: "Medium", detail: "12–16" },
+  { value: 5, label: "Long", detail: "16–25" },
+  { value: 6, label: "Very long", detail: "25–50" },
+  { value: 7, label: "Ultra long", detail: "50–200" },
+];
+const DEMAND_LABELS = new Map(DEMAND_TYPES.map((entry) => [entry.value, entry.label]));
+const BAND_LABELS = new Map(ROUTE_SIZE_BANDS.map((entry) => [entry.value, entry.label]));
+const BULK_CSV_COLUMNS = [
+  "problemType", "city", "nCustomers", "demandType", "avgRouteSize", "method", "seed",
+  "depotMode", "customerMode", "twMethod", "onlyIntersections", "clusterSeeds",
+  "clusterDecayMeters", "hybridPoiShare", "categories",
+];
+const BULK_INT_FIELDS = new Set(["nCustomers", "demandType", "avgRouteSize", "seed", "clusterSeeds"]);
+const BULK_FLOAT_FIELDS = new Set(["clusterDecayMeters", "hybridPoiShare"]);
+const SAMPLING_METHODS = ["poi_categories", "parametric_attach", "hybrid", "manual"];
+const DEPOT_MODES = ["center", "random", "corner"];
+const CUSTOMER_MODES = ["random_clustered", "clustered", "random"];
+const TW_METHODS = ["route_centered", "reachable_interval"];
+
 const isDark = () => document.documentElement.dataset.theme !== "light";
 const routeColor = (index) => (isDark() ? ROUTE_COLORS_DARK : ROUTE_COLORS_LIGHT)[index % 20];
 const markerColors = () => (isDark()
@@ -682,6 +1091,7 @@ baseLayer.addTo(map);
 
 const previewLayers = L.layerGroup().addTo(map);
 const instanceNodeLayers = L.layerGroup().addTo(map);
+const poiPickLayers = L.layerGroup().addTo(map);
 let routeLayerGroups = [];
 
 /* ── Theme ── */
@@ -754,6 +1164,14 @@ const state = {
   solutionReferences: [],
   selectedRunId: null,
   previewGeojson: null,
+  // Manual POI picking
+  poiPool: [],
+  poiPoolCity: null,
+  manualPicks: new Map(),
+  manualDepotId: null,
+  // Bulk configuration table
+  bulkRows: [],
+  bulkNextId: 1,
 };
 
 /* ── Tabs ── */
@@ -804,17 +1222,57 @@ function renderPoiCategories() {
   updatePoiCount();
 }
 
+/* ── Labelled dials and inline help ── */
+function fillBandSelects() {
+  const fill = (id, entries, selected) => {
+    const select = el(id);
+    select.innerHTML = "";
+    entries.forEach((entry) => {
+      const option = new Option(`${entry.value} · ${entry.label}`, String(entry.value));
+      option.title = entry.detail;
+      select.append(option);
+    });
+    select.value = String(selected);
+  };
+  fill("demand", DEMAND_TYPES, 7);
+  fill("ars", ROUTE_SIZE_BANDS, 4);
+
+  const table = (id, entries) => {
+    el(id).innerHTML = entries
+      .map((entry) => `<dt>${entry.value}</dt><dd>${entry.label} — ${entry.detail}</dd>`)
+      .join("");
+  };
+  table("help-demand-table", DEMAND_TYPES);
+  table("help-band-table", ROUTE_SIZE_BANDS);
+}
+
+document.querySelectorAll(".help-btn").forEach((button) => {
+  button.addEventListener("click", () => {
+    const body = el(button.dataset.help);
+    if (!body) return;
+    const showing = body.hidden;
+    body.hidden = !showing;
+    button.setAttribute("aria-expanded", showing ? "true" : "false");
+  });
+});
+
 function updateGenerationControls() {
   const method = el("method").value;
   const hybridPoiPercent = Number(el("hybrid-poi-share").value);
+  const manual = method === "manual";
   const usesPoi = method === "poi_categories" || (method === "hybrid" && hybridPoiPercent > 0);
   const usesParametric = method === "parametric_attach" || (method === "hybrid" && hybridPoiPercent < 100);
-  el("poi-picker").hidden = !usesPoi;
+  // Manual picking reuses the category checkboxes to filter what the map shows.
+  el("poi-picker").hidden = !usesPoi && !manual;
+  el("manual-options").hidden = !manual;
   el("hybrid-options").hidden = method !== "hybrid";
   el("parametric-options").hidden = !usesParametric;
   const usesClusters = usesParametric && el("customer-mode").value !== "random";
   el("cluster-options").hidden = !usesClusters;
   el("cluster-note").hidden = !usesClusters;
+  // n is derived from the picks in manual mode.
+  el("n").disabled = manual;
+  if (!manual) clearPoiPool();
 }
 
 function updateHybridShare() {
@@ -839,8 +1297,17 @@ function requestBody() {
   if ((method === "poi_categories" || (method === "hybrid" && hybridPoiShare > 0)) && !categories.length) {
     throw new Error("Select at least one POI category for this sampling method.");
   }
+  const manualIds = [...state.manualPicks.keys()];
+  if (method === "manual") {
+    const customers = manualIds.filter((id) => id !== state.manualDepotId).length;
+    if (customers < 2) {
+      throw new Error("Pick at least 2 POIs (besides the depot) on the map for manual generation.");
+    }
+  }
   return {
     city: el("city").value,
+    manualPoiIds: method === "manual" ? manualIds : undefined,
+    manualDepotPoiId: method === "manual" ? state.manualDepotId : undefined,
     nCustomers: Number(el("n").value),
     seed: Number(el("seed").value),
     method,
@@ -919,19 +1386,160 @@ function drawPreview(geojson) {
   geojson.features.forEach((feature) => {
     const [lon, lat] = feature.geometry.coordinates;
     bounds.push([lat, lon]);
+    const tag = String(feature.properties.source_tag || "");
     const role = feature.properties.role === "depot"
       ? "depot"
-      : (feature.properties.source_tag === "poi" ? "poi" : "parametric");
+      : (tag.startsWith("poi") ? "poi" : "parametric");
     L.circleMarker([lat, lon], {
       radius: role === "depot" ? 7 : 4,
       color: colors[role],
       fillColor: colors[role],
       fillOpacity: 0.85,
       weight: role === "depot" ? 2 : 1,
-    }).bindTooltip(`#${feature.properties.instance_node_id} ${feature.properties.source_tag}`).addTo(previewLayers);
+    }).bindTooltip(nodeTooltip(feature.properties)).addTo(previewLayers);
   });
   if (bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
 }
+
+/* A node's label: its OSM name when the pipeline captured one, else the
+   amenity, else just the source tag. */
+function nodeTooltip(properties) {
+  const parts = [`#${properties.instance_node_id}`];
+  if (properties.poi_name) parts.push(properties.poi_name);
+  else if (properties.poi_category) parts.push(properties.poi_category.replaceAll("_", " "));
+  parts.push(String(properties.source_tag || ""));
+  if (properties.snap_distance_m > 1) parts.push(`snapped ${Math.round(properties.snap_distance_m)} m`);
+  return parts.join(" · ");
+}
+
+/* ── Manual POI picking ── */
+function poiLabel(properties) {
+  return properties.name || `(unnamed ${String(properties.category || "poi").replaceAll("_", " ")})`;
+}
+
+function clearPoiPool() {
+  poiPickLayers.clearLayers();
+  state.poiPool = [];
+  state.poiPoolCity = null;
+}
+
+async function loadPoiPool() {
+  const city = el("city").value;
+  if (!city) throw new Error("Select a city first.");
+  const categories = selectedPoiCategories();
+  const query = new URLSearchParams({ city, categories: categories.join(",") });
+  const data = await api(`/api/workbench/generation/pois?${query.toString()}`);
+  state.poiPool = data.geojson.features;
+  state.poiPoolCity = city;
+  // Picks from another city cannot resolve against this extract.
+  if (data.city !== city) state.manualPicks.clear();
+  renderPoiMarkers(true);
+  el("manual-available").textContent =
+    `${data.returned} POI(s) shown of ${data.total_in_extract} in the extract · ${data.named} named.`;
+  status(`Loaded ${data.returned} POI(s) for ${city}; click markers to pick them.`);
+}
+
+function renderPoiMarkers(fit = false) {
+  poiPickLayers.clearLayers();
+  const colors = markerColors();
+  const bounds = [];
+  state.poiPool.forEach((feature) => {
+    const [lon, lat] = feature.geometry.coordinates;
+    const osmId = feature.properties.osm_id;
+    const picked = state.manualPicks.has(osmId);
+    const isDepot = state.manualDepotId === osmId;
+    bounds.push([lat, lon]);
+    const marker = L.circleMarker([lat, lon], {
+      radius: isDepot ? 7 : picked ? 5.5 : 3.5,
+      color: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
+      fillColor: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
+      fillOpacity: picked || isDepot ? 0.9 : 0.35,
+      weight: picked || isDepot ? 2 : 1,
+    });
+    const suffix = isDepot ? " · DEPOT" : picked ? " · picked" : "";
+    marker.bindTooltip(`${poiLabel(feature.properties)}${suffix}`);
+    marker.on("click", (event) => {
+      // Shift-click promotes a POI to the depot instead of toggling it.
+      if (event.originalEvent && event.originalEvent.shiftKey) setManualDepot(osmId, feature);
+      else toggleManualPick(osmId, feature);
+    });
+    marker.addTo(poiPickLayers);
+  });
+  if (fit && bounds.length) map.fitBounds(bounds, { padding: [50, 50] });
+  renderManualPicks();
+}
+
+function toggleManualPick(osmId, feature) {
+  if (state.manualPicks.has(osmId)) {
+    state.manualPicks.delete(osmId);
+    if (state.manualDepotId === osmId) state.manualDepotId = null;
+  } else {
+    state.manualPicks.set(osmId, feature.properties);
+  }
+  renderPoiMarkers();
+}
+
+function setManualDepot(osmId, feature) {
+  if (!state.manualPicks.has(osmId)) state.manualPicks.set(osmId, feature.properties);
+  state.manualDepotId = state.manualDepotId === osmId ? null : osmId;
+  renderPoiMarkers();
+}
+
+function renderManualPicks() {
+  const customers = [...state.manualPicks.keys()].filter((id) => id !== state.manualDepotId).length;
+  el("manual-count").textContent = String(customers);
+  const list = el("manual-list");
+  list.innerHTML = "";
+  if (!state.manualPicks.size) {
+    list.innerHTML = '<div class="empty-note">No POI picked yet.</div>';
+    return;
+  }
+  state.manualPicks.forEach((properties, osmId) => {
+    const row = document.createElement("div");
+    row.className = "picked-row";
+    const name = document.createElement("span");
+    name.className = "nm";
+    name.textContent = poiLabel(properties);
+    row.append(name);
+    if (state.manualDepotId === osmId) {
+      const flag = document.createElement("span");
+      flag.className = "depot-flag";
+      flag.textContent = "depot";
+      row.append(flag);
+    }
+    const category = document.createElement("span");
+    category.className = "cat";
+    category.textContent = String(properties.category || "").replaceAll("_", " ");
+    row.append(category);
+    const remove = document.createElement("button");
+    remove.className = "bulk-delete-btn";
+    remove.type = "button";
+    remove.textContent = "×";
+    remove.title = "Remove this pick";
+    remove.addEventListener("click", () => {
+      state.manualPicks.delete(osmId);
+      if (state.manualDepotId === osmId) state.manualDepotId = null;
+      renderPoiMarkers();
+    });
+    row.append(remove);
+    list.append(row);
+  });
+}
+
+el("manual-load").addEventListener("click", async () => {
+  try {
+    await loadPoiPool();
+  } catch (error) { status(`Cannot load POIs: ${error.message}`); }
+});
+el("manual-clear").addEventListener("click", () => {
+  state.manualPicks.clear();
+  state.manualDepotId = null;
+  renderPoiMarkers();
+});
+el("manual-depot-clear").addEventListener("click", () => {
+  state.manualDepotId = null;
+  renderPoiMarkers();
+});
 
 function drawInstanceNodes(routes = null, fit = false) {
   instanceNodeLayers.clearLayers();
@@ -951,7 +1559,7 @@ function drawInstanceNodes(routes = null, fit = false) {
     const color = isDepot
       ? colors.depot
       : (routeIndex == null
-        ? (properties.source_tag === "poi" ? colors.poi : colors.parametric)
+        ? (String(properties.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric)
         : routeColor(routeIndex));
     const marker = L.circleMarker([lat, lon], {
       radius: isDepot ? 7 : 5,
@@ -961,7 +1569,8 @@ function drawInstanceNodes(routes = null, fit = false) {
       weight: isDepot ? 3 : 2,
     });
     const label = isDepot ? "Depot" : `Customer ${properties.model_node_id}`;
-    marker.bindTooltip(`${label} · demand ${properties.demand} · ${properties.source_tag}`);
+    const named = properties.poi_name ? ` · ${properties.poi_name}` : "";
+    marker.bindTooltip(`${label}${named} · demand ${properties.demand} · ${properties.source_tag}`);
     marker.addTo(instanceNodeLayers);
     bounds.push([lat, lon]);
   });
@@ -1037,12 +1646,18 @@ function renderSelected() {
     ["Saved solutions", instance.solution_count],
   ];
   if (instance.vrptw) facts.push(["VRPTW twin", "derived"]);
+  if (instance.solved) {
+    // Which of the three metric variants this cost actually belongs to.
+    facts.push(["Solved on", solvedVariantFile(instance)]);
+  }
   el("selFacts").innerHTML = facts
     .map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`)
     .join("");
   if (instance.solved) {
+    const metric = runMetric(instance.solved);
     el("selObjective").hidden = false;
-    el("selObjLabel").textContent = `${instance.solved.objective_function || "MonoCost"} · ${instance.solved.source === "bks" ? "BKS" : "saved run"}`;
+    el("selObjLabel").textContent =
+      `${metric} · ${instance.solved.objective_function || "MonoCost"} · ${runSourceLabel(instance.solved)}`;
     el("selCost").textContent = String(instance.solved.cost);
     el("selMethod").textContent = instance.solved.method || "pyvrp";
   } else {
@@ -1093,6 +1708,8 @@ function selectInstance(index, preferredRunId = null) {
   previewLayers.clearLayers();
   instanceNodeLayers.clearLayers();
   clearRouteLayers();
+  // A half-filled import belongs to the instance it was opened for.
+  el("import-panel").hidden = true;
   renderInstanceList();
   renderSelected();
   return loadSolutionRuns(preferredRunId).catch((error) => {
@@ -1132,10 +1749,29 @@ function allSolutionRecords() {
   return [...state.solutionRuns, ...state.solutionReferences];
 }
 
+/* The metric a run was produced on. Every instance ships shortest/fastest/
+   euclidean variants, so a cost is meaningless without it. */
+function runMetric(run) {
+  return run?.metadata?.metric || "unknown metric";
+}
+
+function runSourceLabel(run) {
+  if (run.source === "bks") return "BKS";
+  if (run.source === "imported") return `imported${run.solver && run.solver !== "external" ? ` · ${run.solver}` : ""}`;
+  return run.created_at ? new Date(run.created_at).toLocaleString() : "saved run";
+}
+
+function solvedVariantFile(instance) {
+  const metric = runMetric(instance.solved);
+  const file = instance.files?.[metric];
+  return file || `${instance.base_name}_${metric}.vrp`;
+}
+
 function solutionLabel(run) {
-  const source = run.source === "bks" ? "BKS" : (run.created_at ? new Date(run.created_at).toLocaleString() : "saved run");
   const validity = run.validation?.valid ? "valid" : "invalid";
-  return `${source} · ${run.objective_function} · cost ${run.cost ?? "?"} · ${run.num_routes} routes · ${validity}`;
+  const problem = run.instance_path && /cvrptw/i.test(String(run.instance_path)) ? "VRPTW" : "CVRP";
+  return `${runMetric(run)} · ${problem} · ${runSourceLabel(run)} · ${run.objective_function}`
+    + ` · cost ${run.cost ?? "?"} · ${run.num_routes} routes · ${validity}`;
 }
 
 function refreshSolutionControls() {
@@ -1171,10 +1807,18 @@ function refreshSolutionControls() {
     return;
   }
   const validation = selected?.validation || {};
-  el("solution-validation").className = `validation-line ${validation.valid ? "valid" : "invalid"}`;
-  el("solution-validation").textContent = validation.valid
-    ? `Validated: canonical cost ${validation.routing_cost}, ${validation.num_routes} route(s).`
+  const metric = runMetric(selected);
+  const line = el("solution-validation");
+  line.className = `validation-line ${validation.valid ? "valid" : "invalid"}`;
+  line.textContent = validation.valid
+    ? `Validated on the ${metric} variant: canonical cost ${validation.routing_cost}, ${validation.num_routes} route(s).`
     : `Invalid: ${validation.error_message || validation.status || "checker rejected this solution"}`;
+  // Only same-metric runs can be compared, so say so rather than leaving an
+  // empty reference list looking broken.
+  if (validation.valid && el("solve-metric").value !== metric) {
+    line.className = "validation-line";
+    line.textContent += ` The Metric selector is on ${el("solve-metric").value}; only ${metric} runs compare with this one.`;
+  }
 }
 
 async function displaySolutionRun(runId, fit = true) {
@@ -1428,14 +2072,383 @@ el("fetch").addEventListener("click", async () => {
   } catch (error) { status(`Cannot queue fetch: ${error.message}`); }
 });
 
+/* ── Bulk configuration modal ── */
+function bulkBaseRow() {
+  // Everything a row inherits from the Generate form when it is created.
+  const categories = selectedPoiCategories();
+  return {
+    problemType: el("bulk-problem")?.value || "cvrp",
+    city: el("city").value,
+    nCustomers: Number(el("n").value) || 10,
+    demandType: Number(el("demand").value) || 7,
+    avgRouteSize: Number(el("ars").value) || 4,
+    method: el("method").value === "manual" ? "poi_categories" : el("method").value,
+    seed: Number(el("seed").value) || 0,
+    depotMode: el("depot-mode").value,
+    customerMode: el("customer-mode").value,
+    twMethod: el("bulk-tw")?.value || "route_centered",
+    onlyIntersections: true,
+    clusterSeeds: Number(el("cluster-seeds").value) || 4,
+    clusterDecayMeters: Number(el("cluster-decay").value) || 800,
+    hybridPoiShare: Number(el("hybrid-poi-share").value) / 100,
+    categories: categories.join(" "),
+  };
+}
+
+function bulkRowKey(row) {
+  return [row.problemType, row.city, row.nCustomers, row.demandType, row.avgRouteSize,
+    row.method, row.seed, row.categories].join("|");
+}
+
+function refreshBulkCounts() {
+  const label = `${state.bulkRows.length} instance${state.bulkRows.length === 1 ? "" : "s"}`;
+  el("bulk-count-badge").textContent = label;
+  el("bulk-modal-count").textContent = label;
+}
+
+function bulkCell(row, field, kind, options) {
+  const cell = document.createElement("td");
+  let input;
+  if (kind === "select") {
+    input = document.createElement("select");
+    options.forEach(([value, text]) => input.append(new Option(text, value)));
+    input.value = String(row[field]);
+  } else if (kind === "checkbox") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean(row[field]);
+  } else {
+    input = document.createElement("input");
+    input.type = kind;
+    input.value = String(row[field] ?? "");
+    if (kind === "number") { input.min = options?.min ?? 0; if (options?.step) input.step = options.step; }
+  }
+  input.addEventListener("change", () => {
+    if (kind === "checkbox") row[field] = input.checked;
+    else if (BULK_INT_FIELDS.has(field)) row[field] = Number.parseInt(input.value, 10) || 0;
+    else if (BULK_FLOAT_FIELDS.has(field)) row[field] = Number.parseFloat(input.value) || 0;
+    else row[field] = input.value;
+  });
+  cell.append(input);
+  return cell;
+}
+
+function renderBulkTable() {
+  const body = el("bulk-table-body");
+  body.innerHTML = "";
+  if (!state.bulkRows.length) {
+    body.innerHTML = '<tr><td colspan="17" class="bulk-empty empty-note">'
+      + "No rows yet. Build combinations on the left, add rows by hand, or import a CSV.</td></tr>";
+    refreshBulkCounts();
+    return;
+  }
+  const cityOptions = [...el("city").options].map((option) => [option.value, option.textContent]);
+  state.bulkRows.forEach((row) => {
+    const tr = document.createElement("tr");
+    tr.dataset.id = String(row.id);
+
+    const check = document.createElement("td");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "bulk-row-check";
+    box.setAttribute("aria-label", "Select this row");
+    check.append(box);
+    tr.append(check);
+
+    tr.append(bulkCell(row, "problemType", "select", [["cvrp", "CVRP"], ["vrptw", "VRPTW"]]));
+    tr.append(bulkCell(row, "city", "select", cityOptions.length ? cityOptions : [[row.city, row.city]]));
+    tr.append(bulkCell(row, "nCustomers", "number", { min: 2 }));
+    tr.append(bulkCell(row, "demandType", "select", DEMAND_TYPES.map((e) => [String(e.value), `${e.value} · ${e.label}`])));
+    tr.append(bulkCell(row, "avgRouteSize", "select", ROUTE_SIZE_BANDS.map((e) => [String(e.value), `${e.value} · ${e.label}`])));
+    tr.append(bulkCell(row, "method", "select", SAMPLING_METHODS.filter((m) => m !== "manual").map((m) => [m, m])));
+    tr.append(bulkCell(row, "seed", "number", { min: 0 }));
+    tr.append(bulkCell(row, "depotMode", "select", DEPOT_MODES.map((m) => [m, m])));
+    tr.append(bulkCell(row, "customerMode", "select", CUSTOMER_MODES.map((m) => [m, m])));
+    tr.append(bulkCell(row, "twMethod", "select", TW_METHODS.map((m) => [m, m])));
+    tr.append(bulkCell(row, "onlyIntersections", "checkbox"));
+    tr.append(bulkCell(row, "clusterSeeds", "number", { min: 1 }));
+    tr.append(bulkCell(row, "clusterDecayMeters", "number", { min: 1, step: 50 }));
+    tr.append(bulkCell(row, "hybridPoiShare", "number", { min: 0, step: 0.05 }));
+    const categoryCell = bulkCell(row, "categories", "text");
+    categoryCell.className = "cat-cell";
+    tr.append(categoryCell);
+
+    const remove = document.createElement("td");
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "bulk-delete-btn";
+    removeButton.textContent = "×";
+    removeButton.title = "Remove this row";
+    removeButton.addEventListener("click", () => {
+      state.bulkRows = state.bulkRows.filter((entry) => entry.id !== row.id);
+      renderBulkTable();
+    });
+    remove.append(removeButton);
+    tr.append(remove);
+    body.append(tr);
+  });
+  el("bulk-select-all").checked = false;
+  refreshBulkCounts();
+}
+
+function addBulkRow(overrides = {}) {
+  state.bulkRows.push({ id: state.bulkNextId, ...bulkBaseRow(), ...overrides });
+  state.bulkNextId += 1;
+}
+
+function checkedValues(containerId) {
+  return [...el(containerId).querySelectorAll("input[type='checkbox']:checked")]
+    .map((box) => Number.parseInt(box.value, 10))
+    .filter(Number.isFinite);
+}
+
+function expandBulkCombinations() {
+  const cities = [...el("bulk-cities").querySelectorAll("input[type='checkbox']:checked")]
+    .map((box) => box.value);
+  const sizes = el("bulk-sizes").value.split(",")
+    .map((part) => Number.parseInt(part.trim(), 10))
+    .filter((value) => Number.isFinite(value) && value >= 2);
+  const demands = checkedValues("bulk-demand-checks");
+  const bands = checkedValues("bulk-band-checks");
+  if (!cities.length || !sizes.length || !demands.length || !bands.length) {
+    status("Select at least one city, size, demand type and route size band.");
+    return;
+  }
+  const existing = new Set(state.bulkRows.map(bulkRowKey));
+  let added = 0;
+  let duplicates = 0;
+  cities.forEach((city) => sizes.forEach((nCustomers) => demands.forEach((demandType) => bands.forEach((avgRouteSize) => {
+    const candidate = { ...bulkBaseRow(), city, nCustomers, demandType, avgRouteSize };
+    const key = bulkRowKey(candidate);
+    if (existing.has(key)) { duplicates += 1; return; }
+    existing.add(key);
+    addBulkRow({ city, nCustomers, demandType, avgRouteSize });
+    added += 1;
+  }))));
+  renderBulkTable();
+  status(`Added ${added} combination(s)${duplicates ? `, skipped ${duplicates} duplicate(s)` : ""}.`);
+}
+
+function csvEscape(value) {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function parseCsvLine(line) {
+  const values = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quoted) {
+      if (char === '"' && line[index + 1] === '"') { current += '"'; index += 1; }
+      else if (char === '"') quoted = false;
+      else current += char;
+    } else if (char === '"') quoted = true;
+    else if (char === ",") { values.push(current.trim()); current = ""; }
+    else current += char;
+  }
+  values.push(current.trim());
+  return values;
+}
+
+function exportBulkCsv() {
+  if (!state.bulkRows.length) { status("No rows to export."); return; }
+  const lines = [BULK_CSV_COLUMNS.join(",")];
+  state.bulkRows.forEach((row) => {
+    lines.push(BULK_CSV_COLUMNS.map((column) => {
+      const value = column === "onlyIntersections" ? (row[column] ? "true" : "false") : row[column];
+      return csvEscape(value);
+    }).join(","));
+  });
+  saveBlob(new Blob([lines.join("\n") + "\n"], { type: "text/csv" }), "bulk_instances.csv");
+  status(`Exported ${state.bulkRows.length} row(s) to bulk_instances.csv`);
+}
+
+function importBulkCsv(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const lines = String(reader.result || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (lines.length < 2) { status("The CSV needs a header row and at least one data row."); return; }
+    const header = parseCsvLine(lines[0]).map((value) => value.trim());
+    const lowered = header.map((value) => value.toLowerCase());
+    const required = ["city", "ncustomers", "demandtype", "avgroutesize"];
+    const missing = required.filter((column) => !lowered.includes(column));
+    if (missing.length) { status(`The CSV is missing required column(s): ${missing.join(", ")}`); return; }
+    let imported = 0;
+    lines.slice(1).forEach((line) => {
+      const values = parseCsvLine(line);
+      const overrides = {};
+      header.forEach((column, index) => {
+        const canonical = BULK_CSV_COLUMNS.find((name) => name.toLowerCase() === column.toLowerCase());
+        if (!canonical) return;
+        const raw = values[index];
+        if (raw === undefined || raw === "") return;
+        if (canonical === "onlyIntersections") overrides[canonical] = /^(true|1|yes)$/i.test(raw);
+        else if (BULK_INT_FIELDS.has(canonical)) overrides[canonical] = Number.parseInt(raw, 10) || 0;
+        else if (BULK_FLOAT_FIELDS.has(canonical)) overrides[canonical] = Number.parseFloat(raw) || 0;
+        else overrides[canonical] = raw;
+      });
+      addBulkRow(overrides);
+      imported += 1;
+    });
+    renderBulkTable();
+    status(`Imported ${imported} row(s) from ${file.name}.`);
+  };
+  reader.readAsText(file);
+}
+
+function bulkPayload() {
+  if (!state.bulkRows.length) throw new Error("Add at least one instance row.");
+  return {
+    seed: Number(el("seed").value) || 0,
+    instances: state.bulkRows.map((row) => ({
+      problemType: row.problemType,
+      city: row.city,
+      nCustomers: row.nCustomers,
+      demandType: row.demandType,
+      avgRouteSize: row.avgRouteSize,
+      method: row.method,
+      seed: row.seed,
+      depotMode: row.depotMode,
+      customerMode: row.customerMode,
+      twMethod: row.twMethod,
+      onlyIntersections: row.onlyIntersections,
+      clusterSeeds: row.clusterSeeds,
+      clusterDecayMeters: row.clusterDecayMeters,
+      hybridPoiShare: row.hybridPoiShare,
+      categories: String(row.categories || "").split(/[\s,]+/).filter(Boolean),
+    })),
+  };
+}
+
+function renderBulkCities() {
+  const container = el("bulk-cities");
+  container.innerHTML = "";
+  [...el("city").options].forEach((option) => {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = option.value;
+    box.checked = option.value === el("city").value;
+    box.addEventListener("change", updateBulkCityCount);
+    const text = document.createElement("span");
+    text.textContent = option.textContent;
+    label.append(box, text);
+    container.append(label);
+  });
+  updateBulkCityCount();
+}
+
+function updateBulkCityCount() {
+  const selected = el("bulk-cities").querySelectorAll("input:checked").length;
+  el("bulk-city-count").textContent = `${selected} selected`;
+}
+
+function renderBulkChecks() {
+  const fill = (containerId, entries, defaults) => {
+    const container = el(containerId);
+    container.innerHTML = "";
+    entries.forEach((entry) => {
+      const label = document.createElement("label");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.value = String(entry.value);
+      box.checked = defaults.includes(entry.value);
+      const text = document.createElement("span");
+      text.textContent = `${entry.value} · ${entry.label}`;
+      const band = document.createElement("span");
+      band.className = "band";
+      band.textContent = entry.detail;
+      label.append(box, text, band);
+      container.append(label);
+    });
+  };
+  fill("bulk-demand-checks", DEMAND_TYPES, [7]);
+  fill("bulk-band-checks", ROUTE_SIZE_BANDS, [4]);
+}
+
+function openBulkModal() {
+  renderBulkCities();
+  renderBulkTable();
+  el("bulk-modal").hidden = false;
+}
+
+function closeBulkModal() {
+  el("bulk-modal").hidden = true;
+}
+
+el("bulk-open").addEventListener("click", openBulkModal);
+el("bulk-close").addEventListener("click", closeBulkModal);
+el("bulk-close-2").addEventListener("click", closeBulkModal);
+el("bulk-modal").addEventListener("click", (event) => {
+  if (event.target === el("bulk-modal")) closeBulkModal();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !el("bulk-modal").hidden) closeBulkModal();
+});
+el("bulk-city-all").addEventListener("click", () => {
+  el("bulk-cities").querySelectorAll("input").forEach((box) => { box.checked = true; });
+  updateBulkCityCount();
+});
+el("bulk-city-none").addEventListener("click", () => {
+  el("bulk-cities").querySelectorAll("input").forEach((box) => { box.checked = false; });
+  updateBulkCityCount();
+});
+el("bulk-expand").addEventListener("click", expandBulkCombinations);
+el("bulk-add-row").addEventListener("click", () => { addBulkRow(); renderBulkTable(); });
+el("bulk-clear").addEventListener("click", () => { state.bulkRows = []; renderBulkTable(); });
+el("bulk-delete-selected").addEventListener("click", () => {
+  const selected = new Set();
+  el("bulk-table-body").querySelectorAll(".bulk-row-check:checked").forEach((box) => {
+    const id = Number.parseInt(box.closest("tr")?.dataset.id || "", 10);
+    if (Number.isFinite(id)) selected.add(id);
+  });
+  if (!selected.size) { status("No rows selected."); return; }
+  state.bulkRows = state.bulkRows.filter((row) => !selected.has(row.id));
+  renderBulkTable();
+});
+el("bulk-select-all").addEventListener("change", (event) => {
+  el("bulk-table-body").querySelectorAll(".bulk-row-check").forEach((box) => {
+    box.checked = event.target.checked;
+  });
+});
+el("bulk-export-csv").addEventListener("click", exportBulkCsv);
+el("bulk-import-csv").addEventListener("click", () => el("bulk-csv-file").click());
+el("bulk-csv-file").addEventListener("change", (event) => {
+  const file = event.target.files?.[0];
+  if (file) importBulkCsv(file);
+  event.target.value = "";
+});
+
+el("bulk-check").addEventListener("click", async () => {
+  const line = el("bulk-preflight");
+  try {
+    line.className = "preflight-line";
+    line.textContent = "Checking how many customers each city pool can offer…";
+    const report = await api("/api/workbench/generation/bulk-preflight", bulkPayload());
+    const bad = report.groups.filter((group) => group.skipped_sizes?.length || group.status === "skipped");
+    if (!bad.length) {
+      line.className = "preflight-line good";
+      line.textContent = `All ${report.instances} instance(s) fit their city pool.`;
+      return;
+    }
+    line.className = "preflight-line warn";
+    line.textContent = bad
+      .map((group) => `${group.city}: pool holds ${group.pool_total ?? 0}, `
+        + `so n = ${(group.skipped_sizes || []).join(", ")} would be skipped`)
+      .join(" · ");
+  } catch (error) {
+    line.className = "preflight-line bad";
+    line.textContent = `Feasibility check failed: ${error.message}`;
+  }
+});
+
 el("bulk-run").addEventListener("click", async () => {
   try {
-    const body = requestBody();
-    body.nCustomersList = el("bulk-sizes").value;
-    body.demandTypesList = el("bulk-demands").value;
-    body.avgRouteSizesList = el("bulk-ars").value;
-    const job = await submitJob("bulk-generate", body);
-    status(`Bulk generation queued as job ${job.job_id.slice(0, 8)}.`);
+    const job = await submitJob("bulk-generate", bulkPayload());
+    status(`Bulk generation of ${state.bulkRows.length} instance(s) queued as job ${job.job_id.slice(0, 8)}.`);
+    closeBulkModal();
   } catch (error) { status(`Cannot queue bulk generation: ${error.message}`); }
 });
 
@@ -1452,6 +2465,7 @@ el("bulk-download").addEventListener("click", async () => {
 el("clear").addEventListener("click", () => {
   previewLayers.clearLayers();
   instanceNodeLayers.clearLayers();
+  poiPickLayers.clearLayers();
   clearRouteLayers();
   state.previewGeojson = null;
   state.lastRendered = null;
@@ -1460,6 +2474,73 @@ el("clear").addEventListener("click", () => {
   status("Map cleared.");
 });
 
+/* ── Import an externally found solution ── */
+function resetImportPanel() {
+  el("import-text").value = "";
+  el("import-file").value = "";
+  el("import-label").value = "";
+  el("import-validation").className = "validation-line";
+  el("import-validation").textContent =
+    "Imported solutions are checked against the metric selected above before they are stored.";
+}
+
+el("import-open").addEventListener("click", () => {
+  const panel = el("import-panel");
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) resetImportPanel();
+});
+el("import-cancel").addEventListener("click", () => { el("import-panel").hidden = true; });
+el("import-file").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  el("import-text").value = await file.text();
+  el("import-validation").className = "validation-line";
+  el("import-validation").textContent = `Loaded ${file.name}; press "Check and import" to validate it.`;
+});
+
+el("import-run").addEventListener("click", async () => {
+  const instance = state.selected;
+  const line = el("import-validation");
+  if (!instance) { status("Select an instance first."); return; }
+  const metric = el("solve-metric").value;
+  try {
+    line.className = "validation-line";
+    line.textContent = `Checking the routes against the ${metric} variant…`;
+    const result = await api(
+      `/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/import`,
+      {
+        metric,
+        objective_function: el("solve-objective").value,
+        text: el("import-text").value,
+        filename: el("import-file").files?.[0]?.name || "",
+        label: el("import-label").value,
+      },
+    );
+    line.className = "validation-line valid";
+    line.textContent = result.warning
+      ? `Imported and validated. ${result.warning}`
+      : `Imported and validated: cost ${result.solution.cost}, ${result.solution.num_routes} route(s).`;
+    el("import-panel").hidden = true;
+    await loadSolutionRuns(result.solution.run_id);
+    status(`Imported an external solution for ${instance.base_name} (${metric}).`);
+  } catch (error) {
+    // Nothing was stored: the server refuses before writing.
+    line.className = "validation-line invalid";
+    line.textContent = `Rejected: ${error.message}`;
+  }
+});
+
+/* ── Narrow viewports: the right panel becomes a collapsible sheet ── */
+el("sheet-toggle").addEventListener("click", () => {
+  const panel = document.querySelector(".panel-right");
+  const collapsed = panel.classList.toggle("sheet-collapsed");
+  el("sheet-toggle").textContent = collapsed ? "Show" : "Hide";
+  el("sheet-toggle").setAttribute("aria-expanded", collapsed ? "false" : "true");
+});
+
+fillBandSelects();
+renderBulkChecks();
+renderBulkTable();
 renderPoiCategories();
 updateHybridShare();
 updateGenerationControls();
