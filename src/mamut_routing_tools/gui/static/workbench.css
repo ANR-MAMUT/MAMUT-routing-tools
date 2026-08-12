@@ -1,0 +1,1138 @@
+/* Nocturne design system (Adrien's Claude-Design merged demo): dual palettes
+   from the demo's renderVals, Inter self-hosted, glass panels over the map. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/static/vendor/fonts/InterVariable.woff2") format("woff2-variations");
+}
+
+/* Palette tokens come from the shared Nocturne sheet, linked ahead of this file in
+   index.html, so the two frontends cannot drift apart. Note the band flip: the
+   shared sheet makes light the bare :root and dark the [data-theme="dark"]
+   override, while this GUI used to default :root to dark. Its blocking bootstrap
+   always stamps data-theme, so the default band is never the one that renders. */
+
+* { box-sizing: border-box; }
+
+/* The sprite itself never renders; only its <symbol>s are referenced by <use>. */
+.icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.icon { width: 1em; height: 1em; display: block; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+[hidden] { display: none !important; }
+
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--acc) 30%, transparent); }
+
+/* Layout variables shared with the published site's workbench.css, so layout.js can
+   drive both. The panels, splitters, Leaflet controls and the footer row all derive
+   their positions from these with calc() — a drag updates one value and the whole
+   stage follows. layout.js overrides the two widths on <body>. */
+:root {
+  --wb-panel-inset: 20px;
+  --wb-panel-gap: 16px;
+  --wb-left-panel-width: 300px;
+  --wb-right-panel-width: 300px;
+  --wb-rail-width: 44px;
+  --wb-footer-height: 56px;
+}
+
+#map { position: fixed; inset: 0; background: var(--svg); }
+
+/* ── Leaflet chrome, retuned to the Nocturne surface ── */
+.leaflet-control-attribution {
+  background: var(--panel) !important;
+  color: var(--mut) !important;
+  font-size: 10px !important;
+}
+.leaflet-control-attribution a { color: var(--mut) !important; }
+.leaflet-container { font-family: "Inter", system-ui, sans-serif !important; }
+
+.leaflet-control-zoom a,
+.leaflet-control-layers,
+.leaflet-control-scale-line {
+  background: var(--panel) !important;
+  color: var(--ink) !important;
+  border: none !important;
+  box-shadow: 0 0 0 1px var(--div) !important;
+  backdrop-filter: blur(8px);
+}
+.leaflet-control-zoom a:hover { color: var(--acc) !important; }
+.leaflet-control-scale-line {
+  padding: 1px 6px !important;
+  font-size: 10px !important;
+  line-height: 1.5 !important;
+}
+.leaflet-control-layers-expanded {
+  padding: 8px 10px !important;
+  font-size: 11.5px !important;
+  color: var(--ink) !important;
+}
+.leaflet-control-layers-selector { accent-color: var(--acc); }
+
+/* Keep the Leaflet controls clear of the floating panels. The 10px correction is
+   Leaflet's own control margin. */
+.leaflet-top.leaflet-left {
+  left: calc(var(--wb-panel-inset) + var(--wb-left-panel-width) + var(--wb-panel-gap) - 10px);
+}
+.leaflet-top.leaflet-right {
+  right: calc(var(--wb-panel-inset) + var(--wb-right-panel-width) + var(--wb-panel-gap) - 10px);
+}
+/* The activity strip now sits inside the left panel's column rather than spanning the
+   bottom of the map, so the scale control keeps its own corner. */
+.leaflet-bottom.leaflet-left {
+  left: calc(var(--wb-panel-inset) + var(--wb-left-panel-width) + var(--wb-panel-gap) - 10px);
+}
+
+/* ── Floating panels ── */
+.panel {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border-radius: 14px;
+  box-shadow: 0 0 0 1px var(--edge), var(--shadow);
+  padding: 12px;
+  z-index: 900;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.panel::-webkit-scrollbar { width: 6px; }
+.panel::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink) 15%, transparent);
+  border-radius: 3px;
+}
+
+.panel-left {
+  left: var(--wb-panel-inset);
+  top: 16px;
+  bottom: var(--wb-footer-height);
+  width: var(--wb-left-panel-width);
+}
+.panel-right {
+  right: var(--wb-panel-inset);
+  top: 16px;
+  max-height: calc(100% - 90px);
+  width: var(--wb-right-panel-width);
+  padding: 16px;
+  gap: 10px;
+}
+
+/* ── Splitters ── */
+/* A wide invisible hit area around a hairline that only shows on hover or drag —
+   the affordance should not compete with the map. */
+.splitter {
+  position: fixed;
+  top: 16px;
+  z-index: 905;
+  width: 11px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+}
+.splitter::after {
+  content: "";
+  position: absolute;
+  inset: 0 4px;
+  border-radius: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+.splitter:hover::after,
+.splitter[data-dragging="true"]::after { background: var(--edge); }
+.splitter:focus-visible::after { background: var(--acc); }
+/* The left splitter runs past the panel's foot because the activity strip below it is
+   the same width and moves with the same drag. */
+.splitter-left {
+  left: calc(var(--wb-panel-inset) + var(--wb-left-panel-width));
+  bottom: 14px;
+}
+.splitter-right {
+  right: calc(var(--wb-panel-inset) + var(--wb-right-panel-width));
+  bottom: var(--wb-footer-height);
+}
+/* Nothing to drag once a panel is a rail, and no splitter at all in the narrow
+   bottom-sheet layout. */
+[data-left-collapsed="true"] .splitter-left,
+[data-right-collapsed="true"] .splitter-right { display: none; }
+
+/* ── Collapse toggles and rails ── */
+.panel-toggle {
+  flex: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--mut);
+}
+.panel-toggle:hover { color: var(--acc); background: var(--acc-t); }
+.panel-toggle svg { width: 14px; height: 14px; }
+
+.panel-rail {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.rail-btn {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--mut);
+}
+.rail-btn:hover { color: var(--acc); background: var(--acc-t); }
+.rail-btn.rail-active { color: var(--acc); background: var(--acc-t); }
+.rail-btn svg { width: 17px; height: 17px; }
+
+/* Collapsed: the panel becomes a rail of icons. Everything else is hidden rather
+   than removed so no scroll position or form state is lost. */
+[data-left-collapsed="true"] .panel-left,
+[data-right-collapsed="true"] .panel-right {
+  padding: 8px 6px;
+  overflow: hidden;
+  align-items: center;
+}
+[data-left-collapsed="true"] .panel-left > :not(.panel-rail),
+[data-right-collapsed="true"] .panel-right > :not(.panel-rail) { display: none; }
+[data-left-collapsed="true"] .panel-left .panel-rail,
+[data-right-collapsed="true"] .panel-right .panel-rail { display: flex; }
+/* A rail is a short pill, not a full-height column of empty glass: drop the stretch
+   that makes the expanded panels fill their side. */
+[data-left-collapsed="true"] .panel-left { bottom: auto; }
+[data-right-collapsed="true"] .panel-right { max-height: none; }
+
+.brand-row { display: flex; align-items: center; gap: 8px; }
+.brand-mark {
+  width: 10px; height: 10px; flex: none;
+  background: linear-gradient(135deg, var(--acc), var(--cy));
+  border-radius: 2px;
+  transform: rotate(45deg);
+}
+.brand-name { font-weight: 500; font-size: 14px; }
+.brand-sub { font-size: 10.5px; color: var(--mut); }
+
+.theme-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  border: 1px solid var(--div);
+  border-radius: 999px;
+  overflow: hidden;
+  font-size: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+.theme-side { padding: 3px 8px; color: var(--mut); background: transparent; border: none; cursor: pointer; font: inherit; }
+/* Selected states are an accent tint, not an accent flood. */
+[data-theme="dark"] .theme-side-moon,
+[data-theme="light"] .theme-side-sun { background: var(--acc-t); color: var(--acc); }
+
+.kicker {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--mut);
+}
+.kicker-selected { color: var(--cy); display: flex; align-items: center; gap: 8px; }
+/* At wide widths #sheet-toggle is display:none, so this is what pushes the collapse
+   chevron right; below 1000px the chevron hides and #sheet-toggle takes over. */
+.kicker-selected .panel-toggle { margin-left: auto; }
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.section + .section {
+  padding-top: 10px;
+  background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent) no-repeat top / 100% 1px;
+}
+
+/* ── Tabs ── */
+.tabs { display: flex; gap: 6px; flex: none; }
+.tab-btn {
+  flex: 1;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 0;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--mut);
+}
+.tab-btn:hover { color: var(--ink); }
+.tab-btn.tab-active {
+  background: var(--acc-t);
+  color: var(--acc);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--acc) 45%, transparent);
+}
+
+.tab-panel { display: none; min-height: 0; }
+.tab-panel.tab-panel-active { display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0; }
+/* Generation can still outgrow the viewport once the Advanced blocks and the
+   explanations are open, so the outer panel owns scrolling rather than squeezing
+   this flex child. (The Jobs section this used to share the column with moved into
+   the bottom activity strip in P3.) */
+#generatePanel.tab-panel-active { flex: none; min-height: max-content; }
+
+/* ── Forms ── */
+label.field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.field > span { font-size: 11px; color: var(--mut); }
+
+select, input[type="text"], input[type="number"], input[type="search"] {
+  width: 100%;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--ink);
+  background: var(--s);
+  border: 1px solid var(--div);
+  border-radius: 8px;
+  min-height: 30px;
+  padding: 5px 10px;
+  caret-color: var(--acc);
+}
+input:hover, select:hover { border-color: color-mix(in srgb, var(--ink) 45%, transparent); }
+input:focus-visible, select:focus-visible { border-color: var(--acc); outline-offset: 0; }
+input[type="checkbox"] { accent-color: var(--acc); }
+input[type="range"] { width: 100%; accent-color: var(--acc); }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.row { display: flex; gap: 6px; align-items: end; flex-wrap: wrap; }
+.option-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border-left: 2px solid var(--edge);
+  padding-left: 9px;
+}
+.range-value { color: var(--acc); font-variant-numeric: tabular-nums; }
+
+/* Nocturne: "the primary is an accent outline, never a fill" and the accent is used
+   "as a line and a glow rather than a flood". Losing the solid fill costs Generate and
+   Queue solve the contrast that made them findable over a busy basemap, so the primary
+   earns its emphasis back from a heavier ring, a faint accent tint and an outer glow —
+   never a flood. Three weights remain: primary (ring + glow), secondary (plain accent
+   ring), ghost (neutral ring). */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: none;
+  /* Mixed at a fixed percentage rather than using --acc-t: that token is 16% in the
+     dark band but only 11% in the light one, which left the primary barely
+     distinguishable from a secondary on light. The ring is 2px against secondary's
+     1px, which is what actually carries the hierarchy. */
+  background: color-mix(in srgb, var(--acc) 18%, transparent);
+  color: var(--acc);
+  box-shadow: inset 0 0 0 2px var(--acc), 0 0 0 3px color-mix(in srgb, var(--acc) 15%, transparent);
+}
+.btn:hover {
+  background: color-mix(in srgb, var(--acc) 28%, transparent);
+  box-shadow: inset 0 0 0 2px var(--acc), 0 0 0 5px color-mix(in srgb, var(--acc) 20%, transparent);
+}
+.btn:active { background: color-mix(in srgb, var(--acc) 36%, transparent); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: inset 0 0 0 2px var(--acc); }
+.btn-secondary {
+  background: transparent;
+  color: var(--acc);
+  box-shadow: inset 0 0 0 1px var(--acc);
+}
+.btn-secondary:hover { background: var(--acc-t); box-shadow: inset 0 0 0 1px var(--acc); }
+.btn-ghost {
+  background: transparent;
+  color: var(--mut);
+  box-shadow: inset 0 0 0 1px var(--div);
+}
+.btn-ghost:hover { color: var(--acc); box-shadow: inset 0 0 0 1px var(--edge); background: var(--acc-t); }
+
+.note { font-size: 11px; line-height: 1.55; color: var(--mut); margin: 0; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.chip-am { background: var(--am-t); color: var(--am); }
+.chip-gr { background: var(--gr-t); color: var(--gr); }
+.chip-acc { background: var(--acc-t); color: var(--acc); }
+
+/* ── Generate: numbered steps ── */
+/* The form used to be fourteen equally-weighted blocks in one scroll. Grouping them
+   under four numbered steps is what makes it scannable; the rarely-touched controls
+   sit behind each step's Advanced disclosure. */
+.panel-actions { display: flex; justify-content: flex-end; flex: none; }
+.link-btn {
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  color: var(--mut);
+  background: transparent;
+  border: none;
+  padding: 2px 0;
+  border-bottom: 1px solid transparent;
+}
+.link-btn:hover { color: var(--acc); border-bottom-color: var(--edge); }
+.link-btn[aria-pressed="true"] { color: var(--acc); border-bottom-color: var(--acc); }
+
+.step { display: flex; flex-direction: column; gap: 9px; flex: none; }
+.step + .step {
+  padding-top: 11px;
+  background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent) no-repeat top / 100% 1px;
+}
+.step-head { display: flex; align-items: center; gap: 7px; }
+.step-index {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  font-size: 9.5px;
+  font-weight: 600;
+  color: var(--acc);
+  background: var(--acc-t);
+  font-variant-numeric: tabular-nums;
+}
+.step-title { font-size: 11.5px; font-weight: 500; letter-spacing: 0.01em; }
+
+.advanced { flex: none; }
+.advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  color: var(--mut);
+  padding: 3px 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.advanced > summary::-webkit-details-marker { display: none; }
+.advanced > summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transition: transform 120ms ease;
+}
+.advanced[open] > summary::before { transform: rotate(90deg); }
+.advanced > summary:hover { color: var(--acc); }
+.advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 7px 0 2px 9px;
+  border-left: 2px solid var(--edge);
+  margin-top: 2px;
+}
+
+/* The category summary chip that opens the picker popover. */
+.chip-btn {
+  margin-left: auto;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font: inherit;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--div);
+  background: transparent;
+  color: var(--ink);
+}
+.chip-btn:hover, .chip-btn[aria-expanded="true"] { border-color: var(--edge); background: var(--acc-t); }
+.chip-btn-action { color: var(--acc); }
+
+/* ── Popovers (category picker, field help) ── */
+/* Anchored at body level, above the panels, so the panel's overflow cannot clip them. */
+.popover {
+  position: fixed;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 48px));
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 0 0 1px var(--edge), var(--shadow);
+}
+.popover[hidden] { display: none; }
+.popover-head { display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 500; }
+.popover-close {
+  margin-left: auto;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--mut);
+  padding: 0 4px;
+  border-radius: 6px;
+}
+.popover-close:hover { color: var(--cor); background: var(--cor-t); }
+.poi-popover .poi-list {
+  columns: 2;
+  column-gap: 14px;
+  max-height: 340px;
+}
+.poi-popover .poi-list label { break-inside: avoid; }
+.help-popover { width: min(360px, calc(100vw - 32px)); font-size: 11.5px; color: var(--mut); }
+.help-popover .help-body { border: none; padding-left: 0; margin: 0; }
+
+/* "Explain this form" reveals every help body inline in one deliberate step; the
+   per-field buttons would be redundant then, so they step aside. */
+#generatePanel.explain-all .help-body[hidden] { display: block !important; }
+#generatePanel.explain-all .help-btn { display: none; }
+
+/* ── Inline help ── */
+.field-head { display: flex; align-items: center; gap: 6px; }
+.help-btn {
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+  width: 15px;
+  height: 15px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  /* The icon carries the ring now, so the button no longer draws its own. */
+  border: none;
+  background: transparent;
+  color: var(--mut);
+  padding: 0;
+}
+.help-btn:hover, .help-btn[aria-expanded="true"] { color: var(--acc); }
+.help-btn .icon { width: 15px; height: 15px; }
+.help-body {
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--mut);
+  margin: 2px 0 0;
+  padding-left: 9px;
+  border-left: 2px solid var(--edge);
+}
+.help-body[hidden] { display: none; }
+.help-body dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 4px 0 0; }
+.help-body dt { color: var(--ink); font-variant-numeric: tabular-nums; }
+.help-body dd { margin: 0; }
+
+/* ── Bulk configuration overlay ── */
+.bulk-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(4px);
+}
+.bulk-modal-overlay[hidden] { display: none; }
+.bulk-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(1240px, 100%);
+  height: min(820px, 100%);
+  background: var(--panel);
+  backdrop-filter: blur(14px);
+  border-radius: 14px;
+  box-shadow: var(--shadow), 0 0 0 1px var(--div);
+  overflow: hidden;
+}
+.bulk-modal-header, .bulk-modal-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  flex: none;
+}
+.bulk-modal-header { border-bottom: 1px solid var(--div); }
+.bulk-modal-footer { border-top: 1px solid var(--div); }
+.bulk-modal-header h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.bulk-modal-close {
+  margin-left: auto;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  border: none;
+  background: transparent;
+  color: var(--mut);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.bulk-modal-close:hover { color: var(--cor); background: var(--cor-t); }
+.bulk-modal-body { display: flex; min-height: 0; flex: 1; }
+.bulk-modal-left {
+  width: 292px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  overflow-y: auto;
+  border-right: 1px solid var(--div);
+}
+.bulk-modal-right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 18px;
+}
+.bulk-city-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 168px;
+  overflow-y: auto;
+  border: 1px solid var(--div);
+  border-radius: 8px;
+  padding: 5px;
+}
+.bulk-checkbox-row { display: flex; flex-direction: column; gap: 1px; }
+.bulk-checkbox-row label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  padding: 2px 3px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.bulk-checkbox-row label:hover, .bulk-city-list label:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.bulk-checkbox-row .band { color: var(--mut); margin-left: auto; font-variant-numeric: tabular-nums; }
+.bulk-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; flex: none; }
+.bulk-table-wrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--div); border-radius: 8px; }
+/* Columns size to their content and the wrapper scrolls; a plain width:100%
+   squeezes the selects down to a bare chevron. */
+.bulk-table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 11.5px; }
+.bulk-table th, .bulk-table td { padding: 3px 5px; text-align: left; white-space: nowrap; }
+.bulk-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--s);
+  color: var(--mut);
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--div);
+}
+.bulk-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--ink) 3%, transparent); }
+.bulk-table td select, .bulk-table td input[type="text"], .bulk-table td input[type="number"] {
+  min-height: 24px;
+  padding: 2px 5px;
+  font-size: 11.5px;
+  border-radius: 5px;
+  width: auto;
+}
+.bulk-table td select { min-width: 104px; }
+.bulk-table td input[type="number"] { width: 74px; }
+.bulk-table td.cat-cell input[type="text"] { min-width: 190px; }
+.bulk-delete-btn {
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--mut);
+  font: inherit;
+  padding: 2px 5px;
+  border-radius: 5px;
+}
+.bulk-delete-btn:hover { color: var(--cor); background: var(--cor-t); }
+.bulk-empty { padding: 22px; text-align: center; }
+.bulk-modal.confirm-modal { width: min(560px, 100%); height: auto; }
+.confirm-modal-body {
+  padding: 16px 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+.confirm-modal-body p { margin: 0; }
+.preflight-line { font-size: 11px; line-height: 1.5; }
+.preflight-line.warn { color: var(--am); }
+.preflight-line.bad { color: var(--cor); }
+.preflight-line.good { color: var(--gr); }
+
+.poi-picker { display: flex; flex-direction: column; gap: 5px; }
+.poi-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.poi-count { margin-left: auto; color: var(--mut); font-size: 10.5px; }
+.mini-btn {
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  color: var(--mut);
+  background: transparent;
+  border: 1px solid var(--div);
+  border-radius: 6px;
+  padding: 3px 7px;
+}
+.mini-btn:hover { color: var(--acc); border-color: var(--edge); background: var(--acc-t); }
+details.poi-menu {
+  border: 1px solid var(--div);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--s) 72%, transparent);
+}
+details.poi-menu > summary {
+  cursor: pointer;
+  color: var(--mut);
+  font-size: 11px;
+  padding: 6px 8px;
+  user-select: none;
+}
+.osm-audit-body { padding: 6px 8px 8px; border-top: 1px solid var(--div); }
+.osm-audit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 190px;
+  overflow-y: auto;
+  margin: 4px 0;
+}
+.osm-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  padding: 2px 0;
+}
+.osm-row .nm { color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.osm-row .cnt { color: var(--mut); font-variant-numeric: tabular-nums; }
+.osm-row .chip { font-size: 9.5px; padding: 1px 5px; border-radius: 999px; }
+.osm-row .chip.ok { color: var(--gr); background: color-mix(in srgb, var(--gr) 16%, transparent); }
+.osm-row .chip.old { color: var(--am); background: color-mix(in srgb, var(--am) 16%, transparent); }
+.osm-row .chip.bad { color: var(--cor); background: var(--cor-t); }
+.poi-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 8px;
+  max-height: 170px;
+  overflow-y: auto;
+  padding: 4px 8px 8px;
+  border-top: 1px solid var(--div);
+}
+.poi-option {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.poi-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── Instance list (Visualize tab) ── */
+.inst-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+.inst-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+}
+.inst-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.inst-row.selected { background: var(--acc-t); border-color: var(--edge); }
+.inst-row .inst-head { display: flex; align-items: center; gap: 8px; width: 100%; }
+.inst-row .inst-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inst-row .inst-meta { font-size: 11px; color: var(--mut); }
+
+.empty-note {
+  font-size: 12px;
+  color: var(--mut);
+  border: 1px dashed var(--div);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.job-list, .run-controls { display: flex; flex-direction: column; gap: 6px; }
+.job-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 7px;
+  align-items: center;
+  border: 1px solid var(--div);
+  border-radius: 8px;
+  padding: 7px 8px;
+  font-size: 11px;
+}
+.job-state {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--mut);
+}
+.job-state.running { background: var(--cy); box-shadow: 0 0 8px var(--cy); }
+.job-state.completed { background: var(--gr); }
+.job-state.failed, .job-state.interrupted { background: var(--cor); }
+.job-state.cancelled { background: var(--am); }
+.job-main { min-width: 0; }
+.job-name { font-weight: 500; color: var(--ink); }
+.job-progress { color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-actions { display: flex; gap: 3px; }
+.job-actions button { padding: 3px 6px; font-size: 10px; }
+.mono-output {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--mut);
+  background: color-mix(in srgb, var(--bg) 50%, transparent);
+  border: 1px solid var(--div);
+  border-radius: 8px;
+  padding: 8px;
+  font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.validation-line { font-size: 11px; color: var(--mut); }
+.validation-line.valid { color: var(--gr); }
+.validation-line.invalid { color: var(--cor); }
+
+/* ── Right panel: selected instance ── */
+.sel-name-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sel-name { font-size: 20px; font-weight: 500; overflow-wrap: anywhere; }
+.sel-meta { font-size: 11.5px; color: var(--mut); }
+
+.sel-cost-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sel-cost {
+  font-size: 24px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sel-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 12px; }
+.sel-facts dt { color: var(--mut); }
+.sel-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+
+.fading-rule {
+  height: 1px;
+  background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent);
+}
+
+.legend { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px;
+  border-radius: 6px;
+  text-align: left;
+}
+.legend-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.legend-row.off { opacity: 0.35; }
+.legend-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.legend-row .lbl { font-weight: 500; }
+.legend-row .meta { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; }
+
+/* ── Activity strip (status + job history) ── */
+/* The strip is the foot of the left panel's column: closed it fills the gap the panel
+   leaves above the viewport bottom (--wb-footer-height), sharing the panel's left edge
+   and width so the two read as one stack. Opened it grows upward *over* the panel
+   rather than out over the map — the form is the thing you are not looking at while a
+   job runs, and the map keeps every pixel it had. */
+.activity {
+  position: fixed;
+  left: var(--wb-panel-inset);
+  bottom: 14px;
+  z-index: 950;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 6px;
+  width: var(--wb-left-panel-width);
+  align-items: stretch;
+}
+/* A 44px rail is far too narrow to read job rows in, so once the panel is collapsed the
+   strip stops tracking its width and stands on its own. */
+[data-left-collapsed="true"] .activity { width: min(46vw, 420px); }
+.activity-summary {
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--mut);
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px 8px 14px;
+  box-shadow: 0 0 0 1px var(--div);
+}
+.activity-summary:hover { color: var(--ink); box-shadow: 0 0 0 1px var(--edge); }
+.activity-summary #status {
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+.activity .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); flex: none; }
+.activity .dot.busy { background: var(--am); }
+.activity .dot.bad { background: var(--cor); }
+.activity-chevron { width: 13px; height: 13px; flex: none; transition: transform 140ms ease; }
+.activity[data-open="true"] .activity-chevron { transform: rotate(180deg); }
+.activity-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* Free to run tall now that it opens over the panel instead of over the map. */
+  max-height: calc(100vh - var(--wb-footer-height) - 40px);
+  /* Not the scroller — the job list is. When this element scrolled, the log pane was
+     appended past the fold and opening it did nothing visible. */
+  overflow: hidden;
+  background: var(--panel);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  box-shadow: 0 0 0 1px var(--edge), var(--shadow);
+  padding: 12px 14px;
+}
+.activity-body[hidden] { display: none; }
+.activity-toolbar { display: flex; align-items: center; gap: 8px; flex: none; }
+.activity-filter { margin-left: auto; }
+.activity-filter select { min-height: 24px; padding: 2px 6px; font-size: 11px; width: auto; }
+/* The list absorbs the slack so the pinned log pane below it always has room. */
+#jobList { flex: 1 1 auto; overflow-y: auto; min-height: 44px; }
+.job-log-pane { flex: none; display: flex; flex-direction: column; gap: 6px; }
+.job-log-pane[hidden] { display: none; }
+.job-log-head { display: flex; align-items: center; gap: 8px; }
+.job-log-head .popover-close { margin-left: auto; }
+/* Tracebacks carry long unbroken Windows paths; without this the pane scrolls
+   sideways in a 300px column. */
+.job-log-pane .mono-output { max-height: min(200px, 30vh); overflow-wrap: anywhere; }
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Visualize: instance filters ── */
+.inst-filters { display: flex; flex-direction: column; gap: 6px; flex: none; }
+.inst-filter-foot { display: flex; align-items: center; gap: 8px; }
+.inst-check { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--mut); cursor: pointer; }
+.inst-filter-foot .poi-count { margin-left: auto; }
+
+/* ── Inspector tabs ── */
+.tabs-sm .tab-btn { font-size: 11.5px; padding: 5px 0; border-radius: 7px; }
+/* The right panel is sized by its content, so its tab panels must not stretch. */
+.inspector-panel.tab-panel-active { flex: none; }
+
+/* ── Selected-instance facts ── */
+.fact-path { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.fact-path code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.copy-btn {
+  cursor: pointer;
+  flex: none;
+  font: inherit;
+  font-size: 9.5px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 5px;
+  border: 1px solid var(--div);
+  background: transparent;
+  color: var(--mut);
+}
+.copy-btn:hover { color: var(--acc); border-color: var(--edge); }
+
+.map-clear-btn {
+  position: fixed;
+  right: 20px;
+  bottom: 18px;
+  z-index: 950;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 7px 14px;
+  border: none;
+  border-radius: 8px;
+  color: var(--mut);
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 0 0 1px var(--div);
+}
+.map-clear-btn:hover { color: var(--cor); box-shadow: 0 0 0 1px var(--cor); }
+
+/* ── Map POI picker ── */
+.poi-marker {
+  border-radius: 50%;
+  border: 2px solid var(--svg);
+  box-sizing: content-box;
+  cursor: pointer;
+}
+.poi-marker.picked { box-shadow: 0 0 0 3px var(--acc); }
+.poi-pick-summary { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.poi-pick-summary .count { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.picked-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 190px;
+  overflow-y: auto;
+  border: 1px solid var(--div);
+  border-radius: 8px;
+  padding: 4px;
+}
+.picked-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  padding: 3px 4px;
+  border-radius: 5px;
+}
+.picked-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.picked-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picked-row .cat { color: var(--mut); font-size: 10px; margin-left: auto; flex: none; }
+.picked-row .depot-flag { color: var(--cor); font-size: 10px; flex: none; }
+
+/* ── Import solution ── */
+#import-text { width: 100%; min-height: 92px; resize: vertical; font-family: ui-monospace, monospace; font-size: 11px; }
+
+/* Below this width the right panel becomes a bottom sheet instead of
+   disappearing: solve controls, saved runs and compare must stay reachable.
+   The bottom sheet spans the viewport, so panel widths, splitters and rails are all
+   meaningless here — layout.js also refuses to resize below this width. */
+@media (max-width: 1000px) {
+  .splitter { display: none; }
+  .panel-toggle { display: none; }
+  [data-left-collapsed="true"] .panel-left,
+  [data-right-collapsed="true"] .panel-right { padding: 12px; overflow-y: auto; align-items: stretch; }
+  [data-left-collapsed="true"] .panel-left > :not(.panel-rail),
+  [data-right-collapsed="true"] .panel-right > :not(.panel-rail) { display: revert; }
+  [data-left-collapsed="true"] .panel-left .panel-rail,
+  [data-right-collapsed="true"] .panel-right .panel-rail { display: none; }
+  /* Pin back to the pre-P1 width: a collapsed width persisted from a wide window
+     must not leave a 44px sliver here, where the rail is switched off. */
+  .panel-left { width: 300px; }
+  .leaflet-top.leaflet-left,
+  .leaflet-bottom.leaflet-left { left: calc(300px + var(--wb-panel-inset) + var(--wb-panel-gap) - 10px); }
+  .leaflet-top.leaflet-right { right: 0; }
+
+  .panel-right {
+    top: auto;
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+    width: auto;
+    max-height: 52vh;
+  }
+  .panel-right.sheet-collapsed { max-height: 46px; overflow: hidden; }
+  .sheet-toggle { display: inline-flex; }
+  .map-clear-btn { display: none; }
+  /* The bottom of the viewport belongs to the right panel's sheet here, so the strip
+     moves to the top-right and opens downward. It cannot simply be hidden: since P3
+     it carries the job history, which used to live in the left panel. */
+  /* Repeated for the collapsed selector so a persisted rail state cannot leave the
+     strip at its own width here, where there are no rails. */
+  .activity,
+  [data-left-collapsed="true"] .activity {
+    left: auto;
+    right: 12px;
+    top: 16px;
+    bottom: auto;
+    width: min(62vw, 420px);
+    flex-direction: column;
+  }
+  .activity-body { max-height: min(52vh, 420px); }
+}
+.sheet-toggle {
+  display: none;
+  margin-left: auto;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  color: var(--mut);
+  background: transparent;
+  border: 1px solid var(--div);
+  border-radius: 6px;
+  padding: 2px 7px;
+}
+.sheet-toggle:hover { color: var(--acc); border-color: var(--edge); }

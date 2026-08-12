@@ -4,723 +4,88 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MAMUT workbench (local)</title>
+<!--MAMUT_PREFS-->
+<script src="/static/layout.js"></script>
 <script>
+/* Blocking bootstrap: theme and panel layout must both be on the root element before
+   first paint, or the page visibly jumps from the defaults to the stored values.
+   The stage is <html> rather than <body> because <body> does not exist yet here.
+
+   Preferences come from the workspace (inlined above by the index route) because
+   localStorage is keyed by origin including the port, and the GUI binds a new random
+   port on every start. localStorage stays as the same-session fallback. */
 (function () {
-  try {
-    var theme = localStorage.getItem("mamut-tools-theme");
-    if (theme !== "dark" && theme !== "light") theme = "dark";
-    document.documentElement.dataset.theme = theme;
-  } catch (error) {
-    document.documentElement.dataset.theme = "dark";
+  var prefs = window.__MAMUT_PREFS__ || {};
+  var theme = prefs.theme;
+  if (theme !== "dark" && theme !== "light") {
+    try {
+      /* One key across both frontends since P4. The old per-app key is still read
+         once so an existing preference is not silently reset, then migrated. */
+      theme = localStorage.getItem("mamut-theme") || localStorage.getItem("mamut-tools-theme");
+    } catch (error) { theme = null; }
   }
+  if (theme !== "dark" && theme !== "light") theme = "dark";
+  document.documentElement.dataset.theme = theme;
+  try {
+    window.MamutLayout.applyState(
+      document.documentElement,
+      window.MamutLayout.readState(window.MamutLayout.STORAGE_KEY, prefs.layout),
+    );
+  } catch (error) { /* layout.js missing or storage blocked — CSS defaults stand */ }
 })();
 </script>
 <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
-<style>
-  /* Nocturne design system (Adrien's Claude-Design merged demo): dual palettes
-     from the demo's renderVals, Inter self-hosted, glass panels over the map. */
-  @font-face {
-    font-family: "Inter";
-    font-style: normal;
-    font-weight: 100 900;
-    font-display: swap;
-    src: url("/static/vendor/fonts/InterVariable.woff2") format("woff2-variations");
-  }
-
-  :root,
-  [data-theme="dark"] {
-    --bg: #101226; --s: #1b1e3d; --ink: #edeffc; --mut: #8d92b8;
-    --div: rgba(237, 239, 252, 0.13); --acc: #9d8bff; --on-acc: #101226;
-    --cy: #3cd6f5; --gr: #45e8a5; --am: #ffc14d; --cor: #ff7a6e;
-    --acc-t: rgba(157, 139, 255, 0.16); --cy-t: rgba(60, 214, 245, 0.14);
-    --gr-t: rgba(69, 232, 165, 0.16); --am-t: rgba(255, 193, 77, 0.16);
-    --cor-t: rgba(255, 122, 110, 0.16); --svg: #0c0e1f; --ptc: #dfe3f5;
-    --panel: rgba(24, 27, 54, 0.92); --edge: rgba(157, 139, 255, 0.28);
-    --shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
-    color-scheme: dark;
-  }
-
-  [data-theme="light"] {
-    --bg: #f6f5f0; --s: #ffffff; --ink: #201b45; --mut: #6f6f92;
-    --div: rgba(32, 27, 69, 0.14); --acc: #5b43e8; --on-acc: #ffffff;
-    --cy: #0d94ba; --gr: #0f9e68; --am: #c47f00; --cor: #e8503f;
-    --acc-t: rgba(91, 67, 232, 0.11); --cy-t: rgba(13, 148, 186, 0.12);
-    --gr-t: rgba(15, 158, 104, 0.13); --am-t: rgba(196, 127, 0, 0.13);
-    --cor-t: rgba(232, 80, 63, 0.12); --svg: #efede6; --ptc: #3a3f55;
-    --panel: rgba(255, 255, 255, 0.94); --edge: rgba(91, 67, 232, 0.22);
-    --shadow: 0 14px 36px rgba(25, 29, 54, 0.14);
-    color-scheme: light;
-  }
-
-  * { box-sizing: border-box; }
-
-  html, body {
-    margin: 0;
-    height: 100%;
-    font-family: "Inter", system-ui, sans-serif;
-    font-size: 13px;
-    line-height: 1.55;
-    color: var(--ink);
-    background: var(--bg);
-  }
-
-  [hidden] { display: none !important; }
-
-  :focus { outline: none; }
-  :focus-visible { outline: 2px solid var(--acc); outline-offset: 2px; }
-  ::selection { background: color-mix(in srgb, var(--acc) 30%, transparent); }
-
-  #map { position: fixed; inset: 0; background: var(--svg); }
-
-  .leaflet-control-attribution {
-    background: var(--panel) !important;
-    color: var(--mut) !important;
-    font-size: 10px !important;
-  }
-  .leaflet-control-attribution a { color: var(--mut) !important; }
-  .leaflet-container { font-family: "Inter", system-ui, sans-serif !important; }
-
-  /* ── Floating panels ── */
-  .panel {
-    position: fixed;
-    display: flex;
-    flex-direction: column;
-    gap: 9px;
-    background: var(--panel);
-    backdrop-filter: blur(10px);
-    border-radius: 14px;
-    box-shadow: 0 0 0 1px var(--edge), var(--shadow);
-    padding: 12px;
-    z-index: 900;
-    overflow-y: auto;
-    overflow-x: hidden;
-  }
-
-  .panel::-webkit-scrollbar { width: 6px; }
-  .panel::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, var(--ink) 15%, transparent);
-    border-radius: 3px;
-  }
-
-  .panel-left { left: 20px; top: 16px; bottom: 56px; width: 300px; }
-  .panel-right { right: 20px; top: 16px; max-height: calc(100% - 90px); width: 300px; padding: 16px; gap: 10px; }
-
-  .brand-row { display: flex; align-items: center; gap: 8px; }
-  .brand-mark {
-    width: 10px; height: 10px; flex: none;
-    background: linear-gradient(135deg, var(--acc), var(--cy));
-    border-radius: 2px;
-    transform: rotate(45deg);
-  }
-  .brand-name { font-weight: 500; font-size: 14px; }
-  .brand-sub { font-size: 10.5px; color: var(--mut); }
-
-  .theme-toggle {
-    margin-left: auto;
-    display: inline-flex;
-    border: 1px solid var(--div);
-    border-radius: 999px;
-    overflow: hidden;
-    font-size: 10px;
-    cursor: pointer;
-    user-select: none;
-  }
-  .theme-side { padding: 3px 8px; color: var(--mut); background: transparent; border: none; cursor: pointer; font: inherit; }
-  [data-theme="dark"] .theme-side-moon,
-  [data-theme="light"] .theme-side-sun { background: var(--acc); color: var(--on-acc); }
-
-  .kicker {
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--mut);
-  }
-  .kicker-selected { color: var(--cy); }
-
-  .section {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-  .section + .section {
-    padding-top: 10px;
-    background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent) no-repeat top / 100% 1px;
-  }
-
-  /* ── Tabs ── */
-  .tabs { display: flex; gap: 6px; flex: none; }
-  .tab-btn {
-    flex: 1;
-    cursor: pointer;
-    font: inherit;
-    font-size: 13px;
-    font-weight: 500;
-    padding: 8px 0;
-    border-radius: 8px;
-    border: none;
-    background: transparent;
-    color: var(--mut);
-  }
-  .tab-btn:hover { color: var(--ink); }
-  .tab-btn.tab-active { background: var(--acc); color: var(--on-acc); }
-
-  .tab-panel { display: none; min-height: 0; }
-  .tab-panel.tab-panel-active { display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0; }
-  /* Generation is taller than the viewport once optional controls expand.
-     Let the outer panel own scrolling instead of squeezing this flex child
-     and allowing its contents to paint over the persistent Jobs section. */
-  #generatePanel.tab-panel-active { flex: none; min-height: max-content; }
-  #jobsSection { flex: none; }
-
-  /* ── Forms ── */
-  label.field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-  .field > span { font-size: 11px; color: var(--mut); }
-
-  select, input[type="text"], input[type="number"], input[type="search"] {
-    width: 100%;
-    font: inherit;
-    font-size: 12.5px;
-    color: var(--ink);
-    background: var(--s);
-    border: 1px solid var(--div);
-    border-radius: 8px;
-    min-height: 30px;
-    padding: 5px 10px;
-    caret-color: var(--acc);
-  }
-  input:hover, select:hover { border-color: color-mix(in srgb, var(--ink) 45%, transparent); }
-  input:focus-visible, select:focus-visible { border-color: var(--acc); outline-offset: 0; }
-  input[type="checkbox"] { accent-color: var(--acc); }
-  input[type="range"] { width: 100%; accent-color: var(--acc); }
-
-  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .row { display: flex; gap: 6px; align-items: end; flex-wrap: wrap; }
-  .option-group {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-    border-left: 2px solid var(--edge);
-    padding-left: 9px;
-  }
-  .range-value { color: var(--acc); font-variant-numeric: tabular-nums; }
-
-  .btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    cursor: pointer;
-    font: inherit;
-    font-size: 12.5px;
-    font-weight: 500;
-    padding: 7px 14px;
-    border-radius: 8px;
-    border: none;
-    background: var(--acc);
-    color: var(--on-acc);
-  }
-  .btn:hover { background: color-mix(in srgb, var(--acc) 88%, var(--ink)); }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .btn-secondary { background: transparent; color: var(--acc); box-shadow: inset 0 0 0 1px var(--acc); }
-  .btn-secondary:hover { background: var(--acc-t); }
-  .btn-ghost {
-    background: transparent;
-    color: var(--mut);
-    box-shadow: inset 0 0 0 1px var(--div);
-  }
-  .btn-ghost:hover { color: var(--acc); box-shadow: inset 0 0 0 1px var(--edge); background: var(--acc-t); }
-
-  .note { font-size: 11px; line-height: 1.55; color: var(--mut); margin: 0; }
-
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    font-size: 10px;
-    letter-spacing: 0.02em;
-    padding: 2px 8px;
-    border-radius: 6px;
-    white-space: nowrap;
-  }
-  .chip-am { background: var(--am-t); color: var(--am); }
-  .chip-gr { background: var(--gr-t); color: var(--gr); }
-  .chip-acc { background: var(--acc-t); color: var(--acc); }
-
-  /* ── Inline help ── */
-  .field-head { display: flex; align-items: center; gap: 6px; }
-  .help-btn {
-    cursor: pointer;
-    font: inherit;
-    font-size: 9.5px;
-    font-weight: 700;
-    line-height: 1;
-    width: 14px;
-    height: 14px;
-    flex: none;
-    border-radius: 50%;
-    border: 1px solid var(--div);
-    background: transparent;
-    color: var(--mut);
-    padding: 0;
-  }
-  .help-btn:hover, .help-btn[aria-expanded="true"] { color: var(--acc); border-color: var(--edge); background: var(--acc-t); }
-  .help-body {
-    font-size: 11px;
-    line-height: 1.55;
-    color: var(--mut);
-    margin: 2px 0 0;
-    padding-left: 9px;
-    border-left: 2px solid var(--edge);
-  }
-  .help-body[hidden] { display: none; }
-  .help-body dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 4px 0 0; }
-  .help-body dt { color: var(--ink); font-variant-numeric: tabular-nums; }
-  .help-body dd { margin: 0; }
-
-  /* ── Bulk configuration overlay ── */
-  .bulk-modal-overlay {
-    position: fixed;
-    inset: 0;
-    z-index: 1200;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-    background: color-mix(in srgb, var(--bg) 72%, transparent);
-    backdrop-filter: blur(4px);
-  }
-  .bulk-modal-overlay[hidden] { display: none; }
-  .bulk-modal {
-    display: flex;
-    flex-direction: column;
-    width: min(1240px, 100%);
-    height: min(820px, 100%);
-    background: var(--panel);
-    backdrop-filter: blur(14px);
-    border-radius: 14px;
-    box-shadow: var(--shadow), 0 0 0 1px var(--div);
-    overflow: hidden;
-  }
-  .bulk-modal-header, .bulk-modal-footer {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 14px 18px;
-    flex: none;
-  }
-  .bulk-modal-header { border-bottom: 1px solid var(--div); }
-  .bulk-modal-footer { border-top: 1px solid var(--div); }
-  .bulk-modal-header h2 { margin: 0; font-size: 14px; font-weight: 600; }
-  .bulk-modal-close {
-    margin-left: auto;
-    cursor: pointer;
-    font: inherit;
-    font-size: 18px;
-    line-height: 1;
-    border: none;
-    background: transparent;
-    color: var(--mut);
-    padding: 2px 6px;
-    border-radius: 6px;
-  }
-  .bulk-modal-close:hover { color: var(--cor); background: var(--cor-t); }
-  .bulk-modal-body { display: flex; min-height: 0; flex: 1; }
-  .bulk-modal-left {
-    width: 292px;
-    flex: none;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 16px 18px;
-    overflow-y: auto;
-    border-right: 1px solid var(--div);
-  }
-  .bulk-modal-right {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 16px 18px;
-  }
-  .bulk-city-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    max-height: 168px;
-    overflow-y: auto;
-    border: 1px solid var(--div);
-    border-radius: 8px;
-    padding: 5px;
-  }
-  .bulk-checkbox-row { display: flex; flex-direction: column; gap: 1px; }
-  .bulk-checkbox-row label {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    font-size: 11.5px;
-    padding: 2px 3px;
-    border-radius: 5px;
-    cursor: pointer;
-  }
-  .bulk-checkbox-row label:hover, .bulk-city-list label:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
-  .bulk-checkbox-row .band { color: var(--mut); margin-left: auto; font-variant-numeric: tabular-nums; }
-  .bulk-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; flex: none; }
-  .bulk-table-wrap { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--div); border-radius: 8px; }
-  /* Columns size to their content and the wrapper scrolls; a plain width:100%
-     squeezes the selects down to a bare chevron. */
-  .bulk-table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 11.5px; }
-  .bulk-table th, .bulk-table td { padding: 3px 5px; text-align: left; white-space: nowrap; }
-  .bulk-table thead th {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: var(--s);
-    color: var(--mut);
-    font-weight: 500;
-    font-size: 10px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    border-bottom: 1px solid var(--div);
-  }
-  .bulk-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--ink) 3%, transparent); }
-  .bulk-table td select, .bulk-table td input[type="text"], .bulk-table td input[type="number"] {
-    min-height: 24px;
-    padding: 2px 5px;
-    font-size: 11.5px;
-    border-radius: 5px;
-    width: auto;
-  }
-  .bulk-table td select { min-width: 104px; }
-  .bulk-table td input[type="number"] { width: 74px; }
-  .bulk-table td.cat-cell input[type="text"] { min-width: 190px; }
-  .bulk-delete-btn {
-    cursor: pointer;
-    border: none;
-    background: transparent;
-    color: var(--mut);
-    font: inherit;
-    padding: 2px 5px;
-    border-radius: 5px;
-  }
-  .bulk-delete-btn:hover { color: var(--cor); background: var(--cor-t); }
-  .bulk-empty { padding: 22px; text-align: center; }
-  .bulk-modal.confirm-modal { width: min(560px, 100%); height: auto; }
-  .confirm-modal-body {
-    padding: 16px 18px;
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--ink);
-  }
-  .confirm-modal-body p { margin: 0; }
-  .preflight-line { font-size: 11px; line-height: 1.5; }
-  .preflight-line.warn { color: var(--am); }
-  .preflight-line.bad { color: var(--cor); }
-  .preflight-line.good { color: var(--gr); }
-
-  .poi-picker { display: flex; flex-direction: column; gap: 5px; }
-  .poi-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-  .poi-count { margin-left: auto; color: var(--mut); font-size: 10.5px; }
-  .mini-btn {
-    cursor: pointer;
-    font: inherit;
-    font-size: 10px;
-    color: var(--mut);
-    background: transparent;
-    border: 1px solid var(--div);
-    border-radius: 6px;
-    padding: 3px 7px;
-  }
-  .mini-btn:hover { color: var(--acc); border-color: var(--edge); background: var(--acc-t); }
-  details.poi-menu {
-    border: 1px solid var(--div);
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--s) 72%, transparent);
-  }
-  details.poi-menu > summary {
-    cursor: pointer;
-    color: var(--mut);
-    font-size: 11px;
-    padding: 6px 8px;
-    user-select: none;
-  }
-  .osm-audit-body { padding: 6px 8px 8px; border-top: 1px solid var(--div); }
-  .osm-audit-list {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    max-height: 190px;
-    overflow-y: auto;
-    margin: 4px 0;
-  }
-  .osm-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 10.5px;
-    padding: 2px 0;
-  }
-  .osm-row .nm { color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .osm-row .cnt { color: var(--mut); font-variant-numeric: tabular-nums; }
-  .osm-row .chip { font-size: 9.5px; padding: 1px 5px; border-radius: 999px; }
-  .osm-row .chip.ok { color: var(--gr); background: color-mix(in srgb, var(--gr) 16%, transparent); }
-  .osm-row .chip.old { color: var(--am); background: color-mix(in srgb, var(--am) 16%, transparent); }
-  .osm-row .chip.bad { color: var(--cor); background: var(--cor-t); }
-  .poi-list {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 3px 8px;
-    max-height: 170px;
-    overflow-y: auto;
-    padding: 4px 8px 8px;
-    border-top: 1px solid var(--div);
-  }
-  .poi-option {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    min-width: 0;
-    color: var(--ink);
-    font-size: 10.5px;
-    cursor: pointer;
-  }
-  .poi-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-  /* ── Instance list (Visualize tab) ── */
-  .inst-list {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    overflow-y: auto;
-    min-height: 0;
-    flex: 1;
-  }
-  .inst-row {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    gap: 2px;
-    text-align: left;
-    cursor: pointer;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 8px 10px;
-    background: transparent;
-    color: var(--ink);
-    font: inherit;
-  }
-  .inst-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
-  .inst-row.selected { background: var(--acc-t); border-color: var(--edge); }
-  .inst-row .inst-head { display: flex; align-items: center; gap: 8px; width: 100%; }
-  .inst-row .inst-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .inst-row .inst-meta { font-size: 11px; color: var(--mut); }
-
-  .empty-note {
-    font-size: 12px;
-    color: var(--mut);
-    border: 1px dashed var(--div);
-    border-radius: 8px;
-    padding: 12px;
-  }
-
-  .job-list, .run-controls { display: flex; flex-direction: column; gap: 6px; }
-  .job-row {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    gap: 7px;
-    align-items: center;
-    border: 1px solid var(--div);
-    border-radius: 8px;
-    padding: 7px 8px;
-    font-size: 11px;
-  }
-  .job-state {
-    width: 7px; height: 7px; border-radius: 50%; background: var(--mut);
-  }
-  .job-state.running { background: var(--cy); box-shadow: 0 0 8px var(--cy); }
-  .job-state.completed { background: var(--gr); }
-  .job-state.failed, .job-state.interrupted { background: var(--cor); }
-  .job-state.cancelled { background: var(--am); }
-  .job-main { min-width: 0; }
-  .job-name { font-weight: 500; color: var(--ink); }
-  .job-progress { color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .job-actions { display: flex; gap: 3px; }
-  .job-actions button { padding: 3px 6px; font-size: 10px; }
-  .mono-output {
-    margin: 0;
-    max-height: 140px;
-    overflow: auto;
-    white-space: pre-wrap;
-    color: var(--mut);
-    background: color-mix(in srgb, var(--bg) 50%, transparent);
-    border: 1px solid var(--div);
-    border-radius: 8px;
-    padding: 8px;
-    font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
-  }
-  .validation-line { font-size: 11px; color: var(--mut); }
-  .validation-line.valid { color: var(--gr); }
-  .validation-line.invalid { color: var(--cor); }
-
-  /* ── Right panel: selected instance ── */
-  .sel-name-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-  .sel-name { font-size: 20px; font-weight: 500; overflow-wrap: anywhere; }
-  .sel-meta { font-size: 11.5px; color: var(--mut); }
-
-  .sel-cost-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .sel-cost {
-    font-size: 24px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-
-  .sel-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 12px; }
-  .sel-facts dt { color: var(--mut); }
-  .sel-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-
-  .fading-rule {
-    height: 1px;
-    background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent);
-  }
-
-  .legend { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
-  .legend-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    cursor: pointer;
-    border: none;
-    background: transparent;
-    color: var(--ink);
-    font: inherit;
-    font-size: 12px;
-    padding: 4px;
-    border-radius: 6px;
-    text-align: left;
-  }
-  .legend-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
-  .legend-row.off { opacity: 0.35; }
-  .legend-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-  .legend-row .lbl { font-weight: 500; }
-  .legend-row .meta { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; }
-
-  /* ── Footer status chip ── */
-  .footer {
-    position: fixed;
-    left: 20px;
-    bottom: 18px;
-    z-index: 950;
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 11.5px;
-    color: var(--mut);
-    background: var(--panel);
-    backdrop-filter: blur(8px);
-    border-radius: 8px;
-    padding: 8px 14px;
-    box-shadow: 0 0 0 1px var(--div);
-    max-width: min(58vw, 760px);
-  }
-  .footer .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); flex: none; }
-  .footer p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-  .map-clear-btn {
-    position: fixed;
-    right: 20px;
-    bottom: 18px;
-    z-index: 950;
-    cursor: pointer;
-    font: inherit;
-    font-size: 11.5px;
-    font-weight: 500;
-    padding: 7px 14px;
-    border: none;
-    border-radius: 8px;
-    color: var(--mut);
-    background: var(--panel);
-    backdrop-filter: blur(8px);
-    box-shadow: 0 0 0 1px var(--div);
-  }
-  .map-clear-btn:hover { color: var(--cor); box-shadow: 0 0 0 1px var(--cor); }
-
-  /* ── Map POI picker ── */
-  .poi-marker {
-    border-radius: 50%;
-    border: 2px solid var(--svg);
-    box-sizing: content-box;
-    cursor: pointer;
-  }
-  .poi-marker.picked { box-shadow: 0 0 0 3px var(--acc); }
-  .poi-pick-summary { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
-  .poi-pick-summary .count { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .picked-list {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    max-height: 190px;
-    overflow-y: auto;
-    border: 1px solid var(--div);
-    border-radius: 8px;
-    padding: 4px;
-  }
-  .picked-row {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    font-size: 11.5px;
-    padding: 3px 4px;
-    border-radius: 5px;
-  }
-  .picked-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
-  .picked-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .picked-row .cat { color: var(--mut); font-size: 10px; margin-left: auto; flex: none; }
-  .picked-row .depot-flag { color: var(--cor); font-size: 10px; flex: none; }
-
-  /* ── Import solution ── */
-  #import-text { width: 100%; min-height: 92px; resize: vertical; font-family: ui-monospace, monospace; font-size: 11px; }
-
-  /* Below this width the right panel becomes a bottom sheet instead of
-     disappearing: solve controls, saved runs and compare must stay reachable. */
-  @media (max-width: 1000px) {
-    .panel-right {
-      top: auto;
-      left: 12px;
-      right: 12px;
-      bottom: 12px;
-      width: auto;
-      max-height: 52vh;
-    }
-    .panel-right.sheet-collapsed { max-height: 46px; overflow: hidden; }
-    .sheet-toggle { display: inline-flex; }
-    .footer, .map-clear-btn { display: none; }
-  }
-  .sheet-toggle {
-    display: none;
-    margin-left: auto;
-    cursor: pointer;
-    font: inherit;
-    font-size: 10px;
-    color: var(--mut);
-    background: transparent;
-    border: 1px solid var(--div);
-    border-radius: 6px;
-    padding: 2px 7px;
-  }
-  .sheet-toggle:hover { color: var(--acc); border-color: var(--edge); }
-</style>
+<link rel="stylesheet" href="/static/nocturne-tokens.css">
+<link rel="stylesheet" href="/static/workbench.css">
 </head>
 <body>
+<!-- Icon sprite. Nocturne prescribes Phosphor; these are hand-authored in Phosphor's
+     regular weight (24 grid, 2px stroke, round caps/joins) rather than the vendored
+     library, so swapping in the real glyphs later means replacing these paths only. -->
+<svg class="icon-sprite" aria-hidden="true" focusable="false">
+  <symbol id="i-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="4.2"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.5 1.5M16.9 16.9l1.5 1.5M18.4 5.6l-1.5 1.5M7.1 16.9l-1.5 1.5"/>
+  </symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 14.2A8.2 8.2 0 0 1 9.8 4a8.4 8.4 0 1 0 10.2 10.2z"/>
+  </symbol>
+  <symbol id="i-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 6l12 12M18 6L6 18"/>
+  </symbol>
+  <symbol id="i-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="9"/><path d="M12 11v5.5"/><circle cx="12" cy="7.8" r="1.05" fill="currentColor" stroke="none"/>
+  </symbol>
+</svg>
+
 <div id="map"></div>
 
+<div class="splitter splitter-left" data-splitter="left" role="separator" aria-orientation="vertical"
+     tabindex="0" aria-label="Resize the workbench panel"></div>
+<div class="splitter splitter-right" data-splitter="right" role="separator" aria-orientation="vertical"
+     tabindex="0" aria-label="Resize the selected-instance panel"></div>
+
 <aside class="panel panel-left">
+  <div class="panel-rail" role="toolbar" aria-label="Expand the workbench panel">
+    <button class="rail-btn" type="button" data-rail-side="left" data-rail-target="visualize" title="Visualize" aria-label="Visualize">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h7"/><circle cx="4.5" cy="6" r="1.1"/><circle cx="4.5" cy="12" r="1.1"/><circle cx="4.5" cy="18" r="1.1"/></svg>
+    </button>
+    <button class="rail-btn" type="button" data-rail-side="left" data-rail-target="generate" title="Generate" aria-label="Generate">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h8M17 7h3M4 17h3M12 17h8"/><circle cx="14.5" cy="7" r="2.2"/><circle cx="9.5" cy="17" r="2.2"/></svg>
+    </button>
+    <button class="rail-btn" type="button" data-rail-side="left" data-rail-target="jobs" title="Jobs" aria-label="Jobs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h3.5l2.5-6 4 12 2.5-6H21"/></svg>
+    </button>
+  </div>
   <div class="brand-row">
     <span class="brand-mark" aria-hidden="true"></span>
     <span><span class="brand-name">MAMUT workbench</span> <span class="brand-sub">local</span></span>
     <span class="theme-toggle">
-      <button type="button" class="theme-side theme-side-sun" data-theme-pick="light" aria-label="Light theme">&#9728;</button>
-      <button type="button" class="theme-side theme-side-moon" data-theme-pick="dark" aria-label="Dark theme">&#9790;</button>
+      <button type="button" class="theme-side theme-side-sun" data-theme-pick="light" aria-label="Light theme"><svg class="icon" aria-hidden="true"><use href="#i-sun"/></svg></button>
+      <button type="button" class="theme-side theme-side-moon" data-theme-pick="dark" aria-label="Dark theme"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button>
     </span>
+    <button class="panel-toggle" type="button" data-panel-toggle="left" title="Collapse the panel" aria-label="Collapse the workbench panel">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+    </button>
   </div>
 
   <div class="tabs">
@@ -730,6 +95,26 @@
 
   <section id="visualizePanel" class="tab-panel">
     <div class="kicker">Workspace instances · click to select</div>
+    <!-- The list is unbounded and unordered otherwise; the published workbench has
+         had filters for the same job for a long time. -->
+    <div class="inst-filters">
+      <input id="inst-search" type="search" placeholder="Search name or city…" aria-label="Search instances">
+      <div class="grid-2">
+        <label class="field"><span>City</span><select id="inst-city"><option value="">All cities</option></select></label>
+        <label class="field"><span>Sort</span>
+          <select id="inst-sort">
+            <option value="recent">Most recent</option>
+            <option value="name">Name</option>
+            <option value="city">City, size</option>
+            <option value="size">Customers</option>
+          </select>
+        </label>
+      </div>
+      <div class="inst-filter-foot">
+        <label class="inst-check"><input id="inst-solved" type="checkbox"> With solutions only</label>
+        <span id="inst-count" class="poi-count"></span>
+      </div>
+    </div>
     <div id="instList" class="inst-list">
       <div class="empty-note">Nothing generated yet. Use the Generate tab: generated instances land in the workspace instances/ directory and appear here, ready to solve and render on the map.</div>
     </div>
@@ -737,201 +122,239 @@
   </section>
 
   <section id="generatePanel" class="tab-panel tab-panel-active">
-    <label class="field"><span>City · OSM road graph</span><select id="city"></select></label>
-    <div class="row">
-      <label class="field" style="flex:1"><span>Fetch a new city (Nominatim + Overpass)</span><input id="fetch-name" type="text" placeholder="e.g. Brest"></label>
-      <button class="btn btn-secondary" id="fetch" type="button">Fetch</button>
+    <div class="panel-actions">
+      <button id="explain-toggle" class="link-btn" type="button" aria-pressed="false">Explain this form</button>
     </div>
-    <details class="poi-menu" id="osm-audit-panel">
-      <summary>Stored OSM extracts · POI coverage</summary>
-      <div class="osm-audit-body">
-        <div class="poi-toolbar">
-          <button id="osm-audit-check" class="mini-btn" type="button">Check extracts</button>
-          <button id="osm-audit-refresh" class="mini-btn" type="button" disabled>Update outdated</button>
-          <span id="osm-audit-count" class="poi-count"></span>
+
+    <section class="step">
+      <div class="step-head"><span class="step-index">1</span><span class="step-title">Place</span></div>
+      <label class="field"><span>City · OSM road graph</span><select id="city"></select></label>
+      <div class="row">
+        <label class="field" style="flex:1"><span>Fetch a new city (Nominatim + Overpass)</span><input id="fetch-name" type="text" placeholder="e.g. Brest"></label>
+        <button class="btn btn-secondary" id="fetch" type="button">Fetch</button>
+      </div>
+      <details class="advanced" id="adv-place" data-advanced="place">
+        <summary>Advanced</summary>
+        <div class="advanced-body" id="osm-audit-panel">
+          <div class="kicker">Stored OSM extracts · POI coverage</div>
+          <div class="poi-toolbar">
+            <button id="osm-audit-check" class="mini-btn" type="button">Check extracts</button>
+            <button id="osm-audit-refresh" class="mini-btn" type="button" disabled>Update outdated</button>
+            <span id="osm-audit-count" class="poi-count"></span>
+          </div>
+          <div id="osm-audit-list" class="osm-audit-list">
+            <div class="empty-note">Not checked yet.</div>
+          </div>
+          <p class="note">Extracts fetched before amenities mapped as building outlines were downloaded hold
+            only the POIs mapped as points — roughly two thirds of a city's amenities. Updating re-runs the
+            amenity query alone and leaves the road network in place.</p>
         </div>
-        <div id="osm-audit-list" class="osm-audit-list">
-          <div class="empty-note">Not checked yet.</div>
-        </div>
-        <p class="note">Extracts fetched before amenities mapped as building outlines were downloaded hold
-          only the POIs mapped as points — roughly two thirds of a city's amenities. Updating re-runs the
-          amenity query alone and leaves the road network in place.</p>
-      </div>
-    </details>
-    <div class="grid-2">
-      <label class="field"><span>Customers</span><input id="n" type="number" value="30" min="2"></label>
-      <label class="field"><span>Seed</span><input id="seed" type="number" value="0"></label>
-    </div>
-    <div class="field">
-      <div class="field-head">
-        <span>Sampling method</span>
-        <button class="help-btn" type="button" data-help="help-method" aria-expanded="false" aria-label="What the sampling methods do">i</button>
-      </div>
-      <select id="method">
-        <option value="poi_categories">POI categories</option>
-        <option value="parametric_attach">Parametric attach</option>
-        <option value="hybrid">Hybrid</option>
-        <option value="manual">Manual · pick POIs on the map</option>
-      </select>
-      <div class="help-body" id="help-method" hidden>
-        How customer locations are chosen on the road graph.
-        <dl>
-          <dt>POI categories</dt><dd>Customers sit on real amenities of the ticked categories.</dd>
-          <dt>Parametric attach</dt><dd>Customers are sampled from road intersections, ignoring amenities.</dd>
-          <dt>Hybrid</dt><dd>Mixes both by the share below; missing POIs are filled parametrically.</dd>
-          <dt>Manual</dt><dd>You pick the exact POIs on the map. Each pick snaps to its nearest road intersection.</dd>
-        </dl>
-      </div>
-    </div>
-    <div class="field">
-      <div class="field-head">
-        <span>Depot position</span>
-        <button class="help-btn" type="button" data-help="help-depot" aria-expanded="false" aria-label="What the depot positions mean">i</button>
-      </div>
-      <select id="depot-mode">
-        <option value="center">Centered</option>
-        <option value="random">Random</option>
-        <option value="corner">Excentered (corner)</option>
-      </select>
-      <div class="help-body" id="help-depot" hidden>
-        Which road intersection becomes node 1, the depot.
-        <dl>
-          <dt>Centered</dt><dd>Closest vertex to the mean of all vertices — short, balanced routes.</dd>
-          <dt>Random</dt><dd>A uniformly drawn vertex, so difficulty varies with the seed.</dd>
-          <dt>Excentered</dt><dd>Closest vertex to the south-west corner — long approach legs.</dd>
-        </dl>
-        In manual mode you can instead click a POI and mark it as the depot.
-      </div>
-    </div>
-    <div id="poi-picker" class="field poi-picker">
-      <span>POI categories</span>
-      <div class="poi-toolbar">
-        <button id="poi-default" class="mini-btn" type="button">Defaults</button>
-        <button id="poi-all" class="mini-btn" type="button">Select all</button>
-        <button id="poi-clear" class="mini-btn" type="button">Clear</button>
-        <span id="poi-count" class="poi-count"></span>
-      </div>
-      <details class="poi-menu">
-        <summary>Choose amenity types</summary>
-        <div id="poi-list" class="poi-list"></div>
       </details>
-      <p class="note">City fetches store every listed category. These checks only filter which POIs generation may select.</p>
+    </section>
+
+    <section class="step">
+      <div class="step-head"><span class="step-index">2</span><span class="step-title">Customers</span></div>
+      <div class="grid-2">
+        <label class="field"><span>Customers</span><input id="n" type="number" value="30" min="2"></label>
+        <label class="field"><span>Seed</span><input id="seed" type="number" value="0"></label>
+      </div>
       <div class="field">
         <div class="field-head">
-          <span>POI attachment</span>
-          <button class="help-btn" type="button" data-help="help-attach" aria-expanded="false" aria-label="How POIs bind to the road graph">i</button>
+          <span>Sampling method</span>
+          <button class="help-btn" type="button" data-help="help-method" aria-expanded="false" aria-label="What the sampling methods do"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
         </div>
-        <select id="poi-attach-mode">
-          <option value="nearest_node">Strict · POI must sit on an intersection</option>
-          <option value="nearest_vertex">Snap · move the POI to the nearest intersection</option>
+        <select id="method">
+          <option value="poi_categories">POI categories</option>
+          <option value="parametric_attach">Parametric attach</option>
+          <option value="hybrid">Hybrid</option>
+          <option value="manual">Manual · pick POIs on the map</option>
         </select>
-        <div class="help-body" id="help-attach" hidden>
-          How an amenity binds to the road graph, which decides how many of them can be customers at all.
+        <div class="help-body" id="help-method" hidden>
+          How customer locations are chosen on the road graph.
           <dl>
-            <dt>Strict</dt><dd>The POI's nearest road node must itself be a graph intersection. Matches the
-              published Julia pipeline exactly, and discards most of a city: an amenity whose closest node
-              sits mid-segment is dropped even when a real intersection stands a metre further.</dd>
-            <dt>Snap</dt><dd>The POI moves to the closest intersection within the radius below, the way
-              hand-picked POIs have always worked. Far more of the extract becomes usable; each customer
-              records how far its amenity moved.</dd>
+            <dt>POI categories</dt><dd>Customers sit on real amenities of the ticked categories.</dd>
+            <dt>Parametric attach</dt><dd>Customers are sampled from road intersections, ignoring amenities.</dd>
+            <dt>Hybrid</dt><dd>Mixes both by the share below; missing POIs are filled parametrically.</dd>
+            <dt>Manual</dt><dd>You pick the exact POIs on the map. Each pick snaps to its nearest road intersection.</dd>
           </dl>
         </div>
       </div>
-      <label class="field" id="poi-attach-radius-field" hidden>
-        <span>Snap radius (m)</span>
-        <input id="poi-attach-radius" type="number" value="50" min="1" step="10">
-      </label>
-    </div>
-    <div id="manual-options" class="option-group" hidden>
-      <div class="poi-pick-summary">
-        <span class="count" id="manual-count">0</span>
-        <span class="note" id="manual-available">Click POIs on the map to add them.</span>
+      <div id="poi-picker" class="field poi-picker">
+        <div class="field-head">
+          <span>POI categories</span>
+          <button id="poi-edit" class="chip-btn" type="button" aria-haspopup="dialog" aria-expanded="false">
+            <span id="poi-count" class="poi-count"></span>
+            <span class="chip-btn-action">Edit</span>
+          </button>
+        </div>
       </div>
-      <div class="poi-toolbar">
-        <button id="manual-load" class="mini-btn" type="button">Show POIs on map</button>
-        <button id="manual-clear" class="mini-btn" type="button">Clear picks</button>
-        <button id="manual-depot-clear" class="mini-btn" type="button">Unset depot</button>
+      <div id="manual-options" class="option-group" hidden>
+        <div class="poi-pick-summary">
+          <span class="count" id="manual-count">0</span>
+          <span class="note" id="manual-available">Click POIs on the map to add them.</span>
+        </div>
+        <div class="poi-toolbar">
+          <button id="manual-load" class="mini-btn" type="button">Show POIs on map</button>
+          <button id="manual-clear" class="mini-btn" type="button">Clear picks</button>
+          <button id="manual-depot-clear" class="mini-btn" type="button">Unset depot</button>
+        </div>
+        <div id="manual-list" class="picked-list"></div>
+        <p class="note">Click a marker to pick or unpick it; shift-click sets it as the depot. Names come from
+          OpenStreetMap where available. Picks are snapped to the nearest road intersection, so two POIs on the
+          same corner collapse into one customer.</p>
       </div>
-      <div id="manual-list" class="picked-list"></div>
-      <p class="note">Click a marker to pick or unpick it; shift-click sets it as the depot. Names come from
-        OpenStreetMap where available. Picks are snapped to the nearest road intersection, so two POIs on the
-        same corner collapse into one customer.</p>
-    </div>
-    <div id="hybrid-options" class="option-group" hidden>
-      <label class="field">
-        <span>Hybrid composition · <output id="hybrid-share-value" class="range-value">50% POI / 50% parametric</output></span>
-        <input id="hybrid-poi-share" type="range" min="0" max="100" step="5" value="50">
-      </label>
-      <p class="note">Target proportion before availability fallback; missing POI customers are filled parametrically.</p>
-    </div>
-    <div id="parametric-options" class="option-group" hidden>
-      <label class="field"><span>Parametric distribution</span>
-        <select id="customer-mode">
-          <option value="random_clustered">Random + clustered</option>
-          <option value="clustered">Clustered</option>
-          <option value="random">Random</option>
+      <div id="hybrid-options" class="option-group" hidden>
+        <label class="field">
+          <span>Hybrid composition · <output id="hybrid-share-value" class="range-value">50% POI / 50% parametric</output></span>
+          <input id="hybrid-poi-share" type="range" min="0" max="100" step="5" value="50">
+        </label>
+        <p class="note">Target proportion before availability fallback; missing POI customers are filled parametrically.</p>
+      </div>
+      <div id="parametric-options" class="option-group" hidden>
+        <label class="field"><span>Parametric distribution</span>
+          <select id="customer-mode">
+            <option value="random_clustered">Random + clustered</option>
+            <option value="clustered">Clustered</option>
+            <option value="random">Random</option>
+          </select>
+        </label>
+        <div id="cluster-options" class="grid-2">
+          <label class="field"><span>Number of clusters</span><input id="cluster-seeds" type="number" value="4" min="1" step="1"></label>
+          <label class="field"><span>Pool radius (m)</span><input id="cluster-decay" type="number" value="800" min="1" step="50"></label>
+        </div>
+        <p id="cluster-note" class="note">The pool radius is the exponential decay distance: cluster attraction halves at this distance.</p>
+      </div>
+      <details class="advanced" id="adv-customers" data-advanced="customers">
+        <summary>Advanced</summary>
+        <div class="advanced-body">
+          <div class="field">
+            <div class="field-head">
+              <span>Depot position</span>
+              <button class="help-btn" type="button" data-help="help-depot" aria-expanded="false" aria-label="What the depot positions mean"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
+            </div>
+            <select id="depot-mode">
+              <option value="center">Centered</option>
+              <option value="random">Random</option>
+              <option value="corner">Excentered (corner)</option>
+            </select>
+            <div class="help-body" id="help-depot" hidden>
+              Which road intersection becomes node 1, the depot.
+              <dl>
+                <dt>Centered</dt><dd>Closest vertex to the mean of all vertices — short, balanced routes.</dd>
+                <dt>Random</dt><dd>A uniformly drawn vertex, so difficulty varies with the seed.</dd>
+                <dt>Excentered</dt><dd>Closest vertex to the south-west corner — long approach legs.</dd>
+              </dl>
+              In manual mode you can instead click a POI and mark it as the depot.
+            </div>
+          </div>
+          <div id="poi-attach-block">
+            <div class="field">
+              <div class="field-head">
+                <span>POI attachment</span>
+                <button class="help-btn" type="button" data-help="help-attach" aria-expanded="false" aria-label="How POIs bind to the road graph"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
+              </div>
+              <select id="poi-attach-mode">
+                <option value="nearest_node">Strict · POI must sit on an intersection</option>
+                <option value="nearest_vertex">Snap · move the POI to the nearest intersection</option>
+              </select>
+              <div class="help-body" id="help-attach" hidden>
+                How an amenity binds to the road graph, which decides how many of them can be customers at all.
+                <dl>
+                  <dt>Strict</dt><dd>The POI's nearest road node must itself be a graph intersection. Matches the
+                    published Julia pipeline exactly, and discards most of a city: an amenity whose closest node
+                    sits mid-segment is dropped even when a real intersection stands a metre further.</dd>
+                  <dt>Snap</dt><dd>The POI moves to the closest intersection within the radius below, the way
+                    hand-picked POIs have always worked. Far more of the extract becomes usable; each customer
+                    records how far its amenity moved.</dd>
+                </dl>
+              </div>
+            </div>
+            <label class="field" id="poi-attach-radius-field" hidden>
+              <span>Snap radius (m)</span>
+              <input id="poi-attach-radius" type="number" value="50" min="1" step="10">
+            </label>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section class="step">
+      <div class="step-head"><span class="step-index">3</span><span class="step-title">Problem</span></div>
+      <label class="field"><span>Problem type</span>
+        <select id="problem">
+          <option value="cvrp">CVRP · capacity only</option>
+          <option value="vrptw">VRPTW · capacity + time windows</option>
         </select>
       </label>
-      <div id="cluster-options" class="grid-2">
-        <label class="field"><span>Number of clusters</span><input id="cluster-seeds" type="number" value="4" min="1" step="1"></label>
-        <label class="field"><span>Pool radius (m)</span><input id="cluster-decay" type="number" value="800" min="1" step="50"></label>
+      <div class="field">
+        <div class="field-head">
+          <span>Demand type</span>
+          <button class="help-btn" type="button" data-help="help-demand" aria-expanded="false" aria-label="What the demand types mean"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
+        </div>
+        <select id="demand"></select>
+        <div class="help-body" id="help-demand" hidden>
+          The distribution the per-customer demand is drawn from. Type 6 is spatially correlated
+          (heavy customers cluster on one diagonal), type 7 mixes a few bulky customers into many small ones.
+          <dl id="help-demand-table"></dl>
+        </div>
       </div>
-      <p id="cluster-note" class="note">The pool radius is the exponential decay distance: cluster attraction halves at this distance.</p>
-    </div>
-    <label class="field"><span>Problem type</span>
-      <select id="problem">
-        <option value="cvrp">CVRP · capacity only</option>
-        <option value="vrptw">VRPTW · capacity + time windows</option>
-      </select>
-    </label>
-    <div class="field">
-      <div class="field-head">
-        <span>Demand type</span>
-        <button class="help-btn" type="button" data-help="help-demand" aria-expanded="false" aria-label="What the demand types mean">i</button>
+      <div class="field">
+        <div class="field-head">
+          <span>Route size band</span>
+          <button class="help-btn" type="button" data-help="help-band" aria-expanded="false" aria-label="What the route size bands mean"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
+        </div>
+        <select id="ars"></select>
+        <div class="help-body" id="help-band" hidden>
+          The target number of customers per route. A value <em>r</em> is drawn uniformly from the band and
+          sets the <strong>vehicle capacity</strong>, which in turn gives the fleet size
+          (<code>ceil(total demand / capacity)</code>). It is a target, not a hard route count.
+          <dl id="help-band-table"></dl>
+        </div>
       </div>
-      <select id="demand"></select>
-      <div class="help-body" id="help-demand" hidden>
-        The distribution the per-customer demand is drawn from. Type 6 is spatially correlated
-        (heavy customers cluster on one diagonal), type 7 mixes a few bulky customers into many small ones.
-        <dl id="help-demand-table"></dl>
+    </section>
+
+    <section class="step">
+      <div class="step-head">
+        <span class="step-index">4</span><span class="step-title">Run</span>
+        <button class="help-btn" type="button" data-help="help-run" aria-expanded="false" aria-label="What generating writes to the workspace"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
       </div>
-    </div>
-    <div class="field">
-      <div class="field-head">
-        <span>Route size band</span>
-        <button class="help-btn" type="button" data-help="help-band" aria-expanded="false" aria-label="What the route size bands mean">i</button>
+      <div class="help-body" id="help-run" hidden>
+        Runs the published Mamut Routing workbench pipeline locally: 3-metric CVRPLIB artifacts with
+        shared road / geo / distance sidecars, plus VRPTW twins on request. Everything is written to
+        your workspace.
       </div>
-      <select id="ars"></select>
-      <div class="help-body" id="help-band" hidden>
-        The target number of customers per route. A value <em>r</em> is drawn uniformly from the band and
-        sets the <strong>vehicle capacity</strong>, which in turn gives the fleet size
-        (<code>ceil(total demand / capacity)</code>). It is a target, not a hard route count.
-        <dl id="help-band-table"></dl>
+      <div id="gen-notice" class="preflight-line" hidden></div>
+      <div class="row">
+        <button id="preview" class="btn btn-secondary" type="button">Preview</button>
+        <button id="generate" class="btn" type="button">Generate</button>
       </div>
-    </div>
-    <div id="gen-notice" class="preflight-line" hidden></div>
-    <div class="row">
-      <button id="preview" class="btn btn-secondary" type="button">Preview</button>
-      <button id="generate" class="btn" type="button">Generate</button>
-    </div>
-    <div class="row">
-      <button id="bulk-open" class="btn btn-secondary" type="button">Bulk generation…</button>
-      <span id="bulk-count-badge" class="poi-count">0 instances</span>
-      <button id="bulk-download" class="btn btn-ghost" type="button" disabled>Download zip</button>
-    </div>
-    <p class="note">Runs the published Mamut Routing workbench pipeline locally: 3-metric CVRPLIB artifacts with shared road / geo / distance sidecars, plus VRPTW twins on request. Everything is written to your workspace.</p>
+      <div class="row">
+        <button id="bulk-open" class="btn btn-secondary" type="button">Bulk generation…</button>
+        <span id="bulk-count-badge" class="poi-count">0 instances</span>
+        <button id="bulk-download" class="btn btn-ghost" type="button" disabled>Download zip</button>
+      </div>
+    </section>
   </section>
 
-  <section class="section" id="jobsSection">
-    <div class="kicker">Jobs · persistent history</div>
-    <div id="jobList" class="job-list"><div class="empty-note">No workbench jobs yet.</div></div>
-    <pre id="jobLog" class="mono-output" hidden></pre>
-  </section>
 </aside>
 
 <aside class="panel panel-right">
+  <div class="panel-rail" role="toolbar" aria-label="Expand the selected-instance panel">
+    <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="instance" title="Instance" aria-label="Instance">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21c4.2-4 7-7.4 7-10.6a7 7 0 1 0-14 0C5 13.6 7.8 17 12 21z"/><circle cx="12" cy="10.2" r="2.4"/></svg>
+    </button>
+    <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="solve" title="Solve" aria-label="Solve">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg>
+    </button>
+    <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="runs" title="Runs" aria-label="Runs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.5" cy="7" r="2.5"/><circle cx="6.5" cy="17" r="2.5"/><circle cx="17.5" cy="12" r="2.5"/><path d="M6.5 9.5v5M9 7h4a2 2 0 0 1 2 2v1M9 17h4a2 2 0 0 0 2-2v-1"/></svg>
+    </button>
+  </div>
   <div class="kicker kicker-selected">Selected instance
     <button id="sheet-toggle" class="sheet-toggle" type="button" aria-expanded="true">Hide</button>
+    <button class="panel-toggle" type="button" data-panel-toggle="right" title="Collapse the panel" aria-label="Collapse the selected-instance panel">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
   </div>
   <div id="selEmpty" class="empty-note">Generate an instance or pick one in the Visualize tab to display its depot and customers. Solving is optional.</div>
   <div id="selBody" hidden>
@@ -940,10 +363,26 @@
       <div class="kicker" id="selObjLabel">MonoCost · local solve</div>
       <div class="sel-cost-row"><span class="sel-cost" id="selCost"></span><span class="chip chip-am" id="selMethod"></span></div>
     </div>
+
+    <!-- Five unrelated jobs used to stack in one 300px column: facts, solve config,
+         solution import, run comparison and the route legend. -->
+    <div class="tabs tabs-sm">
+      <button id="tabInstance" class="tab-btn tab-active" type="button">Instance</button>
+      <button id="tabSolve" class="tab-btn" type="button">Solve</button>
+      <button id="tabRuns" class="tab-btn" type="button">Runs</button>
+    </div>
+
+  <section id="instancePanel" class="tab-panel inspector-panel tab-panel-active">
     <dl class="sel-facts" id="selFacts"></dl>
-    <div class="field-head" style="margin-top:6px">
+    <div class="fading-rule" style="margin:8px 0"></div>
+    <div class="kicker">Routes · click to toggle</div>
+    <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
+  </section>
+
+  <section id="solvePanel" class="tab-panel inspector-panel">
+    <div class="field-head">
       <span class="kicker" style="margin:0">Solve target</span>
-      <button class="help-btn" type="button" data-help="help-metric" aria-expanded="false" aria-label="What the metric and objective mean">i</button>
+      <button class="help-btn" type="button" data-help="help-metric" aria-expanded="false" aria-label="What the metric and objective mean"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg></button>
     </div>
     <div class="help-body" id="help-metric" hidden>
       Every instance is written as three variants that differ only in arc costs, so a solution
@@ -979,7 +418,9 @@
     <div class="row">
       <button id="download" class="btn btn-ghost" type="button">Download zip</button>
     </div>
-    <div class="fading-rule" style="margin:8px 0"></div>
+  </section>
+
+  <section id="runsPanel" class="tab-panel inspector-panel">
     <div class="kicker">Validated solution runs</div>
     <div class="run-controls">
       <label class="field"><span>Displayed run</span><select id="solution-run"><option value="">Instance only · customer locations</option></select></label>
@@ -988,9 +429,7 @@
       <button id="compare" class="btn btn-secondary" type="button" disabled>Compare runs</button>
       <pre id="comparison-output" class="mono-output" hidden></pre>
     </div>
-    <div class="fading-rule" style="margin:8px 0"></div>
-    <div class="kicker">Routes · click to toggle</div>
-    <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
+  </section>
   </div>
 </aside>
 
@@ -999,7 +438,7 @@
     <div class="bulk-modal-header">
       <h2 id="bulk-modal-title">Bulk generation</h2>
       <span class="note">Build combinations on the left, then edit any row individually.</span>
-      <button id="bulk-close" class="bulk-modal-close" type="button" aria-label="Close">&times;</button>
+      <button id="bulk-close" class="bulk-modal-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="bulk-modal-body">
       <div class="bulk-modal-left">
@@ -1074,11 +513,39 @@
   </div>
 </div>
 
+<!-- Category picking moved off the form and over the map: 49 checkboxes cannot be
+     read in a 300px column, and expanding them inline doubled the form's scroll. -->
+<div id="poi-popover" class="popover poi-popover" hidden role="dialog" aria-modal="false" aria-labelledby="poi-popover-title">
+  <div class="popover-head">
+    <span id="poi-popover-title">POI categories</span>
+    <button id="poi-popover-close" class="popover-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="poi-toolbar">
+    <button id="poi-default" class="mini-btn" type="button">Defaults</button>
+    <button id="poi-all" class="mini-btn" type="button">Select all</button>
+    <button id="poi-clear" class="mini-btn" type="button">Clear</button>
+    <span id="poi-popover-count" class="poi-count"></span>
+  </div>
+  <input id="poi-search" type="search" placeholder="Filter categories…" aria-label="Filter categories">
+  <div id="poi-list" class="poi-list"></div>
+  <p class="note">City fetches store every listed category. These checks only filter which POIs generation may select.</p>
+</div>
+
+<!-- Help lives at body level so it escapes the panel's overflow clipping instead of
+     pushing the form it explains further down. -->
+<div id="help-popover" class="popover help-popover" hidden role="dialog" aria-modal="false">
+  <div class="popover-head">
+    <span id="help-popover-title">About this field</span>
+    <button id="help-popover-close" class="popover-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <div id="help-popover-body"></div>
+</div>
+
 <div id="confirm-modal" class="bulk-modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
   <div class="bulk-modal confirm-modal">
     <div class="bulk-modal-header">
       <h2 id="confirm-modal-title">Check the selection</h2>
-      <button id="confirm-close" class="bulk-modal-close" type="button" aria-label="Close">&times;</button>
+      <button id="confirm-close" class="bulk-modal-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
     </div>
     <div class="confirm-modal-body"><p id="confirm-text"></p></div>
     <div class="bulk-modal-footer">
@@ -1088,1862 +555,45 @@
   </div>
 </div>
 
-<div class="footer"><span class="dot" aria-hidden="true"></span><p id="status" title="">Ready.</p></div>
+<!-- Jobs and the status line used to sit in opposite corners, with the job history
+     buried at the bottom of the left panel's scroll. Merged into one bottom strip
+     that is a single line until you open it. -->
+<section class="activity" id="activity" aria-label="Activity">
+  <button class="activity-summary" id="activity-toggle" type="button" aria-expanded="false" aria-controls="activity-body">
+    <span class="dot" id="activity-dot" aria-hidden="true"></span>
+    <span id="status" title="">Ready.</span>
+    <span id="activity-count" class="poi-count"></span>
+    <svg class="activity-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>
+  </button>
+  <div class="activity-body" id="activity-body" hidden>
+    <div class="activity-toolbar">
+      <span class="kicker">Jobs · persistent history</span>
+      <label class="activity-filter">
+        <span class="sr-only">Filter jobs</span>
+        <select id="jobs-filter">
+          <option value="all">All</option>
+          <option value="active">Active</option>
+          <option value="failed">Failed</option>
+          <option value="completed">Completed</option>
+        </select>
+      </label>
+    </div>
+    <div id="jobList" class="job-list"><div class="empty-note">No workbench jobs yet.</div></div>
+    <!-- The log is a pinned pane rather than the last child of the scroller: appended
+         after a long job list it opened below the fold, so clicking Log looked dead. -->
+    <div class="job-log-pane" id="jobLogPane" hidden>
+      <div class="job-log-head">
+        <span class="kicker" id="jobLogTitle">Log</span>
+        <button id="jobLogClose" class="popover-close" type="button" aria-label="Close the log"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+      </div>
+      <pre id="jobLog" class="mono-output"></pre>
+    </div>
+  </div>
+</section>
 <button id="clear" class="map-clear-btn" type="button">Clear map</button>
 
+<script src="/static/nocturne.js"></script>
 <script src="/static/vendor/leaflet/leaflet.js"></script>
-<script>
-"use strict";
-
-/* Nocturne per-theme route palettes (VIVID_D / VIVID_L from the merged demo). */
-const ROUTE_COLORS_DARK = [
-  "#9d8bff", "#3cd6f5", "#45e8a5", "#ffc14d", "#ff7ab8",
-  "#7db1ff", "#c9ec55", "#d18cff", "#ff9866", "#3fe8cc",
-  "#e8e055", "#ff8f8f", "#66c2ff", "#9ff06b", "#f0d066",
-  "#b78cff", "#55f0e0", "#ffa8cc", "#8fd0f0", "#e8bb90",
-];
-const ROUTE_COLORS_LIGHT = [
-  "#5a43e8", "#0d94ba", "#0f9e68", "#c47f00", "#d63d8c",
-  "#2f6fd6", "#7a9e0d", "#9b4fd6", "#d65f2a", "#0da893",
-  "#94940d", "#d64f4f", "#1f7fd6", "#4f9e1f", "#b8930f",
-  "#7a4fd6", "#0d9e94", "#d66a9b", "#3d85ad", "#a87a4f",
-];
-const POI_CATEGORIES = [
-  "restaurant", "cafe", "bar", "fast_food", "pub", "school", "university",
-  "hospital", "clinic", "pharmacy", "dentist", "doctors", "veterinary",
-  "bank", "atm", "post_office", "police", "fire_station", "townhall", "courthouse",
-  "library", "theatre", "cinema", "arts_centre", "community_centre", "museum",
-  "place_of_worship", "marketplace", "fuel", "charging_station", "car_wash", "parking",
-  "bus_station", "taxi", "bicycle_rental", "ferry_terminal", "kindergarten", "college",
-  "nightclub", "biergarten", "ice_cream", "food_court", "bench", "drinking_water",
-  "toilets", "shower", "shelter", "waste_basket", "recycling",
-];
-const DEFAULT_POI_CATEGORIES = new Set([
-  "restaurant", "cafe", "bar", "fast_food", "pub", "school", "university",
-]);
-
-/* Mirrors generation/demands.py: demand_distribution_bounds and
-   avg_route_size_bounds. Kept in sync by tests/test_gui_server.py. */
-const DEMAND_TYPES = [
-  { value: 1, label: "Unitary", detail: "every demand = 1" },
-  { value: 2, label: "Small, large variance", detail: "1–10" },
-  { value: 3, label: "Small, small variance", detail: "5–10" },
-  { value: 4, label: "Large, large variance", detail: "1–100" },
-  { value: 5, label: "Large, small variance", detail: "50–100" },
-  { value: 6, label: "Quadrant-dependent", detail: "51–100 on one diagonal, 1–50 elsewhere" },
-  { value: 7, label: "Few large, many small", detail: "50–100 for ~1.5n/r of them, 1–10 for the rest" },
-];
-const ROUTE_SIZE_BANDS = [
-  { value: 1, label: "Ultra short", detail: "3–5 customers per route" },
-  { value: 2, label: "Very short", detail: "5–8" },
-  { value: 3, label: "Short", detail: "8–12" },
-  { value: 4, label: "Medium", detail: "12–16" },
-  { value: 5, label: "Long", detail: "16–25" },
-  { value: 6, label: "Very long", detail: "25–50" },
-  { value: 7, label: "Ultra long", detail: "50–200" },
-];
-const DEMAND_LABELS = new Map(DEMAND_TYPES.map((entry) => [entry.value, entry.label]));
-const BAND_LABELS = new Map(ROUTE_SIZE_BANDS.map((entry) => [entry.value, entry.label]));
-const BULK_CSV_COLUMNS = [
-  "problemType", "city", "nCustomers", "demandType", "avgRouteSize", "method", "seed",
-  "depotMode", "customerMode", "twMethod", "onlyIntersections", "clusterSeeds",
-  "clusterDecayMeters", "hybridPoiShare", "categories",
-];
-const BULK_INT_FIELDS = new Set(["nCustomers", "demandType", "avgRouteSize", "seed", "clusterSeeds"]);
-const BULK_FLOAT_FIELDS = new Set(["clusterDecayMeters", "hybridPoiShare"]);
-const SAMPLING_METHODS = ["poi_categories", "parametric_attach", "hybrid", "manual"];
-const DEPOT_MODES = ["center", "random", "corner"];
-const CUSTOMER_MODES = ["random_clustered", "clustered", "random"];
-const TW_METHODS = ["route_centered", "reachable_interval"];
-
-const isDark = () => document.documentElement.dataset.theme !== "light";
-const routeColor = (index) => (isDark() ? ROUTE_COLORS_DARK : ROUTE_COLORS_LIGHT)[index % 20];
-const markerColors = () => (isDark()
-  ? { depot: "#ff7a6e", poi: "#45e8a5", parametric: "#9d8bff" }
-  : { depot: "#e8503f", poi: "#0f9e68", parametric: "#5b43e8" });
-
-const el = (id) => document.getElementById(id);
-const status = (text) => { el("status").textContent = text; el("status").title = text; };
-
-/* ── Map ── */
-const map = L.map("map", { zoomControl: false }).setView([46.5, 2.5], 6);
-const positron = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-  maxZoom: 20, subdomains: "abcd", attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
-});
-const darkMatter = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-  maxZoom: 20, subdomains: "abcd", attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
-});
-let baseLayer = isDark() ? darkMatter : positron;
-baseLayer.addTo(map);
-
-const previewLayers = L.layerGroup().addTo(map);
-const instanceNodeLayers = L.layerGroup().addTo(map);
-const poiPickLayers = L.layerGroup().addTo(map);
-let routeLayerGroups = [];
-
-/* ── Theme ── */
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  try { localStorage.setItem("mamut-tools-theme", theme); } catch (error) { /* private mode */ }
-  const nextBase = isDark() ? darkMatter : positron;
-  if (nextBase !== baseLayer) {
-    map.removeLayer(baseLayer);
-    nextBase.addTo(map);
-    baseLayer = nextBase;
-  }
-  redrawRoutes();
-}
-document.querySelectorAll("[data-theme-pick]").forEach((button) => {
-  button.addEventListener("click", () => applyTheme(button.dataset.themePick));
-});
-
-/* ── API ── */
-async function api(path, body) {
-  const response = await fetch(path, body === undefined ? {} : {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-  });
-  const data = await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }));
-  if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
-  return data;
-}
-
-async function apiBlob(path, body) {
-  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.blob();
-}
-
-async function apiDelete(path) {
-  const response = await fetch(path, { method: "DELETE" });
-  const data = await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }));
-  if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
-  return data;
-}
-
-async function submitJob(kind, payload) {
-  const data = await api("/api/jobs", { kind, payload });
-  state.submittedJobs.add(data.job.job_id);
-  state.jobs = [data.job, ...state.jobs.filter((job) => job.job_id !== data.job.job_id)];
-  renderJobs();
-  return data.job;
-}
-
-function saveBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 5000);
-}
-
-/* ── State ── */
-const state = {
-  instances: [],
-  selected: null,
-  hiddenRoutes: new Set(),
-  lastRendered: null,
-  bulkBases: null,
-  jobs: [],
-  submittedJobs: new Set(),
-  handledJobs: new Set(),
-  solutionRuns: [],
-  solutionReferences: [],
-  selectedRunId: null,
-  previewGeojson: null,
-  // Manual POI picking
-  poiPool: [],
-  poiPoolCity: null,
-  manualPicks: new Map(),
-  manualDepotKey: null,
-  osmAudit: null,
-  // Bulk configuration table
-  bulkRows: [],
-  bulkNextId: 1,
-};
-
-/* ── Tabs ── */
-function activateTab(name) {
-  el("tabVisualize").classList.toggle("tab-active", name === "visualize");
-  el("tabGenerate").classList.toggle("tab-active", name === "generate");
-  el("visualizePanel").classList.toggle("tab-panel-active", name === "visualize");
-  el("generatePanel").classList.toggle("tab-panel-active", name === "generate");
-}
-el("tabVisualize").addEventListener("click", () => activateTab("visualize"));
-el("tabGenerate").addEventListener("click", () => activateTab("generate"));
-
-/* ── Generation inputs ── */
-function selectedPoiCategories() {
-  return [...el("poi-list").querySelectorAll("input[type='checkbox']:checked")]
-    .map((checkbox) => checkbox.value);
-}
-
-function updatePoiCount() {
-  el("poi-count").textContent = `${selectedPoiCategories().length} selected`;
-}
-
-function setPoiSelection(categories) {
-  const selected = new Set(categories);
-  el("poi-list").querySelectorAll("input[type='checkbox']").forEach((checkbox) => {
-    checkbox.checked = selected.has(checkbox.value);
-  });
-  updatePoiCount();
-}
-
-function renderPoiCategories() {
-  const list = el("poi-list");
-  list.innerHTML = "";
-  POI_CATEGORIES.forEach((category) => {
-    const label = document.createElement("label");
-    label.className = "poi-option";
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.value = category;
-    checkbox.checked = DEFAULT_POI_CATEGORIES.has(category);
-    checkbox.addEventListener("change", updatePoiCount);
-    const text = document.createElement("span");
-    text.textContent = category.replaceAll("_", " ");
-    label.title = category;
-    label.append(checkbox, text);
-    list.append(label);
-  });
-  updatePoiCount();
-}
-
-/* ── Labelled dials and inline help ── */
-function fillBandSelects() {
-  const fill = (id, entries, selected) => {
-    const select = el(id);
-    select.innerHTML = "";
-    entries.forEach((entry) => {
-      const option = new Option(`${entry.value} · ${entry.label}`, String(entry.value));
-      option.title = entry.detail;
-      select.append(option);
-    });
-    select.value = String(selected);
-  };
-  fill("demand", DEMAND_TYPES, 7);
-  fill("ars", ROUTE_SIZE_BANDS, 4);
-
-  const table = (id, entries) => {
-    el(id).innerHTML = entries
-      .map((entry) => `<dt>${entry.value}</dt><dd>${entry.label} — ${entry.detail}</dd>`)
-      .join("");
-  };
-  table("help-demand-table", DEMAND_TYPES);
-  table("help-band-table", ROUTE_SIZE_BANDS);
-}
-
-document.querySelectorAll(".help-btn").forEach((button) => {
-  button.addEventListener("click", () => {
-    const body = el(button.dataset.help);
-    if (!body) return;
-    const showing = body.hidden;
-    body.hidden = !showing;
-    button.setAttribute("aria-expanded", showing ? "true" : "false");
-  });
-});
-
-function updateGenerationControls() {
-  const method = el("method").value;
-  const hybridPoiPercent = Number(el("hybrid-poi-share").value);
-  const manual = method === "manual";
-  const usesPoi = method === "poi_categories" || (method === "hybrid" && hybridPoiPercent > 0);
-  const usesParametric = method === "parametric_attach" || (method === "hybrid" && hybridPoiPercent < 100);
-  // Manual picking reuses the category checkboxes to filter what the map shows.
-  el("poi-picker").hidden = !usesPoi && !manual;
-  el("manual-options").hidden = !manual;
-  el("hybrid-options").hidden = method !== "hybrid";
-  el("parametric-options").hidden = !usesParametric;
-  const usesClusters = usesParametric && el("customer-mode").value !== "random";
-  el("cluster-options").hidden = !usesClusters;
-  el("cluster-note").hidden = !usesClusters;
-  // The radius only means anything when POIs are allowed to move.
-  el("poi-attach-radius-field").hidden = el("poi-attach-mode").value !== "nearest_vertex";
-  // n is derived from the picks in manual mode.
-  el("n").disabled = manual;
-  if (!manual) clearPoiPool();
-}
-
-function updateHybridShare() {
-  const poiPercent = Number(el("hybrid-poi-share").value);
-  el("hybrid-share-value").textContent = `${poiPercent}% POI / ${100 - poiPercent}% parametric`;
-}
-
-el("poi-default").addEventListener("click", () => setPoiSelection(DEFAULT_POI_CATEGORIES));
-el("poi-all").addEventListener("click", () => setPoiSelection(POI_CATEGORIES));
-el("poi-clear").addEventListener("click", () => setPoiSelection([]));
-el("method").addEventListener("change", updateGenerationControls);
-el("customer-mode").addEventListener("change", updateGenerationControls);
-el("poi-attach-mode").addEventListener("change", updateGenerationControls);
-el("hybrid-poi-share").addEventListener("input", () => {
-  updateHybridShare();
-  updateGenerationControls();
-});
-
-function requestBody() {
-  const method = el("method").value;
-  const categories = selectedPoiCategories();
-  const hybridPoiShare = Number(el("hybrid-poi-share").value) / 100;
-  if ((method === "poi_categories" || (method === "hybrid" && hybridPoiShare > 0)) && !categories.length) {
-    throw new Error("Select at least one POI category for this sampling method.");
-  }
-  // Sent as {type, id} pairs: an id alone would be ambiguous between a node, a
-  // way and a relation carrying the same number.
-  const manualPois = [...state.manualPicks.keys()].map((key) => {
-    const [osmType, osmId] = key.split("/");
-    return { type: osmType, id: Number(osmId) };
-  });
-  const depotKey = state.manualDepotKey;
-  if (method === "manual") {
-    const customers = [...state.manualPicks.keys()].filter((key) => key !== depotKey).length;
-    if (customers < 2) {
-      throw new Error("Pick at least 2 POIs (besides the depot) on the map for manual generation.");
-    }
-  }
-  return {
-    city: el("city").value,
-    manualPois: method === "manual" ? manualPois : undefined,
-    manualDepotPoi: method === "manual" && depotKey
-      ? { type: depotKey.split("/")[0], id: Number(depotKey.split("/")[1]) }
-      : undefined,
-    nCustomers: Number(el("n").value),
-    seed: Number(el("seed").value),
-    method,
-    depotMode: el("depot-mode").value,
-    customerMode: el("customer-mode").value,
-    clusterSeeds: Number(el("cluster-seeds").value),
-    clusterDecayMeters: Number(el("cluster-decay").value),
-    hybridPoiShare,
-    poiAttachMode: el("poi-attach-mode").value,
-    poiAttachRadiusM: Number(el("poi-attach-radius").value) || 50,
-    categories,
-    demandType: Number(el("demand").value),
-    avgRouteSize: Number(el("ars").value),
-    deriveVrptw: el("problem").value === "vrptw",
-  };
-}
-
-async function loadInstances(selectBase) {
-  const data = await api("/api/workbench/instances");
-  const previous = new Map(state.instances.map((instance) => [`${instance.folder}/${instance.base_name}`, instance]));
-  state.instances = (data.instances || []).map((entry) => {
-    const kept = previous.get(`${entry.folder}/${entry.base_name}`);
-    return {
-      instance_id: entry.instance_id,
-      base_name: entry.base_name,
-      folder: entry.folder,
-      files: entry.files,
-      summary: entry.summary || {},
-      vrptw: entry.has_vrptw_twin || null,
-      city: entry.city || "?",
-      n: entry.n_customers ?? "?",
-      seed: entry.seed ?? "?",
-      solution_count: entry.solution_count || 0,
-      solved: kept?.solved || null,
-      rendered: kept?.rendered || null,
-      mapData: kept?.mapData || null,
-    };
-  });
-  if (selectBase) {
-    const index = state.instances.findIndex((instance) => instance.base_name === selectBase);
-    if (index >= 0) selectInstance(index);
-  } else if (state.selected) {
-    const index = state.instances.findIndex((instance) => instance.base_name === state.selected.base_name && instance.folder === state.selected.folder);
-    state.selected = index >= 0 ? state.instances[index] : null;
-  }
-  renderInstanceList();
-  renderSelected();
-}
-
-async function loadCities() {
-  const data = await api("/api/workbench/generation/cities");
-  const select = el("city");
-  select.innerHTML = "";
-  data.cities.forEach((city) => {
-    const option = document.createElement("option");
-    option.value = city.label;
-    option.textContent = city.label;
-    select.append(option);
-  });
-  status(data.cities.length
-    ? `${data.cities.length} city extract(s) in the workspace.`
-    : "No OSM extracts yet: fetch a city first.");
-}
-
-/* ── Map drawing ── */
-function clearRouteLayers() {
-  routeLayerGroups.forEach((group) => map.removeLayer(group));
-  routeLayerGroups = [];
-}
-
-function drawPreview(geojson) {
-  state.previewGeojson = geojson;
-  clearRouteLayers();
-  instanceNodeLayers.clearLayers();
-  previewLayers.clearLayers();
-  const colors = markerColors();
-  const bounds = [];
-  geojson.features.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
-    bounds.push([lat, lon]);
-    const tag = String(feature.properties.source_tag || "");
-    const role = feature.properties.role === "depot"
-      ? "depot"
-      : (tag.startsWith("poi") ? "poi" : "parametric");
-    L.circleMarker([lat, lon], {
-      radius: role === "depot" ? 7 : 4,
-      color: colors[role],
-      fillColor: colors[role],
-      fillOpacity: 0.85,
-      weight: role === "depot" ? 2 : 1,
-    }).bindTooltip(nodeTooltip(feature.properties)).addTo(previewLayers);
-  });
-  if (bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
-}
-
-/* What a merged amenity reads as: its name, or its category when unnamed, and
-   the element type when it is an outline rather than a point — otherwise a list
-   of names gives no clue which of them came from a way or a relation. */
-function mergedPoiLabel(entry) {
-  const base = entry.name || `(unnamed ${String(entry.category || "poi").replaceAll("_", " ")})`;
-  return entry.osm_type && entry.osm_type !== "node" ? `${base} [${entry.osm_type}]` : base;
-}
-
-/* A node's label: its OSM name when the pipeline captured one, else the
-   amenity, else just the source tag. */
-function nodeTooltip(properties) {
-  const parts = [`#${properties.instance_node_id}`];
-  if (properties.poi_name) parts.push(properties.poi_name);
-  else if (properties.poi_category) parts.push(properties.poi_category.replaceAll("_", " "));
-  parts.push(String(properties.source_tag || ""));
-  // Several amenities on one road point collapse into this single customer;
-  // naming them is the only way to see what the node really stands for.
-  const merged = properties.poi_merged || [];
-  if (merged.length) {
-    parts.push(`+${merged.length} here: ${merged.map(mergedPoiLabel).join(", ")}`);
-  }
-  // Worth showing: a way or relation POI is a building outline reduced to its
-  // centre, so its position is approximate in a way a node's is not.
-  if (properties.poi_osm_type && properties.poi_osm_type !== "node") {
-    parts.push(`${properties.poi_osm_type} centre`);
-  }
-  if (properties.snap_distance_m > 1) parts.push(`snapped ${Math.round(properties.snap_distance_m)} m`);
-  return parts.join(" · ");
-}
-
-/* ── Manual POI picking ── */
-function poiLabel(properties) {
-  const base = properties.name
-    || `(unnamed ${String(properties.category || "poi").replaceAll("_", " ")})`;
-  // Way and relation POIs are outlines reduced to their centre; saying so also
-  // separates two picks that share a name but not an element type.
-  const kind = properties.osm_type && properties.osm_type !== "node"
-    ? ` [${properties.osm_type}]`
-    : "";
-  return `${base}${kind}`;
-}
-
-function clearPoiPool() {
-  poiPickLayers.clearLayers();
-  state.poiPool = [];
-  state.poiPoolCity = null;
-}
-
-async function loadPoiPool() {
-  const city = el("city").value;
-  if (!city) throw new Error("Select a city first.");
-  const categories = selectedPoiCategories();
-  const query = new URLSearchParams({ city, categories: categories.join(",") });
-  const data = await api(`/api/workbench/generation/pois?${query.toString()}`);
-  // Picks from another city cannot resolve against this extract. Compared
-  // against the city the pool was last loaded for, not against data.city, which
-  // is the request's own parameter echoed back and so can never differ.
-  const previousCity = state.poiPoolCity;
-  const dropped = previousCity && previousCity !== city ? state.manualPicks.size : 0;
-  if (dropped) {
-    state.manualPicks.clear();
-    state.manualDepotKey = null;
-  }
-  state.poiPool = data.geojson.features;
-  state.poiPoolCity = city;
-  renderPoiMarkers(true);
-  el("manual-available").textContent = data.truncated
-    ? `${data.returned} of ${data.matching} matching POI(s) shown (capped) · ${data.named} named.`
-      + " Narrow the categories to see the rest."
-    : `${data.returned} POI(s) shown of ${data.total_in_extract} in the extract · ${data.named} named.`;
-  status(`Loaded ${data.returned} POI(s) for ${city}; click markers to pick them.`
-    + (dropped ? ` Cleared ${dropped} pick(s) made in ${previousCity}.` : ""));
-}
-
-/* OSM ids repeat across element types — node 42 and way 42 are different places
-   — so a pick is identified by both halves. */
-function poiKey(properties) {
-  return `${properties.osm_type || "node"}/${properties.osm_id}`;
-}
-
-function renderPoiMarkers(fit = false) {
-  poiPickLayers.clearLayers();
-  const colors = markerColors();
-  const bounds = [];
-  state.poiPool.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
-    const key = poiKey(feature.properties);
-    const picked = state.manualPicks.has(key);
-    const isDepot = state.manualDepotKey === key;
-    bounds.push([lat, lon]);
-    const marker = L.circleMarker([lat, lon], {
-      radius: isDepot ? 7 : picked ? 5.5 : 3.5,
-      color: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
-      fillColor: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
-      fillOpacity: picked || isDepot ? 0.9 : 0.35,
-      weight: picked || isDepot ? 2 : 1,
-    });
-    const suffix = isDepot ? " · DEPOT" : picked ? " · picked" : "";
-    marker.bindTooltip(`${poiLabel(feature.properties)}${suffix}`);
-    marker.on("click", (event) => {
-      // Shift-click promotes a POI to the depot instead of toggling it.
-      if (event.originalEvent && event.originalEvent.shiftKey) setManualDepot(key, feature);
-      else toggleManualPick(key, feature);
-    });
-    marker.addTo(poiPickLayers);
-  });
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [50, 50] });
-  renderManualPicks();
-}
-
-function toggleManualPick(key, feature) {
-  if (state.manualPicks.has(key)) {
-    state.manualPicks.delete(key);
-    if (state.manualDepotKey === key) state.manualDepotKey = null;
-  } else {
-    state.manualPicks.set(key, feature.properties);
-  }
-  renderPoiMarkers();
-}
-
-function setManualDepot(key, feature) {
-  if (!state.manualPicks.has(key)) state.manualPicks.set(key, feature.properties);
-  state.manualDepotKey = state.manualDepotKey === key ? null : key;
-  renderPoiMarkers();
-}
-
-function renderManualPicks() {
-  const customers = [...state.manualPicks.keys()].filter((key) => key !== state.manualDepotKey).length;
-  el("manual-count").textContent = String(customers);
-  const list = el("manual-list");
-  list.innerHTML = "";
-  if (!state.manualPicks.size) {
-    list.innerHTML = '<div class="empty-note">No POI picked yet.</div>';
-    return;
-  }
-  state.manualPicks.forEach((properties, key) => {
-    const row = document.createElement("div");
-    row.className = "picked-row";
-    const name = document.createElement("span");
-    name.className = "nm";
-    name.textContent = poiLabel(properties);
-    row.append(name);
-    if (state.manualDepotKey === key) {
-      const flag = document.createElement("span");
-      flag.className = "depot-flag";
-      flag.textContent = "depot";
-      row.append(flag);
-    }
-    const category = document.createElement("span");
-    category.className = "cat";
-    category.textContent = String(properties.category || "").replaceAll("_", " ");
-    row.append(category);
-    const remove = document.createElement("button");
-    remove.className = "bulk-delete-btn";
-    remove.type = "button";
-    remove.textContent = "×";
-    remove.title = "Remove this pick";
-    remove.addEventListener("click", () => {
-      state.manualPicks.delete(key);
-      if (state.manualDepotKey === key) state.manualDepotKey = null;
-      renderPoiMarkers();
-    });
-    row.append(remove);
-    list.append(row);
-  });
-}
-
-el("manual-load").addEventListener("click", async () => {
-  try {
-    await loadPoiPool();
-  } catch (error) { status(`Cannot load POIs: ${error.message}`); }
-});
-el("manual-clear").addEventListener("click", () => {
-  state.manualPicks.clear();
-  state.manualDepotKey = null;
-  renderPoiMarkers();
-});
-el("manual-depot-clear").addEventListener("click", () => {
-  state.manualDepotKey = null;
-  renderPoiMarkers();
-});
-
-function drawInstanceNodes(routes = null, fit = false) {
-  instanceNodeLayers.clearLayers();
-  const mapData = state.selected?.mapData;
-  if (!mapData?.geojson?.features) return [];
-  const assignments = new Map();
-  (routes || []).forEach((route, routeIndex) => {
-    route.forEach((modelNodeId) => assignments.set(Number(modelNodeId), routeIndex));
-  });
-  const colors = markerColors();
-  const bounds = [];
-  mapData.geojson.features.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
-    const properties = feature.properties || {};
-    const isDepot = properties.role === "depot";
-    const routeIndex = assignments.get(Number(properties.model_node_id));
-    const color = isDepot
-      ? colors.depot
-      : (routeIndex == null
-        ? (String(properties.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric)
-        : routeColor(routeIndex));
-    const marker = L.circleMarker([lat, lon], {
-      radius: isDepot ? 7 : 5,
-      color,
-      fillColor: color,
-      fillOpacity: 0.9,
-      weight: isDepot ? 3 : 2,
-    });
-    const label = isDepot ? "Depot" : `Customer ${properties.model_node_id}`;
-    const named = properties.poi_name ? ` · ${properties.poi_name}` : "";
-    // The amenities that collapsed onto this same road point, so a node holding
-    // several places does not read as one arbitrary winner.
-    const merged = properties.poi_merged || [];
-    const alsoHere = merged.length
-      ? ` · +${merged.length} here: ${merged.map(mergedPoiLabel).join(", ")}`
-      : "";
-    // Non-zero when the amenity was snapped to a routable point rather than
-    // sitting on one, so the node is not exactly where the place is.
-    const snapped = properties.snap_distance_m > 1
-      ? ` · snapped ${Math.round(properties.snap_distance_m)} m`
-      : "";
-    marker.bindTooltip(
-      `${label}${named} · demand ${properties.demand} · ${properties.source_tag}`
-      + `${snapped}${alsoHere}`);
-    marker.addTo(instanceNodeLayers);
-    bounds.push([lat, lon]);
-  });
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
-  return bounds;
-}
-
-function drawRoutes(rendered, fit) {
-  clearRouteLayers();
-  previewLayers.clearLayers();
-  const bounds = [];
-  rendered.geojson.features.forEach((feature, index) => {
-    const group = L.layerGroup();
-    const line = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-    bounds.push(...line);
-    L.polyline(line, { color: routeColor(index), weight: 3, opacity: 0.9 })
-      .bindTooltip(`R${feature.properties.route_index}: ${feature.properties.stops} stops, load ${feature.properties.load} (${feature.properties.render_mode})`)
-      .addTo(group);
-    routeLayerGroups.push(group);
-    if (!state.hiddenRoutes.has(index)) group.addTo(map);
-  });
-  bounds.push(...drawInstanceNodes(state.selected?.solved?.routes || [], false));
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
-}
-
-function redrawRoutes() {
-  if (state.previewGeojson) {
-    drawPreview(state.previewGeojson);
-  } else if (state.lastRendered) {
-    drawRoutes(state.lastRendered, false);
-  } else if (state.selected?.mapData) {
-    drawInstanceNodes(null, false);
-  }
-  renderLegend();
-}
-
-/* ── Visualize tab list ── */
-function renderInstanceList() {
-  const list = el("instList");
-  if (!state.instances.length) {
-    list.innerHTML = '<div class="empty-note">Nothing generated yet. Use the Generate tab: generated instances appear here, ready to preview, solve and render on the map.</div>';
-    return;
-  }
-  list.innerHTML = "";
-  state.instances.forEach((instance, index) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "inst-row" + (state.selected === instance ? " selected" : "");
-    const twin = instance.vrptw ? ' <span class="chip chip-acc">VRPTW twin</span>' : "";
-    const saved = instance.solution_count
-      ? ` <span class="chip chip-gr">${instance.solution_count} saved solution${instance.solution_count === 1 ? "" : "s"}</span>`
-      : "";
-    row.innerHTML = `<span class="inst-head"><span class="inst-name">${instance.base_name}</span>${twin}${saved}</span>` +
-      `<span class="inst-meta">${instance.city} · n=${instance.n} · seed ${instance.seed} · capacity ${instance.summary.capacity}</span>`;
-    row.addEventListener("click", () => selectInstance(index));
-    list.append(row);
-  });
-}
-
-/* ── Selected instance panel ── */
-function renderSelected() {
-  const instance = state.selected;
-  el("selEmpty").hidden = Boolean(instance);
-  el("selBody").hidden = !instance;
-  if (!instance) return;
-  el("selName").textContent = instance.base_name;
-  el("selMeta").textContent = `CVRP · ${instance.city} · n=${instance.n}`;
-  const facts = [
-    ["Capacity", instance.summary.capacity],
-    ["Expected routes", instance.summary.route_count != null ? `~${instance.summary.route_count}` : "n/a"],
-    ["Seed", instance.seed],
-    ["Folder", instance.folder.split("/").slice(-1)[0]],
-    ["Saved solutions", instance.solution_count],
-  ];
-  if (instance.vrptw) facts.push(["VRPTW twin", "derived"]);
-  if (instance.solved) {
-    // Which of the three metric variants this cost actually belongs to.
-    facts.push(["Solved on", solvedVariantFile(instance)]);
-  }
-  el("selFacts").innerHTML = facts
-    .map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`)
-    .join("");
-  if (instance.solved) {
-    const metric = runMetric(instance.solved);
-    el("selObjective").hidden = false;
-    el("selObjLabel").textContent =
-      `${metric} · ${instance.solved.objective_function || "MonoCost"} · ${runSourceLabel(instance.solved)}`;
-    el("selCost").textContent = String(instance.solved.cost);
-    el("selMethod").textContent = instance.solved.method || "pyvrp";
-  } else {
-    el("selObjective").hidden = true;
-  }
-  renderLegend();
-}
-
-function renderLegend() {
-  const legend = el("legend");
-  const instance = state.selected;
-  if (!instance || !instance.solved || !state.lastRendered) {
-    legend.innerHTML = '<div class="empty-note">Customer positions are displayed on the map. Select or create a saved solution to draw routes.</div>';
-    return;
-  }
-  legend.innerHTML = "";
-  state.lastRendered.geojson.features.forEach((feature, index) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "legend-row" + (state.hiddenRoutes.has(index) ? " off" : "");
-    row.innerHTML = `<span class="dot" style="background:${routeColor(index)}"></span>` +
-      `<span class="lbl">R${feature.properties.route_index}</span>` +
-      `<span class="meta">${feature.properties.stops} stops · load ${feature.properties.load}</span>`;
-    row.addEventListener("click", () => {
-      if (state.hiddenRoutes.has(index)) {
-        state.hiddenRoutes.delete(index);
-        routeLayerGroups[index]?.addTo(map);
-      } else {
-        state.hiddenRoutes.add(index);
-        if (routeLayerGroups[index]) map.removeLayer(routeLayerGroups[index]);
-      }
-      row.classList.toggle("off", state.hiddenRoutes.has(index));
-    });
-    legend.append(row);
-  });
-}
-
-function selectInstance(index, preferredRunId = null) {
-  state.selected = state.instances[index];
-  state.selected.solved = null;
-  state.selected.rendered = null;
-  state.solutionRuns = [];
-  state.solutionReferences = [];
-  state.selectedRunId = null;
-  state.previewGeojson = null;
-  state.hiddenRoutes = new Set();
-  state.lastRendered = null;
-  previewLayers.clearLayers();
-  instanceNodeLayers.clearLayers();
-  clearRouteLayers();
-  // A half-filled import belongs to the instance it was opened for.
-  el("import-panel").hidden = true;
-  renderInstanceList();
-  renderSelected();
-  return loadSolutionRuns(preferredRunId).catch((error) => {
-    status(`Cannot load saved solutions: ${error.message}`);
-  });
-}
-
-async function loadInstanceMapData(instance = state.selected) {
-  if (!instance) return null;
-  if (!instance.mapData) {
-    instance.mapData = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/map-data`);
-  }
-  return state.selected === instance ? instance.mapData : null;
-}
-
-async function displayInstanceOnly(fit = true) {
-  const instance = state.selected;
-  if (!instance) return;
-  await loadInstanceMapData(instance);
-  if (state.selected !== instance) return;
-  state.selectedRunId = null;
-  instance.solved = null;
-  instance.rendered = null;
-  state.lastRendered = null;
-  state.hiddenRoutes = new Set();
-  state.previewGeojson = null;
-  previewLayers.clearLayers();
-  clearRouteLayers();
-  drawInstanceNodes(null, fit);
-  refreshSolutionControls();
-  renderSelected();
-  status(`Displayed ${instance.base_name}: depot and ${instance.n} customer positions.`);
-}
-
-/* ── Persistent solutions ── */
-function allSolutionRecords() {
-  return [...state.solutionRuns, ...state.solutionReferences];
-}
-
-/* The metric a run was produced on. Every instance ships shortest/fastest/
-   euclidean variants, so a cost is meaningless without it. */
-function runMetric(run) {
-  return run?.metadata?.metric || "unknown metric";
-}
-
-function runSourceLabel(run) {
-  if (run.source === "bks") return "BKS";
-  if (run.source === "imported") return `imported${run.solver && run.solver !== "external" ? ` · ${run.solver}` : ""}`;
-  return run.created_at ? new Date(run.created_at).toLocaleString() : "saved run";
-}
-
-function solvedVariantFile(instance) {
-  const metric = runMetric(instance.solved);
-  const file = instance.files?.[metric];
-  return file || `${instance.base_name}_${metric}.vrp`;
-}
-
-function solutionLabel(run) {
-  const validity = run.validation?.valid ? "valid" : "invalid";
-  const problem = run.instance_path && /cvrptw/i.test(String(run.instance_path)) ? "VRPTW" : "CVRP";
-  return `${runMetric(run)} · ${problem} · ${runSourceLabel(run)} · ${run.objective_function}`
-    + ` · cost ${run.cost ?? "?"} · ${run.num_routes} routes · ${validity}`;
-}
-
-function refreshSolutionControls() {
-  const runs = allSolutionRecords();
-  const runSelect = el("solution-run");
-  const comparisonSelect = el("comparison-run");
-  runSelect.innerHTML = "";
-  runSelect.append(new Option("Instance only · customer locations", ""));
-  if (!runs.length) {
-    comparisonSelect.innerHTML = '<option value="">Select a reference run</option>';
-    el("compare").disabled = true;
-    el("solution-validation").className = "validation-line";
-    el("solution-validation").textContent = "No saved solutions yet; instance data is stored locally.";
-    return;
-  }
-  runs.forEach((run) => runSelect.append(new Option(solutionLabel(run), run.run_id)));
-  if (state.selectedRunId && !runs.some((run) => run.run_id === state.selectedRunId)) {
-    state.selectedRunId = null;
-  }
-  runSelect.value = state.selectedRunId || "";
-  const selected = runs.find((run) => run.run_id === state.selectedRunId);
-  comparisonSelect.innerHTML = "";
-  comparisonSelect.append(new Option("Select a reference run", ""));
-  runs
-    .filter((run) => run.run_id !== state.selectedRunId
-      && run.objective_function === selected?.objective_function
-      && run.metadata?.metric === selected?.metadata?.metric)
-    .forEach((run) => comparisonSelect.append(new Option(solutionLabel(run), run.run_id)));
-  el("compare").disabled = !selected || comparisonSelect.options.length <= 1;
-  if (!selected) {
-    el("solution-validation").className = "validation-line";
-    el("solution-validation").textContent = `${state.solutionRuns.length} saved solution run(s) available locally.`;
-    return;
-  }
-  const validation = selected?.validation || {};
-  const metric = runMetric(selected);
-  const line = el("solution-validation");
-  line.className = `validation-line ${validation.valid ? "valid" : "invalid"}`;
-  line.textContent = validation.valid
-    ? `Validated on the ${metric} variant: canonical cost ${validation.routing_cost}, ${validation.num_routes} route(s).`
-    : `Invalid: ${validation.error_message || validation.status || "checker rejected this solution"}`;
-  // Only same-metric runs can be compared, so say so rather than leaving an
-  // empty reference list looking broken.
-  if (validation.valid && el("solve-metric").value !== metric) {
-    line.className = "validation-line";
-    line.textContent += ` The Metric selector is on ${el("solve-metric").value}; only ${metric} runs compare with this one.`;
-  }
-}
-
-async function displaySolutionRun(runId, fit = true) {
-  const instance = state.selected;
-  if (!instance) return;
-  if (!runId) {
-    await displayInstanceOnly(fit);
-    return;
-  }
-  const run = allSolutionRecords().find((value) => value.run_id === runId);
-  if (!run) return;
-  await loadInstanceMapData(instance);
-  if (state.selected !== instance) return;
-  state.selectedRunId = runId;
-  instance.solved = run;
-  const metric = run.metadata?.metric || el("solve-metric").value || "fastest";
-  el("solve-metric").value = metric;
-  const rendered = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/${encodeURIComponent(runId)}/render?metric=${encodeURIComponent(metric)}`, {});
-  if (state.selected !== instance) return;
-  instance.rendered = rendered;
-  state.lastRendered = rendered;
-  state.previewGeojson = null;
-  state.hiddenRoutes = new Set();
-  previewLayers.clearLayers();
-  drawRoutes(rendered, fit);
-  refreshSolutionControls();
-  renderSelected();
-  status(`Displayed ${run.source === "bks" ? "BKS" : "saved run"}: cost ${run.cost}, ${run.num_routes} routes; ${rendered.summary.render_mode}.`);
-}
-
-async function loadSolutionRuns(preferredRunId = null) {
-  const instance = state.selected;
-  if (!instance) return;
-  const [data] = await Promise.all([
-    api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions`),
-    loadInstanceMapData(instance),
-  ]);
-  if (state.selected !== instance) return;
-  state.solutionRuns = data.runs || [];
-  state.solutionReferences = data.references || [];
-  instance.solution_count = state.solutionRuns.length;
-  state.selectedRunId = preferredRunId;
-  renderInstanceList();
-  refreshSolutionControls();
-  if (state.selectedRunId) {
-    await displaySolutionRun(state.selectedRunId, true);
-  } else {
-    await displayInstanceOnly(true);
-  }
-}
-
-el("solution-run").addEventListener("change", (event) => {
-  displaySolutionRun(event.target.value, true).catch((error) => status(`Cannot display solution: ${error.message}`));
-});
-
-el("comparison-run").addEventListener("change", (event) => {
-  el("compare").disabled = !event.target.value;
-});
-
-el("compare").addEventListener("click", async () => {
-  if (!state.selected || !state.selectedRunId || !el("comparison-run").value) return;
-  try {
-    const data = await api(`/api/instances/${encodeURIComponent(state.selected.instance_id)}/solutions/compare`, {
-      candidate_run_id: state.selectedRunId,
-      reference_run_id: el("comparison-run").value,
-    });
-    const value = data.comparison;
-    const gap = value.relative_gap_percent == null ? "n/a" : `${value.relative_gap_percent.toFixed(3)}%`;
-    el("comparison-output").hidden = false;
-    el("comparison-output").textContent = [
-      `Result: ${value.ordering}`,
-      `Cost delta: ${value.cost_delta} (gap ${gap})`,
-      `Route-count delta: ${value.route_count_delta}`,
-      `Candidate loads: ${value.candidate.route_loads.join(", ")}`,
-      `Reference loads: ${value.reference.route_loads.join(", ")}`,
-      `Directed edges +${value.route_difference.directed_edges_added} / -${value.route_difference.directed_edges_removed}`,
-      `Co-routed pairs +${value.route_difference.co_routed_customer_pairs_added} / -${value.route_difference.co_routed_customer_pairs_removed}`,
-    ].join("\n");
-  } catch (error) {
-    el("comparison-output").hidden = false;
-    el("comparison-output").textContent = `Comparison failed: ${error.message}`;
-  }
-});
-
-/* ── Persistent jobs ── */
-function renderJobs() {
-  const list = el("jobList");
-  list.innerHTML = "";
-  if (!state.jobs.length) {
-    list.innerHTML = '<div class="empty-note">No workbench jobs yet.</div>';
-    return;
-  }
-  state.jobs.slice(0, 8).forEach((job) => {
-    const row = document.createElement("div");
-    row.className = "job-row";
-    const dot = document.createElement("span");
-    dot.className = `job-state ${job.status}`;
-    const main = document.createElement("div");
-    main.className = "job-main";
-    const name = document.createElement("div");
-    name.className = "job-name";
-    name.textContent = `${job.kind} · ${job.status}`;
-    const progress = document.createElement("div");
-    progress.className = "job-progress";
-    const counts = job.progress?.total ? ` ${job.progress.current || 0}/${job.progress.total}` : "";
-    progress.textContent = `${job.error || job.progress?.message || ""}${counts}`;
-    main.append(name, progress);
-    const actions = document.createElement("div");
-    actions.className = "job-actions";
-    const logButton = document.createElement("button");
-    logButton.type = "button";
-    logButton.className = "btn btn-ghost";
-    logButton.textContent = "Log";
-    logButton.addEventListener("click", async () => {
-      try {
-        const data = await api(`/api/jobs/${encodeURIComponent(job.job_id)}/log`);
-        el("jobLog").hidden = false;
-        el("jobLog").textContent = data.log || "No log output yet.";
-      } catch (error) { status(`Cannot load job log: ${error.message}`); }
-    });
-    actions.append(logButton);
-    if (["queued", "running"].includes(job.status)) {
-      const cancelButton = document.createElement("button");
-      cancelButton.type = "button";
-      cancelButton.className = "btn btn-ghost";
-      cancelButton.textContent = "Cancel";
-      cancelButton.addEventListener("click", async () => {
-        try { await apiDelete(`/api/jobs/${encodeURIComponent(job.job_id)}`); await refreshJobs(); }
-        catch (error) { status(`Cancellation failed: ${error.message}`); }
-      });
-      actions.append(cancelButton);
-    }
-    row.append(dot, main, actions);
-    list.append(row);
-  });
-}
-
-async function handleFinishedJob(job) {
-  if (state.handledJobs.has(job.job_id)) return;
-  state.handledJobs.add(job.job_id);
-  if (job.status !== "completed") {
-    status(`${job.kind} ${job.status}: ${job.error || job.progress?.message || "no result"}`);
-    return;
-  }
-  const result = job.result || {};
-  if (job.kind === "fetch-osm") {
-    await loadCities();
-    // An extract fetched without its amenities still generates, just parametrically:
-    // the fetcher says so and the user has to hear it now, not at generation time.
-    const mode = result.dataset_mode && result.dataset_mode !== "roads_and_amenities"
-      ? ` Dataset: ${result.dataset_mode.replaceAll("_", " ")}.`
-      : "";
-    status(`Fetched ${result.city || job.request?.city || "city"}.`
-      + mode + (result.warning ? ` ${result.warning}` : ""));
-  } else if (job.kind === "refresh-pois") {
-    // The extracts changed on disk, so anything cached from them is stale.
-    clearPoiPool();
-    try {
-      const report = await api("/api/workbench/osmdata/audit");
-      state.osmAudit = report;
-      renderOsmAudit(report);
-    } catch { /* the status line below still reports the run itself */ }
-    const failed = (result.results || []).filter((entry) => !entry.ok);
-    status(`Updated ${result.refreshed || 0} extract(s), ${result.gained || 0} POI(s) gained.`
-      + (failed.length
-        ? ` ${failed.length} failed: ${failed.map((entry) => `${entry.city} (${entry.error || "incomplete"})`).join(", ")}.`
-        : ""));
-  } else if (job.kind === "generate") {
-    state.hiddenRoutes = new Set();
-    state.lastRendered = null;
-    clearRouteLayers();
-    await loadInstances(result.base_name);
-    activateTab("visualize");
-    const composition = result.summary?.composition;
-    const split = composition
-      ? ` — ${composition.poi_customers} POI + ${composition.parametric_customers} parametric`
-      : "";
-    status(`Generated ${result.base_name}: capacity ${result.summary?.capacity}, ~${result.summary?.route_count} routes${split}.`
-      + (result.notice ? ` ${result.notice}` : "")
-      + (result.vrptw_error ? ` VRPTW twin failed: ${result.vrptw_error}` : ""));
-  } else if (job.kind === "bulk-generate") {
-    const results = Array.isArray(result.results) ? result.results : [];
-    state.bulkBases = results.map((entry) => entry.base_name).filter(Boolean);
-    el("bulk-download").disabled = state.bulkBases.length === 0;
-    await loadInstances(state.bulkBases[0]);
-    activateTab("visualize");
-    // Rows the pool could not serve are dropped by the driver, and a twin can
-    // fail on its own: both would otherwise leave the count silently short.
-    const problems = (result.city_reports || [])
-      .filter((report) => report.status && report.status !== "ok")
-      .map((report) => report.error
-        ? `${report.city}: ${report.error}`
-        : `${report.city}: pool holds ${report.pool_total ?? 0} (${report.poi_available ?? 0} POI`
-          + ` + ${report.parametric_filled ?? 0} parametric), so n = `
-          + `${(report.skipped_sizes || []).join(", ")} was skipped`);
-    // row_reports is index-aligned with the instances payload, which is built
-    // from state.bulkRows in order, so each row learns its own outcome.
-    // Only when the table still holds the rows that were submitted: editing it
-    // mid-run would otherwise pin outcomes onto the wrong rows.
-    const rowReports = Array.isArray(result.row_reports) ? result.row_reports : [];
-    if (rowReports.length && rowReports.length === state.bulkRows.length) {
-      state.bulkRows.forEach((row, index) => { row.outcome = rowReports[index]; });
-      renderBulkTable();
-    }
-    const twinFailures = results.filter((entry) => entry.vrptw_error).length;
-    const requested = (job.request?.instances || []).length;
-    status(`Bulk generated ${result.generated || 0}`
-      + (requested ? ` of ${requested} requested` : "")
-      + ` instance(s).`
-      + (problems.length ? ` ${problems.join(" · ")}.` : "")
-      + (twinFailures ? ` ${twinFailures} VRPTW twin(s) could not be derived.` : ""));
-  } else if (job.kind === "solve") {
-    const preferredRunId = result.solution?.run_id || null;
-    let selectedByHandler = false;
-    if (!state.selected || state.selected.instance_id !== result.instance_id) {
-      await loadInstances();
-      const index = state.instances.findIndex((instance) => instance.instance_id === result.instance_id);
-      if (index >= 0) {
-        await selectInstance(index, preferredRunId);
-        selectedByHandler = true;
-      }
-    }
-    if (!selectedByHandler) await loadSolutionRuns(preferredRunId);
-    activateTab("visualize");
-    status(`Solved ${result.solution?.instance_name || "instance"}: cost ${result.cost}; checker ${result.validation?.status}.`);
-  }
-}
-
-let refreshingJobs = false;
-async function refreshJobs() {
-  if (refreshingJobs) return;
-  refreshingJobs = true;
-  try {
-    const data = await api("/api/jobs?limit=50");
-    state.jobs = data.jobs || [];
-    renderJobs();
-    for (const job of state.jobs) {
-      if (state.submittedJobs.has(job.job_id) && ["completed", "failed", "cancelled", "interrupted"].includes(job.status)) {
-        await handleFinishedJob(job);
-      }
-    }
-  } finally {
-    refreshingJobs = false;
-  }
-}
-
-/* ── Actions ── */
-
-/* A modal question the caller can await; resolves false when dismissed. */
-let confirmResolver = null;
-function askConfirm(title, text, okLabel) {
-  el("confirm-modal-title").textContent = title;
-  el("confirm-text").textContent = text;
-  el("confirm-ok").textContent = okLabel || "Generate anyway";
-  el("confirm-modal").hidden = false;
-  el("confirm-ok").focus();
-  return new Promise((resolve) => { confirmResolver = resolve; });
-}
-
-function closeConfirm(answer) {
-  el("confirm-modal").hidden = true;
-  const resolve = confirmResolver;
-  confirmResolver = null;
-  if (resolve) resolve(answer);
-}
-
-el("confirm-ok").addEventListener("click", () => closeConfirm(true));
-el("confirm-cancel").addEventListener("click", () => closeConfirm(false));
-el("confirm-close").addEventListener("click", () => closeConfirm(false));
-el("confirm-modal").addEventListener("click", (event) => {
-  if (event.target === el("confirm-modal")) closeConfirm(false);
-});
-
-/* The composition line under the form: what the instance will actually hold,
-   in green when the request is served as asked and amber when POIs ran out. */
-function showGenNotice(notice, summary) {
-  const box = el("gen-notice");
-  const composition = summary && summary.composition;
-  if (notice) {
-    box.className = "preflight-line warn";
-    box.textContent = notice;
-    box.hidden = false;
-  } else if (composition) {
-    box.className = "preflight-line good";
-    box.textContent = `${composition.delivered} customers = ${composition.poi_customers} POI`
-      + ` + ${composition.parametric_customers} parametric.`;
-    box.hidden = false;
-  } else {
-    box.hidden = true;
-    box.textContent = "";
-  }
-}
-
-el("preview").addEventListener("click", async () => {
-  try {
-    status("Previewing selection…");
-    const data = await api("/api/workbench/generation/preview", requestBody());
-    drawPreview(data.geojson);
-    showGenNotice(data.notice, data.summary);
-    status(`Preview: ${data.summary.customers} customers (${data.summary.poi_customers} POI · ${data.summary.parametric_customers} parametric).`
-      + (data.notice ? ` ${data.notice}` : ""));
-  } catch (error) { status(`Preview failed: ${error.message}`); }
-});
-
-el("generate").addEventListener("click", async () => {
-  let body;
-  try { body = requestBody(); }
-  catch (error) { status(error.message); return; }
-  try {
-    // The same selection the job will build, so the split shown here is the one
-    // that lands on disk; the road graph is cached, so the job does not repay it.
-    status("Checking how many customers can sit on a real POI…");
-    const report = await api("/api/workbench/generation/preflight", body);
-    showGenNotice(report.notice, report.summary);
-    if (report.notice) {
-      const composition = report.summary?.composition || {};
-      let title = "Not enough POIs for this request";
-      if (composition.method === "manual") title = "Some picks cannot be used";
-      else if (composition.poi_pool_matching === 0) title = "No POI in the selected categories";
-      else if (composition.delivered < composition.requested) {
-        title = "This city cannot serve that many customers";
-      }
-      const proceed = await askConfirm(title, report.notice);
-      if (!proceed) {
-        status("Generation cancelled — lower the customer count or select more POI categories.");
-        return;
-      }
-    }
-    const job = await submitJob("generate", body);
-    status(`Generation queued as job ${job.job_id.slice(0, 8)}.`);
-  } catch (error) { status(`Cannot queue generation: ${error.message}`); }
-});
-
-el("solve").addEventListener("click", async () => {
-  const instance = state.selected;
-  if (!instance) return;
-  try {
-    const budget = Math.max(1, Number(el("solve-budget").value) || 30);
-    const job = await submitJob("solve", {
-      instance_id: instance.instance_id,
-      metric: el("solve-metric").value,
-      objective_function: el("solve-objective").value,
-      seed: Number(el("solve-seed").value) || 0,
-      time_limit: budget,
-    });
-    status(`Solve queued as job ${job.job_id.slice(0, 8)} (${budget} s budget).`);
-  } catch (error) { status(`Cannot queue solve: ${error.message}`); }
-});
-
-el("download").addEventListener("click", async () => {
-  const instance = state.selected;
-  if (!instance) return;
-  try {
-    status(`Zipping ${instance.base_name}…`);
-    const blob = await apiBlob("/api/workbench/generation/single-download", { folder: instance.folder, base_name: instance.base_name });
-    saveBlob(blob, `${instance.base_name}.zip`);
-    status(`Downloaded ${instance.base_name}.zip`);
-  } catch (error) { status(`Download failed: ${error.message}`); }
-});
-
-/* ── Stored extracts · POI coverage ── */
-const OSM_STATUS_LABELS = {
-  complete: ["ok", "up to date"],
-  nodes_only: ["old", "points only"],
-  no_amenities: ["old", "no POIs"],
-  unreadable: ["bad", "unreadable"],
-};
-
-function renderOsmAudit(report) {
-  const list = el("osm-audit-list");
-  list.innerHTML = "";
-  const extracts = report.extracts || [];
-  if (!extracts.length) {
-    list.innerHTML = '<div class="empty-note">No .osm extract in the workspace yet.</div>';
-    el("osm-audit-count").textContent = "";
-    el("osm-audit-refresh").disabled = true;
-    return;
-  }
-  extracts.forEach((entry) => {
-    const [chipClass, label] = OSM_STATUS_LABELS[entry.status] || ["bad", entry.status || "?"];
-    const row = document.createElement("div");
-    row.className = "osm-row";
-    const name = document.createElement("span");
-    name.className = "nm";
-    name.textContent = entry.city;
-    const count = document.createElement("span");
-    count.className = "cnt";
-    // Ways and relations are the half that older extracts are missing entirely.
-    count.textContent = entry.error
-      ? entry.error
-      : `${entry.poi_total} POI (${entry.poi_nodes}n / ${entry.poi_ways}w / ${entry.poi_relations}r)`;
-    const chip = document.createElement("span");
-    chip.className = `chip ${chipClass}`;
-    chip.textContent = label;
-    row.append(name, count, chip);
-    list.append(row);
-  });
-  const outdated = report.outdated || 0;
-  el("osm-audit-count").textContent = outdated
-    ? `${outdated} of ${extracts.length} outdated`
-    : `${extracts.length} up to date`;
-  el("osm-audit-refresh").disabled = outdated === 0;
-}
-
-el("osm-audit-check").addEventListener("click", async () => {
-  try {
-    status("Checking the POI coverage of the stored extracts…");
-    const report = await api("/api/workbench/osmdata/audit");
-    state.osmAudit = report;
-    renderOsmAudit(report);
-    status(report.outdated
-      ? `${report.outdated} extract(s) hold only point-mapped POIs; updating adds the ones mapped as building outlines.`
-      : `All ${(report.extracts || []).length} extract(s) already hold way-mapped POIs.`);
-  } catch (error) { status(`Cannot check the extracts: ${error.message}`); }
-});
-
-el("osm-audit-refresh").addEventListener("click", async () => {
-  const outdated = (state.osmAudit?.extracts || [])
-    .filter((entry) => entry.can_refresh && entry.status !== "complete")
-    .map((entry) => entry.city);
-  if (!outdated.length) return;
-  try {
-    const job = await submitJob("refresh-pois", { cities: outdated });
-    status(`Updating ${outdated.length} extract(s) as job ${job.job_id.slice(0, 8)}: ${outdated.join(", ")}.`);
-  } catch (error) { status(`Cannot queue the update: ${error.message}`); }
-});
-
-el("fetch").addEventListener("click", async () => {
-  const name = el("fetch-name").value.trim();
-  if (!name) return;
-  try {
-    const job = await submitJob("fetch-osm", {
-      city: name,
-      poiCategories: [...POI_CATEGORIES],
-    });
-    status(`OSM fetch for ${name} queued with all ${POI_CATEGORIES.length} POI categories as job ${job.job_id.slice(0, 8)}.`);
-  } catch (error) { status(`Cannot queue fetch: ${error.message}`); }
-});
-
-/* ── Bulk configuration modal ── */
-function bulkBaseRow() {
-  // Everything a row inherits from the Generate form when it is created.
-  const categories = selectedPoiCategories();
-  return {
-    problemType: el("bulk-problem")?.value || "cvrp",
-    city: el("city").value,
-    nCustomers: Number(el("n").value) || 10,
-    demandType: Number(el("demand").value) || 7,
-    avgRouteSize: Number(el("ars").value) || 4,
-    method: el("method").value === "manual" ? "poi_categories" : el("method").value,
-    // null = let the generator derive a seed per (city, n, demand type, band),
-    // which is what makes instances of one batch differ. Copying the Generate
-    // form's seed into every row would pin them all to the same value.
-    seed: null,
-    depotMode: el("depot-mode").value,
-    customerMode: el("customer-mode").value,
-    twMethod: el("bulk-tw")?.value || "route_centered",
-    onlyIntersections: true,
-    clusterSeeds: Number(el("cluster-seeds").value) || 4,
-    clusterDecayMeters: Number(el("cluster-decay").value) || 800,
-    hybridPoiShare: Number(el("hybrid-poi-share").value) / 100,
-    categories: categories.join(" "),
-  };
-}
-
-function bulkRowKey(row) {
-  return [row.problemType, row.city, row.nCustomers, row.demandType, row.avgRouteSize,
-    row.method, row.seed, row.categories].join("|");
-}
-
-function refreshBulkCounts() {
-  const label = `${state.bulkRows.length} instance${state.bulkRows.length === 1 ? "" : "s"}`;
-  el("bulk-count-badge").textContent = label;
-  el("bulk-modal-count").textContent = label;
-}
-
-function bulkCell(row, field, kind, options) {
-  const cell = document.createElement("td");
-  let input;
-  if (kind === "select") {
-    input = document.createElement("select");
-    options.forEach(([value, text]) => input.append(new Option(text, value)));
-    input.value = String(row[field]);
-  } else if (kind === "checkbox") {
-    input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = Boolean(row[field]);
-  } else {
-    input = document.createElement("input");
-    input.type = kind;
-    input.value = String(row[field] ?? "");
-    if (options?.placeholder) input.placeholder = options.placeholder;
-    if (kind === "number") { input.min = options?.min ?? 0; if (options?.step) input.step = options.step; }
-  }
-  input.addEventListener("change", () => {
-    if (kind === "checkbox") row[field] = input.checked;
-    // An emptied optional number means "unset", not 0: the seed column relies
-    // on null to hand the choice back to the generator.
-    else if (options?.nullable && input.value.trim() === "") row[field] = null;
-    else if (BULK_INT_FIELDS.has(field)) row[field] = Number.parseInt(input.value, 10) || 0;
-    else if (BULK_FLOAT_FIELDS.has(field)) row[field] = Number.parseFloat(input.value) || 0;
-    else row[field] = input.value;
-  });
-  cell.append(input);
-  return cell;
-}
-
-/* What the last bulk run did with this row: rows the city pool could not serve
-   are dropped by the driver, so without this the table looks like it all ran. */
-function bulkOutcomeCell(row) {
-  const cell = document.createElement("td");
-  const outcome = row.outcome;
-  if (!outcome) {
-    cell.className = "preflight-line";
-    cell.textContent = "—";
-    return cell;
-  }
-  if (outcome.status === "skipped") {
-    cell.className = "preflight-line bad";
-    cell.textContent = "skipped";
-    cell.title = outcome.reason || "Skipped by the last run";
-    return cell;
-  }
-  const parametric = Number(outcome.parametric_customers) || 0;
-  cell.className = parametric || outcome.vrptw_error ? "preflight-line warn" : "preflight-line good";
-  cell.textContent = outcome.vrptw_error
-    ? "no twin"
-    : (parametric ? `${outcome.poi_customers} POI + ${parametric} param` : "generated");
-  cell.title = [outcome.base_name, outcome.notice, outcome.vrptw_error]
-    .filter(Boolean).join(" · ") || "Generated";
-  return cell;
-}
-
-function renderBulkTable() {
-  const body = el("bulk-table-body");
-  body.innerHTML = "";
-  if (!state.bulkRows.length) {
-    body.innerHTML = '<tr><td colspan="18" class="bulk-empty empty-note">'
-      + "No rows yet. Build combinations on the left, add rows by hand, or import a CSV.</td></tr>";
-    refreshBulkCounts();
-    return;
-  }
-  const cityOptions = [...el("city").options].map((option) => [option.value, option.textContent]);
-  state.bulkRows.forEach((row) => {
-    const tr = document.createElement("tr");
-    tr.dataset.id = String(row.id);
-
-    const check = document.createElement("td");
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.className = "bulk-row-check";
-    box.setAttribute("aria-label", "Select this row");
-    check.append(box);
-    tr.append(check);
-    // Kept at the front: a skipped row must be visible without scrolling the
-    // table sideways past a dozen parameter columns.
-    tr.append(bulkOutcomeCell(row));
-
-    tr.append(bulkCell(row, "problemType", "select", [["cvrp", "CVRP"], ["vrptw", "VRPTW"]]));
-    tr.append(bulkCell(row, "city", "select", cityOptions.length ? cityOptions : [[row.city, row.city]]));
-    tr.append(bulkCell(row, "nCustomers", "number", { min: 2 }));
-    tr.append(bulkCell(row, "demandType", "select", DEMAND_TYPES.map((e) => [String(e.value), `${e.value} · ${e.label}`])));
-    tr.append(bulkCell(row, "avgRouteSize", "select", ROUTE_SIZE_BANDS.map((e) => [String(e.value), `${e.value} · ${e.label}`])));
-    tr.append(bulkCell(row, "method", "select", SAMPLING_METHODS.filter((m) => m !== "manual").map((m) => [m, m])));
-    tr.append(bulkCell(row, "seed", "number", { min: 0, nullable: true, placeholder: "auto" }));
-    tr.append(bulkCell(row, "depotMode", "select", DEPOT_MODES.map((m) => [m, m])));
-    tr.append(bulkCell(row, "customerMode", "select", CUSTOMER_MODES.map((m) => [m, m])));
-    tr.append(bulkCell(row, "twMethod", "select", TW_METHODS.map((m) => [m, m])));
-    tr.append(bulkCell(row, "onlyIntersections", "checkbox"));
-    tr.append(bulkCell(row, "clusterSeeds", "number", { min: 1 }));
-    tr.append(bulkCell(row, "clusterDecayMeters", "number", { min: 1, step: 50 }));
-    tr.append(bulkCell(row, "hybridPoiShare", "number", { min: 0, step: 0.05 }));
-    const categoryCell = bulkCell(row, "categories", "text");
-    categoryCell.className = "cat-cell";
-    tr.append(categoryCell);
-
-    const remove = document.createElement("td");
-    const removeButton = document.createElement("button");
-    removeButton.type = "button";
-    removeButton.className = "bulk-delete-btn";
-    removeButton.textContent = "×";
-    removeButton.title = "Remove this row";
-    removeButton.addEventListener("click", () => {
-      state.bulkRows = state.bulkRows.filter((entry) => entry.id !== row.id);
-      renderBulkTable();
-    });
-    remove.append(removeButton);
-    tr.append(remove);
-    body.append(tr);
-  });
-  el("bulk-select-all").checked = false;
-  refreshBulkCounts();
-}
-
-function addBulkRow(overrides = {}) {
-  state.bulkRows.push({ id: state.bulkNextId, ...bulkBaseRow(), ...overrides });
-  state.bulkNextId += 1;
-}
-
-function checkedValues(containerId) {
-  return [...el(containerId).querySelectorAll("input[type='checkbox']:checked")]
-    .map((box) => Number.parseInt(box.value, 10))
-    .filter(Number.isFinite);
-}
-
-function expandBulkCombinations() {
-  const cities = [...el("bulk-cities").querySelectorAll("input[type='checkbox']:checked")]
-    .map((box) => box.value);
-  const sizes = el("bulk-sizes").value.split(",")
-    .map((part) => Number.parseInt(part.trim(), 10))
-    .filter((value) => Number.isFinite(value) && value >= 2);
-  const demands = checkedValues("bulk-demand-checks");
-  const bands = checkedValues("bulk-band-checks");
-  if (!cities.length || !sizes.length || !demands.length || !bands.length) {
-    status("Select at least one city, size, demand type and route size band.");
-    return;
-  }
-  const existing = new Set(state.bulkRows.map(bulkRowKey));
-  let added = 0;
-  let duplicates = 0;
-  cities.forEach((city) => sizes.forEach((nCustomers) => demands.forEach((demandType) => bands.forEach((avgRouteSize) => {
-    const candidate = { ...bulkBaseRow(), city, nCustomers, demandType, avgRouteSize };
-    const key = bulkRowKey(candidate);
-    if (existing.has(key)) { duplicates += 1; return; }
-    existing.add(key);
-    addBulkRow({ city, nCustomers, demandType, avgRouteSize });
-    added += 1;
-  }))));
-  renderBulkTable();
-  status(`Added ${added} combination(s)${duplicates ? `, skipped ${duplicates} duplicate(s)` : ""}.`);
-}
-
-function csvEscape(value) {
-  const text = String(value ?? "");
-  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
-
-function parseCsvLine(line) {
-  const values = [];
-  let current = "";
-  let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index];
-    if (quoted) {
-      if (char === '"' && line[index + 1] === '"') { current += '"'; index += 1; }
-      else if (char === '"') quoted = false;
-      else current += char;
-    } else if (char === '"') quoted = true;
-    else if (char === ",") { values.push(current.trim()); current = ""; }
-    else current += char;
-  }
-  values.push(current.trim());
-  return values;
-}
-
-function exportBulkCsv() {
-  if (!state.bulkRows.length) { status("No rows to export."); return; }
-  const lines = [BULK_CSV_COLUMNS.join(",")];
-  state.bulkRows.forEach((row) => {
-    lines.push(BULK_CSV_COLUMNS.map((column) => {
-      const value = column === "onlyIntersections" ? (row[column] ? "true" : "false") : row[column];
-      return csvEscape(value);
-    }).join(","));
-  });
-  saveBlob(new Blob([lines.join("\n") + "\n"], { type: "text/csv" }), "bulk_instances.csv");
-  status(`Exported ${state.bulkRows.length} row(s) to bulk_instances.csv`);
-}
-
-function importBulkCsv(file) {
-  const reader = new FileReader();
-  reader.onload = () => {
-    const lines = String(reader.result || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    if (lines.length < 2) { status("The CSV needs a header row and at least one data row."); return; }
-    const header = parseCsvLine(lines[0]).map((value) => value.trim());
-    const lowered = header.map((value) => value.toLowerCase());
-    const required = ["city", "ncustomers", "demandtype", "avgroutesize"];
-    const missing = required.filter((column) => !lowered.includes(column));
-    if (missing.length) { status(`The CSV is missing required column(s): ${missing.join(", ")}`); return; }
-    let imported = 0;
-    lines.slice(1).forEach((line) => {
-      const values = parseCsvLine(line);
-      const overrides = {};
-      header.forEach((column, index) => {
-        const canonical = BULK_CSV_COLUMNS.find((name) => name.toLowerCase() === column.toLowerCase());
-        if (!canonical) return;
-        const raw = values[index];
-        if (raw === undefined || raw === "") return;
-        if (canonical === "onlyIntersections") overrides[canonical] = /^(true|1|yes)$/i.test(raw);
-        else if (BULK_INT_FIELDS.has(canonical)) overrides[canonical] = Number.parseInt(raw, 10) || 0;
-        else if (BULK_FLOAT_FIELDS.has(canonical)) overrides[canonical] = Number.parseFloat(raw) || 0;
-        else overrides[canonical] = raw;
-      });
-      addBulkRow(overrides);
-      imported += 1;
-    });
-    renderBulkTable();
-    status(`Imported ${imported} row(s) from ${file.name}.`);
-  };
-  reader.readAsText(file);
-}
-
-function bulkPayload() {
-  if (!state.bulkRows.length) throw new Error("Add at least one instance row.");
-  return {
-    seed: Number(el("seed").value) || 0,
-    // Shared by every row: the server merges top-level fields into each one, so
-    // this needs no column of its own in an already wide table.
-    poiAttachMode: el("poi-attach-mode").value,
-    poiAttachRadiusM: Number(el("poi-attach-radius").value) || 50,
-    instances: state.bulkRows.map((row) => ({
-      problemType: row.problemType,
-      city: row.city,
-      nCustomers: row.nCustomers,
-      demandType: row.demandType,
-      avgRouteSize: row.avgRouteSize,
-      method: row.method,
-      seed: row.seed,
-      depotMode: row.depotMode,
-      customerMode: row.customerMode,
-      twMethod: row.twMethod,
-      onlyIntersections: row.onlyIntersections,
-      clusterSeeds: row.clusterSeeds,
-      clusterDecayMeters: row.clusterDecayMeters,
-      hybridPoiShare: row.hybridPoiShare,
-      categories: String(row.categories || "").split(/[\s,]+/).filter(Boolean),
-    })),
-  };
-}
-
-function renderBulkCities() {
-  const container = el("bulk-cities");
-  container.innerHTML = "";
-  [...el("city").options].forEach((option) => {
-    const label = document.createElement("label");
-    const box = document.createElement("input");
-    box.type = "checkbox";
-    box.value = option.value;
-    box.checked = option.value === el("city").value;
-    box.addEventListener("change", updateBulkCityCount);
-    const text = document.createElement("span");
-    text.textContent = option.textContent;
-    label.append(box, text);
-    container.append(label);
-  });
-  updateBulkCityCount();
-}
-
-function updateBulkCityCount() {
-  const selected = el("bulk-cities").querySelectorAll("input:checked").length;
-  el("bulk-city-count").textContent = `${selected} selected`;
-}
-
-function renderBulkChecks() {
-  const fill = (containerId, entries, defaults) => {
-    const container = el(containerId);
-    container.innerHTML = "";
-    entries.forEach((entry) => {
-      const label = document.createElement("label");
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.value = String(entry.value);
-      box.checked = defaults.includes(entry.value);
-      const text = document.createElement("span");
-      text.textContent = `${entry.value} · ${entry.label}`;
-      const band = document.createElement("span");
-      band.className = "band";
-      band.textContent = entry.detail;
-      label.append(box, text, band);
-      container.append(label);
-    });
-  };
-  fill("bulk-demand-checks", DEMAND_TYPES, [7]);
-  fill("bulk-band-checks", ROUTE_SIZE_BANDS, [4]);
-}
-
-function openBulkModal() {
-  renderBulkCities();
-  renderBulkTable();
-  el("bulk-modal").hidden = false;
-}
-
-function closeBulkModal() {
-  el("bulk-modal").hidden = true;
-}
-
-el("bulk-open").addEventListener("click", openBulkModal);
-el("bulk-close").addEventListener("click", closeBulkModal);
-el("bulk-close-2").addEventListener("click", closeBulkModal);
-el("bulk-modal").addEventListener("click", (event) => {
-  if (event.target === el("bulk-modal")) closeBulkModal();
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  // The confirm dialog sits on top of the bulk modal, so it closes first.
-  if (!el("confirm-modal").hidden) closeConfirm(false);
-  else if (!el("bulk-modal").hidden) closeBulkModal();
-});
-el("bulk-city-all").addEventListener("click", () => {
-  el("bulk-cities").querySelectorAll("input").forEach((box) => { box.checked = true; });
-  updateBulkCityCount();
-});
-el("bulk-city-none").addEventListener("click", () => {
-  el("bulk-cities").querySelectorAll("input").forEach((box) => { box.checked = false; });
-  updateBulkCityCount();
-});
-el("bulk-expand").addEventListener("click", expandBulkCombinations);
-el("bulk-add-row").addEventListener("click", () => { addBulkRow(); renderBulkTable(); });
-el("bulk-clear").addEventListener("click", () => { state.bulkRows = []; renderBulkTable(); });
-el("bulk-delete-selected").addEventListener("click", () => {
-  const selected = new Set();
-  el("bulk-table-body").querySelectorAll(".bulk-row-check:checked").forEach((box) => {
-    const id = Number.parseInt(box.closest("tr")?.dataset.id || "", 10);
-    if (Number.isFinite(id)) selected.add(id);
-  });
-  if (!selected.size) { status("No rows selected."); return; }
-  state.bulkRows = state.bulkRows.filter((row) => !selected.has(row.id));
-  renderBulkTable();
-});
-el("bulk-select-all").addEventListener("change", (event) => {
-  el("bulk-table-body").querySelectorAll(".bulk-row-check").forEach((box) => {
-    box.checked = event.target.checked;
-  });
-});
-el("bulk-export-csv").addEventListener("click", exportBulkCsv);
-el("bulk-import-csv").addEventListener("click", () => el("bulk-csv-file").click());
-el("bulk-csv-file").addEventListener("change", (event) => {
-  const file = event.target.files?.[0];
-  if (file) importBulkCsv(file);
-  event.target.value = "";
-});
-
-el("bulk-check").addEventListener("click", async () => {
-  const line = el("bulk-preflight");
-  try {
-    line.className = "preflight-line";
-    line.textContent = "Checking how many customers each city pool can offer…";
-    const report = await api("/api/workbench/generation/bulk-preflight", bulkPayload());
-    const bad = report.groups.filter((group) => group.skipped_sizes?.length || group.status === "skipped");
-    // A pool that fits can still be short of POIs: rows bigger than the POI
-    // count take parametric road points, which is worth saying up front.
-    const thin = report.groups.filter((group) => !bad.includes(group)
-      && group.method !== "parametric_attach" && group.method !== "manual"
-      && (group.sizes_needing_parametric || []).length);
-    if (!bad.length && !thin.length) {
-      line.className = "preflight-line good";
-      line.textContent = `All ${report.instances} instance(s) fit their city pool.`;
-      return;
-    }
-    line.className = "preflight-line warn";
-    line.textContent = [
-      ...bad.map((group) => `${group.city}: pool holds ${group.pool_total ?? 0}, `
-        + `so n = ${(group.skipped_sizes || []).join(", ")} would be skipped`),
-      ...thin.map((group) => `${group.city}: only ${group.poi_available ?? 0} POI(s) attach to the `
-        + `road graph, so n = ${(group.sizes_needing_parametric || []).join(", ")} will be `
-        + "completed with parametric points"),
-    ].join(" · ");
-  } catch (error) {
-    line.className = "preflight-line bad";
-    line.textContent = `Feasibility check failed: ${error.message}`;
-  }
-});
-
-el("bulk-run").addEventListener("click", async () => {
-  try {
-    const payload = bulkPayload();
-    state.bulkRows.forEach((row) => { row.outcome = null; });
-    renderBulkTable();
-    const job = await submitJob("bulk-generate", payload);
-    status(`Bulk generation of ${state.bulkRows.length} instance(s) queued as job ${job.job_id.slice(0, 8)}.`);
-    closeBulkModal();
-  } catch (error) { status(`Cannot queue bulk generation: ${error.message}`); }
-});
-
-el("bulk-download").addEventListener("click", async () => {
-  if (!state.bulkBases?.length) return;
-  try {
-    status("Zipping the bulk batch…");
-    const blob = await apiBlob("/api/workbench/generation/bulk-download", { base_names: state.bulkBases });
-    saveBlob(blob, "mamut-generated-instances.zip");
-    status("Downloaded mamut-generated-instances.zip");
-  } catch (error) { status(`Download failed: ${error.message}`); }
-});
-
-el("clear").addEventListener("click", () => {
-  previewLayers.clearLayers();
-  instanceNodeLayers.clearLayers();
-  poiPickLayers.clearLayers();
-  clearRouteLayers();
-  state.previewGeojson = null;
-  state.lastRendered = null;
-  if (state.selected) state.selected.rendered = null;
-  renderLegend();
-  status("Map cleared.");
-});
-
-/* ── Import an externally found solution ── */
-function resetImportPanel() {
-  el("import-text").value = "";
-  el("import-file").value = "";
-  el("import-label").value = "";
-  el("import-validation").className = "validation-line";
-  el("import-validation").textContent =
-    "Imported solutions are checked against the metric selected above before they are stored.";
-}
-
-el("import-open").addEventListener("click", () => {
-  const panel = el("import-panel");
-  panel.hidden = !panel.hidden;
-  if (!panel.hidden) resetImportPanel();
-});
-el("import-cancel").addEventListener("click", () => { el("import-panel").hidden = true; });
-el("import-file").addEventListener("change", async (event) => {
-  const file = event.target.files?.[0];
-  if (!file) return;
-  el("import-text").value = await file.text();
-  el("import-validation").className = "validation-line";
-  el("import-validation").textContent = `Loaded ${file.name}; press "Check and import" to validate it.`;
-});
-
-el("import-run").addEventListener("click", async () => {
-  const instance = state.selected;
-  const line = el("import-validation");
-  if (!instance) { status("Select an instance first."); return; }
-  const metric = el("solve-metric").value;
-  try {
-    line.className = "validation-line";
-    line.textContent = `Checking the routes against the ${metric} variant…`;
-    const result = await api(
-      `/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/import`,
-      {
-        metric,
-        objective_function: el("solve-objective").value,
-        text: el("import-text").value,
-        filename: el("import-file").files?.[0]?.name || "",
-        label: el("import-label").value,
-      },
-    );
-    line.className = "validation-line valid";
-    line.textContent = result.warning
-      ? `Imported and validated. ${result.warning}`
-      : `Imported and validated: cost ${result.solution.cost}, ${result.solution.num_routes} route(s).`;
-    el("import-panel").hidden = true;
-    await loadSolutionRuns(result.solution.run_id);
-    status(`Imported an external solution for ${instance.base_name} (${metric}).`);
-  } catch (error) {
-    // Nothing was stored: the server refuses before writing.
-    line.className = "validation-line invalid";
-    line.textContent = `Rejected: ${error.message}`;
-  }
-});
-
-/* ── Narrow viewports: the right panel becomes a collapsible sheet ── */
-el("sheet-toggle").addEventListener("click", () => {
-  const panel = document.querySelector(".panel-right");
-  const collapsed = panel.classList.toggle("sheet-collapsed");
-  el("sheet-toggle").textContent = collapsed ? "Show" : "Hide";
-  el("sheet-toggle").setAttribute("aria-expanded", collapsed ? "false" : "true");
-});
-
-fillBandSelects();
-renderBulkChecks();
-renderBulkTable();
-renderPoiCategories();
-updateHybridShare();
-updateGenerationControls();
-loadCities().catch((error) => status(`Cannot reach the local server: ${error.message}`));
-loadInstances().catch((error) => console.warn("Unable to list workspace instances", error));
-refreshJobs().catch((error) => console.warn("Unable to list workbench jobs", error));
-setInterval(() => refreshJobs().catch(() => {}), 1000);
-</script>
+<script src="/static/workbench.js"></script>
 </body>
 </html>

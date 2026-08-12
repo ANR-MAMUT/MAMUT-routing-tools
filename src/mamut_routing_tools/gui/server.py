@@ -18,10 +18,11 @@ from typing import Any, Literal
 
 from fastapi import FastAPI, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from mamut_routing_tools.gui.jobs import JobContext, JobManager
+from mamut_routing_tools.gui.preferences import PreferenceStore
 from mamut_routing_tools.gui.solutions import (
     SolutionImportError,
     SolutionStore,
@@ -35,6 +36,8 @@ from mamut_routing_tools.workspace import instances_dir, osmdata_dir
 
 _ALLOWED_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 STATIC_DIR = Path(__file__).parent / "static"
+# Marker in index.html that the index route swaps for the stored preferences.
+_PREFS_PLACEHOLDER = "<!--MAMUT_PREFS-->"
 
 
 class JobSubmission(BaseModel):
@@ -575,6 +578,7 @@ def _generate_bulk_payload(
 def create_app(workspace: Path, token: str) -> FastAPI:
     jobs = JobManager(workspace)
     solutions = SolutionStore(workspace)
+    preferences = PreferenceStore(workspace)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
@@ -1029,12 +1033,28 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             return _payload_error(404, "Unknown generated artifact")
         return JSONResponse(json.loads(target.read_text(encoding="utf-8")))
 
+    @app.get("/api/preferences")
+    async def get_preferences() -> Any:
+        return preferences.read()
+
+    @app.put("/api/preferences")
+    async def put_preferences(payload: dict[str, Any]) -> Any:
+        return preferences.merge(payload)
+
     @app.get("/")
     async def index() -> Any:
         page = STATIC_DIR / "index.html"
-        if page.is_file():
-            return FileResponse(page)
-        return _payload_error(404, "GUI frontend assets are missing")
+        if not page.is_file():
+            return _payload_error(404, "GUI frontend assets are missing")
+        # Inline the stored preferences ahead of the bootstrap script so the very
+        # first paint already has the right theme and panel widths. Fetching them
+        # instead would flash the defaults on every load.
+        html = page.read_text(encoding="utf-8").replace(
+            _PREFS_PLACEHOLDER,
+            f"<script>window.__MAMUT_PREFS__={preferences.as_script_literal()};</script>",
+            1,
+        )
+        return HTMLResponse(html)
 
     @app.get("/static/{asset_path:path}")
     async def static_asset(asset_path: str) -> Any:

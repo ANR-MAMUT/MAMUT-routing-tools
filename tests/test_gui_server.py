@@ -27,6 +27,22 @@ def client(tmp_path: Path, fixture_osm_path: Path):  # type: ignore[no-untyped-d
         yield test_client
 
 
+def _frontend_source(client: TestClient) -> str:
+    """The shell plus the assets it loads, concatenated.
+
+    The frontend used to be one ``index.html`` with inline ``<style>`` and
+    ``<script>``; it is now split into ``workbench.css`` / ``workbench.js`` /
+    ``layout.js``. These tests care that the frontend exposes a control or label at
+    all, not which file carries it, so they assert against the whole bundle.
+    """
+    parts = [client.get("/").text]
+    for asset in ("workbench.css", "workbench.js", "layout.js"):
+        response = client.get(f"/static/{asset}")
+        assert response.status_code == 200, f"missing frontend asset {asset}"
+        parts.append(response.text)
+    return "\n".join(parts)
+
+
 def _wait_for_job(client: TestClient, job_id: str) -> dict:
     for _ in range(200):
         job = client.get(f"/api/jobs/{job_id}").json()["job"]
@@ -49,7 +65,7 @@ def test_cities_endpoint_lists_workspace_extracts(client: TestClient) -> None:
 
 
 def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client: TestClient) -> None:
-    html = client.get("/").text
+    html = _frontend_source(client)
 
     assert 'id="depot-mode"' in html
     assert 'id="poi-list"' in html
@@ -92,6 +108,96 @@ def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client
     assert 'id="sheet-toggle"' in html
 
 
+def test_gui_shell_groups_the_form_and_moves_jobs_out_of_the_panel(client: TestClient) -> None:
+    """The decluttered layout: stepped Generate form, tabbed inspector, bottom strip."""
+    html = _frontend_source(client)
+
+    # Generate is four numbered steps with per-step Advanced disclosures.
+    assert html.count('class="step-index"') == 4
+    assert 'id="adv-place"' in html and 'id="adv-customers"' in html
+    # Categories and help moved off the form into popovers over the map.
+    assert 'id="poi-popover"' in html and 'id="poi-search"' in html
+    assert 'id="help-popover"' in html and 'id="explain-toggle"' in html
+    # The 49-checkbox list must still be reachable, just not inline.
+    assert 'id="poi-list"' in html
+
+    # The inspector is tabbed rather than a five-section stack.
+    for tab in ("tabInstance", "tabSolve", "tabRuns"):
+        assert f'id="{tab}"' in html
+    for panel in ("instancePanel", "solvePanel", "runsPanel"):
+        assert f'id="{panel}"' in html
+
+    # Jobs and the status line are one bottom strip now, not opposite corners.
+    assert 'id="activity"' in html and 'id="activity-toggle"' in html
+    assert 'id="jobList"' in html and 'id="status"' in html
+    assert 'id="jobsSection"' not in html
+
+    # Instance list filters, ported from the published workbench.
+    for control in ("inst-search", "inst-city", "inst-sort", "inst-solved"):
+        assert f'id="{control}"' in html
+
+    # Resizable panels and their rails.
+    assert 'data-splitter="left"' in html and 'data-splitter="right"' in html
+    assert 'data-panel-toggle="left"' in html and 'class="panel-rail"' in html
+
+
+def test_preferences_survive_a_restart_and_reject_unknown_keys(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    """localStorage is per-origin and the GUI's port changes every start, so the
+    theme and layout have to live in the workspace to outlive a restart."""
+    workspace = tmp_path / "workspace"
+    osmdata_dir(workspace).mkdir(parents=True, exist_ok=True)
+    (osmdata_dir(workspace) / "Testville.osm").write_text(fixture_osm_path.read_text())
+
+    with TestClient(
+        create_app(workspace, TOKEN), base_url="http://localhost", headers={"X-Mamut-Token": TOKEN}
+    ) as first:
+        assert first.get("/api/preferences").json() == {}
+        stored = first.put(
+            "/api/preferences",
+            json={
+                "theme": "light",
+                "layout": {"leftWidth": 480, "rightCollapsed": True},
+                "somethingElse": "<script>alert(1)</script>",
+            },
+        ).json()
+        assert stored["theme"] == "light"
+        assert stored["layout"]["leftWidth"] == 480
+        assert "somethingElse" not in stored
+
+    # A brand-new app on the same workspace stands in for a restart on a new port.
+    with TestClient(
+        create_app(workspace, TOKEN), base_url="http://localhost", headers={"X-Mamut-Token": TOKEN}
+    ) as second:
+        assert second.get("/api/preferences").json()["theme"] == "light"
+        html = second.get("/").text
+        assert "window.__MAMUT_PREFS__=" in html
+        assert '"theme": "light"' in html
+        # The placeholder must be consumed, never served to the browser as-is.
+        assert "<!--MAMUT_PREFS-->" not in html
+
+
+def test_preferences_clamp_widths_and_ignore_a_corrupt_file(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    osmdata_dir(workspace).mkdir(parents=True, exist_ok=True)
+    (osmdata_dir(workspace) / "Testville.osm").write_text(fixture_osm_path.read_text())
+    app = create_app(workspace, TOKEN)
+    with TestClient(app, base_url="http://localhost", headers={"X-Mamut-Token": TOKEN}) as client:
+        clamped = client.put(
+            "/api/preferences", json={"layout": {"leftWidth": 5, "rightWidth": 99999}}
+        ).json()
+        assert clamped["layout"]["leftWidth"] == 240
+        assert clamped["layout"]["rightWidth"] == 1200
+        assert client.put("/api/preferences", json={"theme": "chartreuse"}).json().get("theme") is None
+
+        (workspace / "state" / "preferences.json").write_text("{not json", encoding="utf-8")
+        assert client.get("/api/preferences").json() == {}
+        assert client.get("/").status_code == 200
+
+
 def test_frontend_demand_and_band_labels_match_the_generator(client: TestClient) -> None:
     """The JS tables are a copy of demands.py; keep them honest."""
     from mamut_routing_tools.generation.demands import (
@@ -100,7 +206,7 @@ def test_frontend_demand_and_band_labels_match_the_generator(client: TestClient)
         demand_distribution_bounds,
     )
 
-    html = client.get("/").text
+    html = _frontend_source(client)
     for demand_type in DEMAND_TYPES:
         assert f"{{ value: {demand_type}," in html
         low, high = demand_distribution_bounds(demand_type)
