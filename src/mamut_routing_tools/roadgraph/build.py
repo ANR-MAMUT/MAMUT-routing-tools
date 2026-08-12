@@ -12,14 +12,26 @@ with the Julia engine is then a floating-point question, not a modeling one.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import rustworkx as rx
 from scipy.spatial import cKDTree
 
-from mamut_routing_tools.geo import ENU, LLA, bounds_center, enu_distance, enu_from_lla, lla_from_enu
+from mamut_routing_tools.geo import (
+    ENU,
+    LLA,
+    WGS84_A,
+    WGS84_E2,
+    bounds_center,
+    ecef_from_lla,
+    enu_distance,
+    enu_from_lla,
+    lla_from_enu,
+)
 from mamut_routing_tools.roadgraph.classes import ROAD_CLASSES
 from mamut_routing_tools.roadgraph.osmxml import OsmData, OsmWay, crop_to_bounds, ensure_bounds, parse_osm
 
@@ -96,6 +108,13 @@ class RoadGraph:
     edge_class: list[int]
     edge_weight: list[float]  # metres (ENU Euclidean along the segment)
     graph: rx.PyDiGraph = field(repr=False)
+    #: ``(only_intersections, trim_to_connected)`` the loader succeeded with, set
+    #: by ``load_road_graph``. The two fields above describe the last internal
+    #: build step -- trimming rebuilds itself with ``trim_to_connected=False``
+    #: once the nodes are removed -- so this is the only faithful record of what
+    #: was asked of the loader. ``None`` when built through ``build_road_graph``
+    #: directly, which has no fallback chain to hide.
+    loaded_with: tuple[bool, bool] | None = field(default=None)
     _kdtree: cKDTree | None = field(default=None, repr=False)
     _kdtree_nodes: list[int] = field(default_factory=list, repr=False)
     _vertex_kdtree: cKDTree | None = field(default=None, repr=False)
@@ -126,12 +145,8 @@ class RoadGraph:
         query point, and the pick is the minimum EUCLIDEAN distance among
         the box hits. A node at 102 m Euclidean but inside the box still
         matches; one at 99 m outside the box does not exist geometrically."""
-        if self._kdtree is None:
-            self._kdtree_nodes = list(self.node_enu.keys())
-            points = np.array(
-                [(self.node_enu[node][0], self.node_enu[node][1]) for node in self._kdtree_nodes]
-            )
-            self._kdtree = cKDTree(points)
+        self._ensure_node_kdtree()
+        assert self._kdtree is not None
         enu = enu_from_lla(LLA(lat, lon), self.ref_lla)
         query = np.array([enu.east, enu.north])
         hits = self._kdtree.query_ball_point(query, r=node_range_m, p=np.inf)
@@ -139,6 +154,60 @@ class RoadGraph:
             return None
         best_index = min(hits, key=lambda i: float(np.sum((self._kdtree.data[i] - query) ** 2)))
         return self._kdtree_nodes[int(best_index)]
+
+    def nearest_nodes(
+        self, points: list[tuple[float, float]], node_range_m: float = 100.0
+    ) -> list[int | None]:
+        """``nearest_node`` for many points at once, same contract per point.
+
+        One kd-tree call for the whole batch instead of one per point: the POI
+        selection asks this for every amenity in a city, where the per-call
+        overhead dominates the search itself. Results are identical to calling
+        ``nearest_node`` in a loop, including the ``+-range`` box semantics.
+        """
+        if not points:
+            return []
+        self._ensure_node_kdtree()
+        assert self._kdtree is not None
+        query = self._enu_east_north(points)
+        hit_lists = self._kdtree.query_ball_point(query, r=node_range_m, p=np.inf)
+        out: list[int | None] = []
+        for index, hits in enumerate(hit_lists):
+            if len(hits) == 0:
+                out.append(None)
+                continue
+            candidates = np.asarray(hits, dtype=int)
+            deltas = self._kdtree.data[candidates] - query[index]
+            best = candidates[int(np.argmin(np.sum(deltas * deltas, axis=1)))]
+            out.append(self._kdtree_nodes[int(best)])
+        return out
+
+    def _ensure_node_kdtree(self) -> None:
+        if self._kdtree is None:
+            self._kdtree_nodes = list(self.node_enu.keys())
+            points = np.array(
+                [(self.node_enu[node][0], self.node_enu[node][1]) for node in self._kdtree_nodes]
+            )
+            self._kdtree = cKDTree(points)
+
+    def _enu_east_north(self, points: list[tuple[float, float]]) -> Any:
+        """(east, north) of many (lat, lon), vectorised over the same math as
+        ``enu_from_lla`` so batched queries land exactly where single ones do."""
+        lat = np.radians(np.asarray([point[0] for point in points], dtype=float))
+        lon = np.radians(np.asarray([point[1] for point in points], dtype=float))
+        sin_lat, cos_lat = np.sin(lat), np.cos(lat)
+        n = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
+        x = n * cos_lat * np.cos(lon)
+        y = n * cos_lat * np.sin(lon)
+        z = n * (1.0 - WGS84_E2) * sin_lat
+        reference = ecef_from_lla(self.ref_lla)
+        dx, dy, dz = x - reference.x, y - reference.y, z - reference.z
+        ref_lat, ref_lon = math.radians(self.ref_lla.lat), math.radians(self.ref_lla.lon)
+        sin_rlat, cos_rlat = math.sin(ref_lat), math.cos(ref_lat)
+        sin_rlon, cos_rlon = math.sin(ref_lon), math.cos(ref_lon)
+        east = -sin_rlon * dx + cos_rlon * dy
+        north = -cos_rlon * sin_rlat * dx - sin_rlon * sin_rlat * dy + cos_rlat * dz
+        return np.column_stack((east, north))
 
     def nearest_vertex(
         self, lat: float, lon: float, max_radius_m: float = 2000.0
@@ -154,17 +223,38 @@ class RoadGraph:
         """
         if not self.node_of:
             return None
-        if self._vertex_kdtree is None:
-            points = np.array(
-                [(self.node_enu[node][0], self.node_enu[node][1]) for node in self.node_of]
-            )
-            self._vertex_kdtree = cKDTree(points)
+        self._ensure_vertex_kdtree()
+        assert self._vertex_kdtree is not None
         enu = enu_from_lla(LLA(lat, lon), self.ref_lla)
         query = np.array([enu.east, enu.north])
         distance, index = self._vertex_kdtree.query(query, k=1)
         if not np.isfinite(distance) or float(distance) > max_radius_m:
             return None
         return int(index), float(distance)
+
+    def nearest_vertices(
+        self, points: list[tuple[float, float]], max_radius_m: float = 2000.0
+    ) -> list[tuple[int, float] | None]:
+        """``nearest_vertex`` for many points at once, same contract per point."""
+        if not points or not self.node_of:
+            return [None] * len(points)
+        self._ensure_vertex_kdtree()
+        assert self._vertex_kdtree is not None
+        query = self._enu_east_north(points)
+        distances, indices = self._vertex_kdtree.query(query, k=1)
+        return [
+            None
+            if not np.isfinite(distance) or float(distance) > max_radius_m
+            else (int(index), float(distance))
+            for distance, index in zip(distances, indices)
+        ]
+
+    def _ensure_vertex_kdtree(self) -> None:
+        if self._vertex_kdtree is None:
+            points = np.array(
+                [(self.node_enu[node][0], self.node_enu[node][1]) for node in self.node_of]
+            )
+            self._vertex_kdtree = cKDTree(points)
 
 
 def _add_intersection_edges(
@@ -362,6 +452,7 @@ def load_road_graph(
         except EmptyRoadGraphError as error:
             last_error = error
             continue
+        graph.loaded_with = (oi, trim)
         _GRAPH_CACHE[(resolved, oi, trim)] = graph
         _GRAPH_CACHE[key] = graph
         return graph

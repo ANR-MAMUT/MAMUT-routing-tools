@@ -75,3 +75,21 @@ def test_nearest_node_uses_box_inclusion(fixture_osm_path: Path) -> None:
     # 120 m straight east: outside the box, no match.
     lon_far = 4.000 + 120.0 / (111_320.0 * 0.7071067811865476)
     assert graph.nearest_node(45.000, lon_far) is None
+
+
+def test_batched_nearest_nodes_matches_the_one_by_one_search(fixture_osm_path: Path) -> None:
+    from mamut_routing_tools.roadgraph.build import load_road_graph
+
+    graph = load_road_graph(fixture_osm_path)
+    points = [
+        (45.0, 4.0),          # exactly on a road node
+        (45.0006, 4.008),     # just off one
+        (45.0025, 4.0025),    # beyond the 100 m box: no road node in range
+        (45.5, 4.5),          # far outside the extract
+        (44.995, 4.005),
+    ]
+    batched = graph.nearest_nodes(points)
+    assert batched == [graph.nearest_node(lat, lon) for lat, lon in points]
+    assert batched[0] == 1 and batched[2] is None and batched[3] is None
+    # An empty batch is not an error, and never touches the tree.
+    assert graph.nearest_nodes([]) == []

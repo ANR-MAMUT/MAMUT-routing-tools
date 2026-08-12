@@ -12,12 +12,12 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -40,7 +40,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 class JobSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["fetch-osm", "generate", "bulk-generate", "solve"]
+    kind: Literal["fetch-osm", "refresh-pois", "generate", "bulk-generate", "solve"]
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -49,6 +49,13 @@ class SolutionComparisonRequest(BaseModel):
 
     candidate_run_id: str
     reference_run_id: str
+
+
+# How many POIs the map picker receives by default, and the ceiling a caller may
+# ask for. A large extract holds tens of thousands of amenities; drawing them all
+# is what makes the picker unusable, not fetching them.
+POI_PICKER_LIMIT = 3000
+POI_PICKER_MAX_LIMIT = 20000
 
 
 def _payload_error(status: int, message: str) -> JSONResponse:
@@ -103,6 +110,10 @@ def _request_to_generation(payload: dict[str, Any], workspace: Path) -> "Any":
         )
     if payload.get("hybridPoiShare") is not None:
         request.hybrid_poi_share = float(payload["hybridPoiShare"])
+    if payload.get("poiAttachMode"):
+        request.poi_attach_mode = str(payload["poiAttachMode"])
+    if payload.get("poiAttachRadiusM") is not None:
+        request.poi_attach_radius_m = float(payload["poiAttachRadiusM"])
     if payload.get("onlyIntersections") is not None:
         request.only_intersections = bool(payload["onlyIntersections"])
     if payload.get("trimToConnectedGraph") is not None:
@@ -114,33 +125,98 @@ def _request_to_generation(payload: dict[str, Any], workspace: Path) -> "Any":
         request.manual_poi_ids = [int(value) for value in raw_ids]
     if payload.get("manualDepotPoiId") is not None:
         request.manual_depot_poi_id = int(payload["manualDepotPoiId"])
+    # The typed forms; the bare-id ones above stay accepted and mean nodes, which
+    # is what every pick was before ways and relations became selectable.
+    if payload.get("manualPois"):
+        request.manual_poi_refs = [_poi_ref_from_payload(entry) for entry in payload["manualPois"]]
+    if payload.get("manualDepotPoi") is not None:
+        request.manual_depot_poi_ref = _poi_ref_from_payload(payload["manualDepotPoi"])
     return request
 
 
-# Parsed POI pools keyed by (path, mtime, size); one entry per extract, since
-# the picker asks again on every category toggle and re-parsing a 100+ MB city
-# each time would make the mode unusable. Bounded so a long session that
-# browses many cities cannot grow it without limit.
-_POI_CACHE: "OrderedDict[tuple[str, int, int], list[Any]]" = OrderedDict()
-_POI_CACHE_MAX_CITIES = 4
+def _poi_ref_from_payload(entry: Any) -> tuple[str, int]:
+    """``{"type": "way", "id": 42}`` as the ``(osm_type, osm_id)`` pair used inside."""
+    if isinstance(entry, dict):
+        osm_type = str(entry.get("type") or entry.get("osm_type") or "node")
+        raw_id = entry.get("id", entry.get("osm_id"))
+    else:
+        osm_type, raw_id = "node", entry
+    if raw_id is None:
+        raise ValueError("A picked POI needs an 'id'")
+    if osm_type not in ("node", "way", "relation"):
+        raise ValueError(f"Unsupported POI element type '{osm_type}'")
+    return osm_type, int(raw_id)
 
 
 def _cached_pois(osm_path: Path) -> list[Any]:
-    from mamut_routing_tools.generation.pois import POI_CATEGORIES, find_pois
+    """The extract's POI catalog, parsed at most once per file version.
 
-    stat = osm_path.stat()
-    key = (str(osm_path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
-    cached = _POI_CACHE.get(key)
-    if cached is not None:
-        _POI_CACHE.move_to_end(key)
-        return cached
-    # The whole catalog is parsed once and filtered per request, so toggling a
-    # category never costs another pass over the file.
-    pois = find_pois(osm_path, list(POI_CATEGORIES))
-    _POI_CACHE[key] = pois
-    while len(_POI_CACHE) > _POI_CACHE_MAX_CITIES:
-        _POI_CACHE.popitem(last=False)
-    return pois
+    Shared with manual generation through ``generation.pois``: both resolve the
+    same picked OSM ids, so caching here only would leave every preview and
+    generate re-parsing the extract.
+    """
+    from mamut_routing_tools.generation.pois import load_poi_catalog
+
+    return load_poi_catalog(osm_path)
+
+
+def _osmdata_audit_payload(workspace: Path) -> dict[str, Any]:
+    """Coverage of every extract in the workspace, newest fetches first."""
+    from mamut_routing_tools.osm import audit_extracts
+
+    root = osmdata_dir(workspace, create=False)
+    extracts = audit_extracts(root)
+    return {
+        "ok": True,
+        "local_osmdata_dir": str(root),
+        "extracts": extracts,
+        "outdated": sum(
+            1 for entry in extracts if entry.get("can_refresh") and entry.get("status") != "complete"
+        ),
+    }
+
+
+def _refresh_pois_payload(
+    payload: dict[str, Any], workspace: Path, context: JobContext | None = None
+) -> dict[str, Any]:
+    """Backfill way- and relation-mapped amenities into extracts already on disk.
+
+    Runs the amenity query only, leaving each file's road network alone, so
+    refreshing a whole workspace costs a fraction of re-fetching the cities.
+    """
+    from mamut_routing_tools.generation.pois import POI_CATEGORIES
+    from mamut_routing_tools.osm import audit_extracts, refresh_extracts
+
+    root = osmdata_dir(workspace, create=False)
+    reports = audit_extracts(root)
+    wanted = {str(name).strip().lower() for name in (payload.get("cities") or []) if str(name).strip()}
+    if wanted:
+        selected = [entry for entry in reports if entry["city"].lower() in wanted]
+    else:
+        # No explicit list means "whatever is behind", not "everything".
+        selected = [entry for entry in reports if entry.get("status") != "complete"]
+    selected = [entry for entry in selected if entry.get("can_refresh")]
+    if not selected:
+        return {"ok": True, "refreshed": 0, "gained": 0, "results": [], "note": "nothing to refresh"}
+
+    def on_city(index: int, total: int, path: Path) -> None:
+        if context is not None:
+            context.check_cancelled()
+            context.progress(f"Refreshing {path.stem}", current=index, total=total)
+
+    def report_progress(event: dict[str, Any]) -> None:
+        if context is None:
+            return
+        context.check_cancelled()
+
+    result = refresh_extracts(
+        [Path(entry["path"]) for entry in selected],
+        poi_categories=tuple(POI_CATEGORIES),
+        on_city=on_city,
+        progress=report_progress,
+    )
+    result["local_osmdata_dir"] = str(root)
+    return result
 
 
 def _find_city_osm(city: str, workspace: Path) -> Path:
@@ -254,6 +330,15 @@ def _instance_map_payload(record: dict[str, Any]) -> dict[str, Any]:
                     "poi_name": node.get("poi_name"),
                     "poi_category": node.get("poi_category"),
                     "poi_osm_id": node.get("poi_osm_id"),
+                    # Absent in metadata written before ways were extracted, and
+                    # every POI was a node back then.
+                    "poi_osm_type": node.get("poi_osm_type")
+                    or ("node" if node.get("poi_osm_id") is not None else None),
+                    # Absent in metadata written before co-located POIs were kept.
+                    "poi_merged": node.get("poi_merged") or [],
+                    # How far the amenity was moved to reach a routable point:
+                    # zero under strict attachment, non-zero when it snapped.
+                    "snap_distance_m": node.get("snap_distance_m") or 0.0,
                 },
             }
         )
@@ -553,11 +638,14 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         }
 
     @app.get("/api/workbench/generation/pois")
-    async def generation_pois(city: str, categories: str = "") -> Any:
+    async def generation_pois(city: str, categories: str = "", limit: int = POI_PICKER_LIMIT) -> Any:
         """The POI pool of a city extract, for the hand-pick generation mode.
 
         A pure XML pass with no road-graph load, cached per extract because the
         picker re-queries on every category toggle and big cities are 100+ MB.
+        Capped at ``limit`` features: a real city holds tens of thousands of
+        amenities, and both the response size and one Leaflet marker per feature
+        would make the picker unusable. ``truncated`` tells the UI to say so.
         """
         from mamut_routing_tools.generation.pois import POI_CATEGORIES
 
@@ -569,30 +657,43 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         unknown = [value for value in wanted if value not in POI_CATEGORIES]
         if unknown:
             return _payload_error(400, f"Unknown POI categories: {', '.join(unknown)}")
-        pois = _cached_pois(osm_path)
+        capped = max(1, min(int(limit), POI_PICKER_MAX_LIMIT))
+        pois = await run_in_threadpool(_cached_pois, osm_path)
         selected = set(wanted) if wanted else None
+        matching = [
+            poi
+            for poi in pois
+            if poi.osm_id is not None and (selected is None or poi.category in selected)
+        ]
         features = [
             {
                 "type": "Feature",
                 "geometry": {"type": "Point", "coordinates": [poi.lon, poi.lat]},
                 "properties": {
                     "osm_id": poi.osm_id,
+                    # Ways and relations share the node id space, so the picker
+                    # has to send both halves back to identify a pick.
+                    "osm_type": poi.osm_type,
                     "name": poi.name,
                     "category": poi.category,
                 },
             }
-            for poi in pois
-            if poi.osm_id is not None and (selected is None or poi.category in selected)
+            for poi in matching[:capped]
         ]
+        # Counted over the selected categories, so the numbers agree with what
+        # the map is showing rather than with the unfiltered catalog.
         counts: dict[str, int] = {}
-        for poi in pois:
+        for poi in matching:
             counts[poi.category] = counts.get(poi.category, 0) + 1
         return {
             "ok": True,
             "city": city,
             "osm_path": str(osm_path),
             "total_in_extract": len(pois),
+            "matching": len(matching),
             "returned": len(features),
+            "truncated": len(matching) > len(features),
+            "limit": capped,
             "named": sum(1 for feature in features if feature["properties"]["name"]),
             "category_counts": counts,
             "geojson": {"type": "FeatureCollection", "features": features},
@@ -602,7 +703,9 @@ def create_app(workspace: Path, token: str) -> FastAPI:
     async def generation_bulk_preflight(request: Request) -> Any:
         payload = await request.json()
         try:
-            return _bulk_preflight_payload(payload, workspace)
+            # Builds a road graph and POI pool per selection group: minutes of
+            # blocking CPU, which would freeze job polling on the event loop.
+            return await run_in_threadpool(_bulk_preflight_payload, payload, workspace)
         except Exception as error:  # noqa: BLE001
             return _payload_error(400, str(error))
 
@@ -616,6 +719,15 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             record["solution_count"] = len(solutions.list(str(record["instance_id"])))
         return {"ok": True, "instances": records}
 
+    @app.get("/api/workbench/osmdata/audit")
+    async def osmdata_audit() -> Any:
+        """What each stored extract holds, so the UI can flag stale ones.
+
+        A full streaming pass per file, which is seconds on a workspace of big
+        cities, so it runs off the event loop.
+        """
+        return await run_in_threadpool(_osmdata_audit_payload, workspace)
+
     @app.post("/api/workbench/generation/fetch-osm-city")
     async def generation_fetch_city(request: Request) -> Any:
         payload = await request.json()
@@ -624,33 +736,70 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         except Exception as error:  # noqa: BLE001 - surfaced as the API error contract
             return _payload_error(400, str(error))
 
-    async def _preview(request: Request) -> Any:
-        payload = await request.json()
-        from mamut_routing_tools.generation.pois import is_poi_source_tag
-        from mamut_routing_tools.generation.single import build_generation_selection, preview_geojson
+    def _selection_report(payload: dict[str, Any]) -> dict[str, Any]:
+        """Everything the UI needs to describe a selection before committing to it.
 
-        try:
-            generation_request = _request_to_generation(payload, workspace)
-            selection = build_generation_selection(generation_request)
-        except Exception as error:  # noqa: BLE001
-            return _payload_error(400, str(error))
+        Built from the real selection, so the composition it reports is exactly
+        the one generation will produce for these parameters and seed.
+        """
+        from mamut_routing_tools.generation.pois import is_poi_source_tag
+        from mamut_routing_tools.generation.single import (
+            build_generation_selection,
+            composition_notice,
+            preview_geojson,
+        )
+
+        generation_request = _request_to_generation(payload, workspace)
+        selection = build_generation_selection(generation_request)
         tags = selection.source_tags[1:]
         poi_count = sum(1 for tag in tags if is_poi_source_tag(tag))
+        composition = selection.params.get("composition")
         return {
             "ok": True,
             "geojson": preview_geojson(selection),
+            "notice": composition_notice(composition),
             "summary": {
                 "preview_mode": "osm",
                 "city": selection.params["city"],
+                # The method the instance will be recorded as, which a POI
+                # request completed parametrically no longer matches.
                 "method": selection.params["method"],
+                "requested_method": selection.params.get("requested_method"),
                 "customers": int(selection.params["n_customers"]),
                 "poi_customers": poi_count,
                 "parametric_customers": len(tags) - poi_count,
+                "composition": composition,
             },
         }
 
+    async def _preview(request: Request) -> Any:
+        payload = await request.json()
+        try:
+            # Loads a road graph and walks the POI pool: seconds to minutes of
+            # blocking CPU, which would stall job polling on the event loop.
+            return await run_in_threadpool(_selection_report, payload)
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
+
     app.post("/api/workbench/generation/preview")(_preview)
     app.post("/api/workbench/generation/generate")(_preview)
+
+    @app.post("/api/workbench/generation/preflight")
+    async def generation_preflight(request: Request) -> Any:
+        """The composition a single generation would produce, without the map.
+
+        The Generate button calls this first so a request the POI categories
+        cannot serve is confirmed by the user instead of being silently topped
+        up with parametric road points. The road graph is cached in-process, so
+        the generation job that follows does not pay for the graph twice.
+        """
+        payload = await request.json()
+        try:
+            report = await run_in_threadpool(_selection_report, payload)
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
+        report.pop("geojson", None)
+        return report
 
     @app.post("/api/workbench/generation/single")
     async def generation_single(request: Request) -> Any:
@@ -723,6 +872,8 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             context.log(f"Request: {json.dumps(payload, sort_keys=True)}")
             if submission.kind == "fetch-osm":
                 return _fetch_osm_payload(payload, workspace, context)
+            if submission.kind == "refresh-pois":
+                return _refresh_pois_payload(payload, workspace, context)
             if submission.kind == "generate":
                 return _generate_single_payload(payload, workspace, context)
             if submission.kind == "bulk-generate":

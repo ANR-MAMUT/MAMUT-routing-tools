@@ -93,33 +93,41 @@ def normalize_imported_routes(routes: list[list[int]], num_customers: int) -> li
     """Map an external stop-id convention onto library model ids (depot 0).
 
     External files disagree on whether customers are numbered 1..n (CVRPLIB, the
-    common case) or 0..n-1, and some include the depot at the route ends. The id
-    range decides, so a file is either understood exactly or rejected -- never
-    silently reinterpreted into a different instance.
+    common case) or 0..n-1, and some include the depot at the route ends. A file
+    is either understood exactly or rejected -- never silently reinterpreted into
+    a different instance.
+
+    The two conventions are told apart *before* any depot stripping, because a
+    literal 0 is a depot marker under one and a customer under the other. Only a
+    file that covers 0..n-1 exactly once, zero included, is read as 0-based;
+    everything else is read as 1..n with 0 meaning the depot.
     """
-    stops = [stop for route in routes for stop in route]
-    if not stops:
+    raw_stops = [stop for route in routes for stop in route]
+    if not raw_stops:
         raise SolutionImportError("The solution contains no customer stops.")
 
-    depot_stripped = [[stop for stop in route if stop != 0] for route in routes]
-    if any(len(route) != len(original) for route, original in zip(depot_stripped, routes)):
-        # Depot 0 written explicitly at route boundaries: drop it, ids are 1..n.
-        routes = depot_stripped
-        stops = [stop for route in routes for stop in route]
-
-    low, high = min(stops), max(stops)
-    if low >= 1 and high <= num_customers:
-        normalized = routes  # already 1..n, which is the model id of customers
-    elif low >= 0 and high <= num_customers - 1:
+    zero_based = (
+        0 in raw_stops
+        and len(raw_stops) == len(set(raw_stops))
+        and set(raw_stops) == set(range(num_customers))
+    )
+    if zero_based:
         normalized = [[stop + 1 for stop in route] for route in routes]
     else:
-        raise SolutionImportError(
-            f"Stop ids run {low}..{high}, which fits neither 1..{num_customers} nor "
-            f"0..{num_customers - 1}; this solution is not for an instance with "
-            f"{num_customers} customers."
-        )
+        # 0 is the depot written at the route boundaries: drop it, ids are 1..n.
+        normalized = [[stop for stop in route if stop != 0] for route in routes]
 
     flat = [stop for route in normalized if route for stop in route]
+    if not flat:
+        raise SolutionImportError("The solution contains no customer stops.")
+    low, high = min(flat), max(flat)
+    if low < 1 or high > num_customers:
+        raise SolutionImportError(
+            f"Stop ids run {min(raw_stops)}..{max(raw_stops)}, which fits neither "
+            f"1..{num_customers} nor 0..{num_customers - 1}; this solution is not "
+            f"for an instance with {num_customers} customers."
+        )
+
     seen = Counter(flat)
     duplicates = sorted(stop for stop, count in seen.items() if count > 1)
     if duplicates:

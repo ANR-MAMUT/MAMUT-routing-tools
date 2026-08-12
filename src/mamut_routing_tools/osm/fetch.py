@@ -192,13 +192,26 @@ def _road_statement(bbox: str, road_classes: tuple[str, ...] | None) -> str:
     return f'way["highway"~{pattern}]{bbox};'
 
 
+#: Amenities are mapped as nodes, as closed ways (a building outline) and, more
+#: rarely, as multipolygon relations. Asking for nodes alone loses a quarter to a
+#: third of the real POIs in a typical city -- most bars and restaurants that sit
+#: in a mapped building, and nearly every car park. ``out center`` gives ways and
+#: relations a single representative point without downloading their geometry,
+#: which is all a customer location needs.
+_AMENITY_ELEMENT_TYPES = ("node", "way", "relation")
+#: Emits the ``<center lat lon>`` child that ways and relations are located by.
+AMENITY_OUT_STATEMENT = "out center qt;"
+
+
 def _amenity_statement(
     bbox: str, poi_categories: tuple[str, ...] | None
 ) -> str:
     if poi_categories is None:
-        return f'node["amenity"]{bbox};'
-    pattern = json.dumps(_overpass_regex(poi_categories))
-    return f'node["amenity"~{pattern}]{bbox};'
+        selector = '["amenity"]'
+    else:
+        selector = f'["amenity"~{json.dumps(_overpass_regex(poi_categories))}]'
+    members = "\n".join(f"  {kind}{selector}{bbox};" for kind in _AMENITY_ELEMENT_TYPES)
+    return f"(\n{members}\n);"
 
 
 def build_road_overpass_query(
@@ -219,11 +232,11 @@ def build_amenity_overpass_query(
     *,
     poi_categories: tuple[str, ...] | None = tuple(DEFAULT_CATEGORIES),
 ) -> str:
-    """Fetch POI nodes only, optionally restricted to selected categories."""
+    """Fetch POI nodes, ways and relations, optionally restricted to categories."""
     return (
         "[out:xml][timeout:75][maxsize:268435456];\n"
         f"{_amenity_statement(bbox, poi_categories)}\n"
-        "out body qt;\n"
+        f"{AMENITY_OUT_STATEMENT}\n"
     )
 
 
@@ -250,7 +263,7 @@ def build_overpass_query(
     if resolved.include_amenities:
         query += (
             f"{_amenity_statement(bbox, resolved.poi_categories)}\n"
-            "out body qt;\n"
+            f"{AMENITY_OUT_STATEMENT}\n"
         )
     return query
 
@@ -340,7 +353,11 @@ def _write_cached_body(path: Path, body: str) -> None:
     try:
         with tempfile.NamedTemporaryFile(
             dir=path.parent,
-            prefix=f".{path.name}.",
+            # A short prefix, not the target's own name: a cache entry is named
+            # after a 64-character digest, and repeating it inside the temporary
+            # name pushes the path past the 260-character Windows limit as soon
+            # as the workspace sits a few directories deep.
+            prefix=".tile.",
             suffix=".tmp",
             delete=False,
         ) as output:
@@ -407,7 +424,8 @@ def _atomic_write_text(path: Path, text: str) -> None:
             mode="w",
             encoding="utf-8",
             dir=path.parent,
-            prefix=f".{path.name}.",
+            # Short, for the same path-length reason as the tile cache above.
+            prefix=f".{path.stem[:24]}.",
             suffix=".tmp",
             delete=False,
         ) as output:
@@ -453,6 +471,9 @@ _NODE_BLOCK_PATTERN = re.compile(
     r'(?s)<node\b[^>]*\bid="-?\d+"[^>]*/>|<node\b[^>]*\bid="-?\d+"[^>]*>.*?</node>'
 )
 _WAY_BLOCK_PATTERN = re.compile(r'(?s)<way\b[^>]*\bid="-?\d+"[^>]*>.*?</way>')
+_RELATION_BLOCK_PATTERN = re.compile(
+    r'(?s)<relation\b[^>]*\bid="-?\d+"[^>]*>.*?</relation>'
+)
 _ELEMENT_ID_PATTERN = re.compile(r'\bid="(-?\d+)"')
 
 
@@ -519,6 +540,9 @@ class _OsmElementStore:
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, xml TEXT NOT NULL)")
         self.connection.execute("CREATE TABLE ways (id INTEGER PRIMARY KEY, xml TEXT NOT NULL)")
+        self.connection.execute(
+            "CREATE TABLE relations (id INTEGER PRIMARY KEY, xml TEXT NOT NULL)"
+        )
 
     @staticmethod
     def _element_id(block: str) -> int | None:
@@ -540,8 +564,18 @@ class _OsmElementStore:
             block = match.group(0)
             element_id = self._element_id(block)
             if element_id is not None:
+                # OR IGNORE, so the road copy of a way -- the only one carrying
+                # <nd> refs -- always wins over the centre-only amenity copy.
                 self.connection.execute(
                     "INSERT OR IGNORE INTO ways(id, xml) VALUES (?, ?)",
+                    (element_id, block),
+                )
+        for match in _RELATION_BLOCK_PATTERN.finditer(body):
+            block = match.group(0)
+            element_id = self._element_id(block)
+            if element_id is not None:
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO relations(id, xml) VALUES (?, ?)",
                     (element_id, block),
                 )
         self.connection.commit()
@@ -552,6 +586,14 @@ class _OsmElementStore:
         nodes = int(self.connection.execute("SELECT COUNT(*) FROM nodes").fetchone()[0])
         ways = int(self.connection.execute("SELECT COUNT(*) FROM ways").fetchone()[0])
         return nodes, ways
+
+    def element_counts(self) -> dict[str, int]:
+        """Row counts per element type, relations included."""
+        nodes, ways = self.counts()
+        relations = int(
+            self.connection.execute("SELECT COUNT(*) FROM relations").fetchone()[0]
+        )
+        return {"nodes": nodes, "ways": ways, "relations": relations}
 
     def write(
         self,
@@ -575,6 +617,8 @@ class _OsmElementStore:
                 for (xml,) in self.connection.execute("SELECT xml FROM nodes ORDER BY id"):
                     output.write(f"{xml}\n")
                 for (xml,) in self.connection.execute("SELECT xml FROM ways ORDER BY id"):
+                    output.write(f"{xml}\n")
+                for (xml,) in self.connection.execute("SELECT xml FROM relations ORDER BY id"):
                     output.write(f"{xml}\n")
                 output.write("</osm>\n")
             validate_osm_extract(temporary)
@@ -627,6 +671,46 @@ def merge_nodes_into_osm(osm_path: Path, node_blocks: list[str]) -> int:
     return len(to_add)
 
 
+def merge_amenity_elements_into_osm(osm_path: Path, body: str) -> tuple[int, int, int]:
+    """Fold one amenity response into an existing road extract.
+
+    Nodes keep the enriching behaviour of ``merge_nodes_into_osm``: a POI body
+    replaces the tagless skeleton copy of the same node. Ways and relations are
+    only ever *appended*, never substituted -- a road way already in the file is
+    the one holding the ``<nd>`` refs the graph is built from, and the amenity
+    copy of it carries a ``<center>`` instead. Returns the counts added, per
+    element type.
+    """
+    nodes_added = merge_nodes_into_osm(
+        osm_path, [match.group(0) for match in _NODE_BLOCK_PATTERN.finditer(body)]
+    )
+    text = osm_path.read_text(encoding="utf-8")
+    additions: list[str] = []
+    counts: list[int] = []
+    for pattern in (_WAY_BLOCK_PATTERN, _RELATION_BLOCK_PATTERN):
+        present = {
+            _ELEMENT_ID_PATTERN.search(match.group(0)).group(1)  # type: ignore[union-attr]
+            for match in pattern.finditer(text)
+            if _ELEMENT_ID_PATTERN.search(match.group(0)) is not None
+        }
+        new_blocks: dict[str, str] = {}
+        for match in pattern.finditer(body):
+            block = match.group(0)
+            id_match = _ELEMENT_ID_PATTERN.search(block)
+            if id_match is not None and id_match.group(1) not in present:
+                new_blocks[id_match.group(1)] = block
+        additions.extend(new_blocks.values())
+        counts.append(len(new_blocks))
+    if additions:
+        close_at = text.rfind("</osm>")
+        if close_at < 0:
+            raise FetchError(f"Invalid OSM file (missing </osm>): {osm_path}")
+        _atomic_write_text(
+            osm_path, text[:close_at] + "\n" + "\n".join(additions) + "\n" + text[close_at:]
+        )
+    return nodes_added, counts[0], counts[1]
+
+
 def fetch_tiled_amenities(
     min_lat: float,
     min_lon: float,
@@ -649,7 +733,7 @@ def fetch_tiled_amenities(
     lat_tiles = split_range(min_lat, max_lat, AMENITY_TILE_LAT_SPAN)
     lon_tiles = split_range(min_lon, max_lon, AMENITY_TILE_LON_SPAN)
     total_tiles = len(lat_tiles) * len(lon_tiles)
-    blocks: list[str] = []
+    bodies: list[str] = []
     tiles_ok = 0
     cache_hits = 0
     failure_count = 0
@@ -668,9 +752,7 @@ def fetch_tiled_amenities(
             if result.body is None:
                 failure_count += len(result.failures)
             else:
-                blocks.extend(
-                    match.group(0) for match in _NODE_BLOCK_PATTERN.finditer(result.body)
-                )
+                bodies.append(result.body)
                 tiles_ok += 1
             if progress is not None:
                 progress(
@@ -682,13 +764,20 @@ def fetch_tiled_amenities(
                         "cache_hits": cache_hits,
                     }
                 )
-    added = merge_nodes_into_osm(outpath, blocks)
+    added = ways_added = relations_added = 0
+    for body in bodies:
+        nodes, ways, relations = merge_amenity_elements_into_osm(outpath, body)
+        added += nodes
+        ways_added += ways
+        relations_added += relations
     return {
         "ok": tiles_ok == total_tiles,
         "tiles_total": total_tiles,
         "tiles_ok": tiles_ok,
         "cache_hits": cache_hits,
         "amenity_nodes_added": added,
+        "amenity_ways_added": ways_added,
+        "amenity_relations_added": relations_added,
         "failure_count": failure_count,
     }
 
@@ -718,11 +807,10 @@ def _fetch_direct_amenities(
         read_timeout=120.0,
     )
     ok = result.body is not None
-    added = 0
+    added = ways_added = relations_added = 0
     if result.body is not None:
-        added = merge_nodes_into_osm(
-            outpath,
-            [match.group(0) for match in _NODE_BLOCK_PATTERN.finditer(result.body)],
+        added, ways_added, relations_added = merge_amenity_elements_into_osm(
+            outpath, result.body
         )
     if progress is not None:
         progress(
@@ -740,6 +828,8 @@ def _fetch_direct_amenities(
         "tiles_ok": int(ok),
         "cache_hits": int(cache_hit),
         "amenity_nodes_added": added,
+        "amenity_ways_added": ways_added,
+        "amenity_relations_added": relations_added,
         "failure_count": 0 if ok else len(result.failures),
     }
 
@@ -751,6 +841,8 @@ def _empty_amenity_tiling() -> dict[str, Any]:
         "tiles_ok": 0,
         "cache_hits": 0,
         "amenity_nodes_added": 0,
+        "amenity_ways_added": 0,
+        "amenity_relations_added": 0,
         "failure_count": 0,
     }
 
@@ -871,6 +963,7 @@ def fetch_tiled_osm(
                 amenity_cache_hits = 0
                 amenity_failures = 0
                 amenity_nodes_before, _ = store.counts()
+                amenity_elements_before = store.element_counts()
                 for lat_lo, lat_hi in amenity_lat_tiles:
                     for lon_lo, lon_hi in amenity_lon_tiles:
                         bbox = f"({lat_lo},{lon_lo},{lat_hi},{lon_hi})"
@@ -898,6 +991,7 @@ def fetch_tiled_osm(
                                 }
                             )
                 amenity_nodes_after, _ = store.counts()
+                amenity_elements_after = store.element_counts()
                 amenity_tiling = {
                     "ok": amenity_ok == amenity_total,
                     "tiles_total": amenity_total,
@@ -905,6 +999,12 @@ def fetch_tiled_osm(
                     "cache_hits": amenity_cache_hits,
                     "amenity_nodes_added": amenity_nodes_after
                     - amenity_nodes_before,
+                    # Ways and relations are pure amenity gains here: the road
+                    # phase never fetches a way this phase could also claim.
+                    "amenity_ways_added": amenity_elements_after["ways"]
+                    - amenity_elements_before["ways"],
+                    "amenity_relations_added": amenity_elements_after["relations"]
+                    - amenity_elements_before["relations"],
                     "failure_count": amenity_failures,
                 }
 

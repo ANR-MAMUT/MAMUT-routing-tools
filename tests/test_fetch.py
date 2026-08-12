@@ -56,7 +56,12 @@ def test_overpass_query_shapes() -> None:
     assert "amenity" not in roads
 
     pois = build_amenity_overpass_query(bbox)
+    # Amenities are mapped as nodes, building outlines and multipolygons alike;
+    # out center gives the latter two a point without their geometry.
     assert 'node["amenity"~' in pois
+    assert 'way["amenity"~' in pois
+    assert 'relation["amenity"~' in pois
+    assert "out center qt;" in pois
     assert "restaurant" in pois and "parking" not in pois
 
     extended_pois = build_amenity_overpass_query(
@@ -74,10 +79,12 @@ def test_overpass_query_shapes() -> None:
     combined = build_overpass_query(bbox)
     assert 'way["highway"~' in combined
     assert 'node["amenity"~' in combined
+    assert 'way["amenity"~' in combined
 
     full = build_overpass_query(bbox, profile="full")
     assert 'way["highway"]' + bbox in full
     assert 'node["amenity"]' + bbox in full
+    assert 'relation["amenity"]' + bbox in full
 
 
 def test_fetch_profiles_validate_conflicts() -> None:
@@ -326,7 +333,12 @@ def test_small_generation_fetch_splits_roads_and_filtered_pois(
         '<node id="2" lat="45.005" lon="4.005">'
         '<tag k="amenity" v="cafe"/></node>'
         '<node id="3" lat="45.006" lon="4.006">'
-        '<tag k="amenity" v="restaurant"/></node></osm>'
+        '<tag k="amenity" v="restaurant"/></node>'
+        # A restaurant drawn as a building outline: no position of its own, so
+        # Overpass reports the centre it computed.
+        '<way id="77"><center lat="45.007" lon="4.007"/>'
+        '<tag k="amenity" v="restaurant"/><tag k="name" v="Chez Way"/></way>'
+        "</osm>"
     )
 
     def fake_fetch(query: str, **kwargs) -> OverpassResult:
@@ -359,6 +371,11 @@ def test_small_generation_fetch_splits_roads_and_filtered_pois(
     assert text.count('id="2"') == 1
     assert '<tag k="amenity" v="cafe"/>' in text
     assert 'id="3"' in text
+    # The way-mapped restaurant survives into the extract, centre and all, and
+    # does not displace the road way it shares the file with.
+    assert '<way id="77">' in text and '<center lat="45.007"' in text
+    assert '<tag k="name" v="Chez Way"/>' in text
+    assert summary["amenity_tiling"]["amenity_ways_added"] == 1
 
 
 def test_merge_nodes_into_osm(tmp_path: Path) -> None:
@@ -404,3 +421,91 @@ def test_merge_nodes_enriches_existing_skeleton_node(tmp_path: Path) -> None:
     text = osm.read_text(encoding="utf-8")
     assert text.count('id="1"') == 1
     assert 'amenity" v="cafe' in text
+
+
+def test_audit_extract_separates_point_and_outline_pois(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    from mamut_routing_tools.osm import audit_extract, audit_extracts
+
+    report = audit_extract(fixture_osm_path)
+    assert report["city"] == "Testville"
+    assert report["poi_nodes"] == 7 and report["poi_ways"] == 1 and report["poi_relations"] == 1
+    # An extract holding way-mapped amenities was fetched by a version that asks
+    # for them, so it has nothing to gain from a refresh.
+    assert report["status"] == "complete" and report["can_refresh"] is True
+    assert report["bounds"]["minlat"] == 44.99
+
+    # The signature of an extract fetched before ways were queried: amenities,
+    # but every one of them on a node.
+    (tmp_path / "Oldtown.osm").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6">\n'
+        '  <bounds minlat="44.99" minlon="3.99" maxlat="45.01" maxlon="4.01"/>\n'
+        '<node id="1" lat="45.0" lon="4.0"><tag k="amenity" v="cafe"/></node>\n'
+        '<way id="10"><nd ref="1"/><tag k="highway" v="residential"/></way>\n'
+        "</osm>\n",
+        encoding="utf-8",
+    )
+    listed = {entry["city"]: entry for entry in audit_extracts(tmp_path)}
+    assert listed["Oldtown"]["poi_nodes"] == 1 and listed["Oldtown"]["poi_ways"] == 0
+    assert listed["Oldtown"]["status"] == "nodes_only"
+    assert listed["Testville"]["status"] == "complete"
+
+
+def test_audit_reports_an_extract_it_cannot_read(tmp_path: Path) -> None:
+    from mamut_routing_tools.osm import audit_extracts
+
+    (tmp_path / "Broken.osm").write_text("<osm><node id=", encoding="utf-8")
+    (entry,) = audit_extracts(tmp_path)
+    # One unreadable file must not hide the rest of the workspace.
+    assert entry["status"] == "unreadable" and entry["can_refresh"] is False
+
+
+def test_refresh_extract_backfills_only_the_amenity_query(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mamut_routing_tools.osm import refresh_extract_pois
+
+    target = tmp_path / "Pointville.osm"
+    target.write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<osm version="0.6">\n'
+        '  <bounds minlat="44.99" minlon="3.99" maxlat="45.01" maxlon="4.01"/>\n'
+        '<node id="1" lat="45.0" lon="4.0"><tag k="amenity" v="cafe"/></node>\n'
+        '<node id="2" lat="45.001" lon="4.001"/>\n'
+        '<way id="10"><nd ref="1"/><nd ref="2"/><tag k="highway" v="residential"/></way>\n'
+        "</osm>\n",
+        encoding="utf-8",
+    )
+    queries: list[str] = []
+
+    def fake_fetch(query: str, **kwargs) -> OverpassResult:
+        queries.append(query)
+        return OverpassResult(
+            body='<?xml version="1.0"?><osm version="0.6">'
+            '<way id="88"><center lat="45.002" lon="4.002"/>'
+            '<tag k="amenity" v="restaurant"/></way></osm>'
+        )
+
+    monkeypatch.setattr(fetch_module, "fetch_overpass_body", fake_fetch)
+    report = refresh_extract_pois(target, use_tile_cache=False)
+
+    assert report["ok"] and report["gained_ways"] >= 1
+    assert report["status_before"] == "nodes_only" and report["status_after"] == "complete"
+    assert report["poi_total_after"] > report["poi_total_before"]
+    # Roads are never re-downloaded, and the road way keeps its node refs.
+    assert queries and all("highway" not in query for query in queries)
+    text = target.read_text(encoding="utf-8")
+    assert '<way id="10"><nd ref="1"/>' in text and '<way id="88">' in text
+
+
+def test_refresh_extract_refuses_a_file_without_bounds(tmp_path: Path) -> None:
+    from mamut_routing_tools.osm import refresh_extract_pois
+
+    target = tmp_path / "Boundless.osm"
+    target.write_text(
+        '<?xml version="1.0"?><osm version="0.6">'
+        '<node id="1" lat="45.0" lon="4.0"><tag k="amenity" v="cafe"/></node></osm>',
+        encoding="utf-8",
+    )
+    report = refresh_extract_pois(target)
+    assert report["ok"] is False and "bounds" in report["error"]

@@ -99,13 +99,29 @@ def write_instance_metadata(
     poi_categories: list[str | None] | None = None,
     poi_osm_ids: list[int | None] | None = None,
     poi_names: list[str | None] | None = None,
+    poi_osm_types: list[str | None] | None = None,
+    poi_merged: list[list[dict[str, Any]]] | None = None,
     snap_distances_m: list[float] | None = None,
 ) -> None:
     n = len(vertices)
     assert n == len(coords) == len(demands) == len(poi_lats) == len(poi_lons) == len(source_tags)
+    # The POI columns are optional, but a *short* one means a caller sliced the
+    # nodes without slicing the metadata alongside them. Padding that with nulls
+    # would write a wrong instance silently, so it is an error like the rest.
+    for label, column in (
+        ("poi_categories", poi_categories),
+        ("poi_osm_ids", poi_osm_ids),
+        ("poi_names", poi_names),
+        ("poi_osm_types", poi_osm_types),
+        ("poi_merged", poi_merged),
+        ("snap_distances_m", snap_distances_m),
+    ):
+        assert column is None or len(column) == n, (
+            f"{label} has {len(column or [])} entries for {n} nodes"
+        )
 
     def at(values: list[Any] | None, index: int, fallback: Any = None) -> Any:
-        if values is None or index >= len(values):
+        if values is None:
             return fallback
         return values[index]
 
@@ -122,13 +138,21 @@ def write_instance_metadata(
             # Null for the depot and for parametrically sampled customers.
             "poi_category": at(poi_categories, i),
             "poi_osm_id": at(poi_osm_ids, i),
+            # OSM ids repeat across element types, so the id only identifies the
+            # POI together with this. Null wherever poi_osm_id is null.
+            "poi_osm_type": at(poi_osm_types, i),
             "poi_name": at(poi_names, i),
+            # Other amenities snapped to this same point and did not become
+            # customers of their own: one node can stand for several places.
+            "poi_merged": at(poi_merged, i, []),
             "snap_distance_m": at(snap_distances_m, i, 0.0),
         }
         for i in range(n)
     ]
     payload: dict[str, Any] = {
-        # v3 adds poi_category / poi_osm_id / poi_name / snap_distance_m per node.
+        # v3 adds poi_category / poi_osm_id / poi_name / snap_distance_m per node,
+        # and poi_osm_type beside poi_osm_id (absent or null means "node", which
+        # is what every POI was before ways and relations were extracted).
         "schema_version": 3,
         "city": city,
         "instance_name": instance_name,

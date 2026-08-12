@@ -21,8 +21,13 @@ from mamut_routing_tools.generation.demands import (
     demand_distribution_bounds,
     generate_demands,
 )
-from mamut_routing_tools.generation.pois import POI_CATEGORIES, find_pois
-from mamut_routing_tools.generation.single import GenerationRequest, build_generation_selection, generate_single_instance
+from mamut_routing_tools.generation.pois import POI_CATEGORIES, NoPoiFoundError, find_pois
+from mamut_routing_tools.generation.single import (
+    GenerationRequest,
+    build_generation_selection,
+    composition_notice,
+    generate_single_instance,
+)
 from mamut_routing_tools.generation.vrptw import (
     HORIZON_END,
     HORIZON_START,
@@ -182,6 +187,94 @@ def test_manual_selection_snaps_picks_and_reports_them(fixture_osm_path: Path) -
     assert all(distance < 1.0 for distance in selection.snap_distances_m)
 
 
+def test_poi_shortfall_is_reported_instead_of_silently_filled(fixture_osm_path: Path) -> None:
+    # Only the cafe of node 2 matches, so 3 of the 4 customers must fall back to
+    # parametric road points -- the case the GUI has to warn about. The depot is
+    # taken off-center so it does not claim the single matching POI itself.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=4,
+        categories=["cafe"],
+        depot_mode="corner",
+        seed=5,
+    )
+    with pytest.warns(UserWarning, match="POI-attached"):
+        selection = build_generation_selection(request)
+    composition = selection.params["composition"]
+    assert composition["poi_customers"] == 1
+    assert composition["parametric_customers"] == 3
+    assert composition["poi_target"] == 4 and composition["poi_shortfall"] == 3
+    # The whole pool was scanned, so 1 is the ceiling, not just where it stopped.
+    assert composition["poi_pool_matching"] == 1 and composition["poi_pool_attachable"] == 1
+    assert composition["category_count"] == 1
+
+    notice = composition_notice(composition)
+    assert notice is not None
+    assert "3 are parametric road points" in notice
+    assert "reduce the customer count to 1" in notice
+    assert "select more POI categories (1 of 49 selected)" in notice
+
+
+def test_no_notice_when_every_customer_sits_on_a_poi(fixture_osm_path: Path) -> None:
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=2,
+        categories=["restaurant", "cafe", "school", "bar"],
+        depot_mode="corner",
+        seed=5,
+    )
+    selection = build_generation_selection(request)
+    composition = selection.params["composition"]
+    assert composition["poi_shortfall"] == 0 and composition["parametric_customers"] == 0
+    # The whole pool is walked even once the request is served, so the ceiling
+    # is reported for what it is: 4 matching POIs on 4 distinct vertices.
+    assert composition["poi_pool_matching"] == 4
+    assert composition["poi_pool_attachable"] == 4
+    assert composition_notice(composition) is None
+
+
+def test_hybrid_shortfall_advises_on_the_share_as_well(fixture_osm_path: Path) -> None:
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="hybrid",
+        n_customers=4,
+        categories=["cafe"],
+        hybrid_poi_share=0.5,
+        depot_mode="corner",
+        seed=5,
+    )
+    with pytest.warns(UserWarning):
+        selection = build_generation_selection(request)
+    composition = selection.params["composition"]
+    assert composition["poi_target"] == 2 and composition["poi_customers"] == 1
+    notice = composition_notice(composition)
+    assert notice is not None and "lower the POI share" in notice
+
+
+def test_manual_notice_names_the_picks_that_could_not_be_used(fixture_osm_path: Path) -> None:
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="manual",
+        # Node 9 is the far-away museum; node 1 doubles as the depot pick.
+        manual_poi_ids=[2, 3, 4, 9],
+        manual_depot_poi_id=1,
+        seed=7,
+    )
+    composition = build_generation_selection(request).params["composition"]
+    assert composition["requested"] == 4 and composition["delivered"] == 3
+    assert composition["dropped"]["unreachable"] == 1
+    notice = composition_notice(composition)
+    assert notice is not None
+    assert "1 of your 4 picked POIs cannot become customers" in notice
+    assert "too far from any road" in notice
+
+
 def test_manual_selection_rejects_too_few_resolvable_picks(fixture_osm_path: Path) -> None:
     request = GenerationRequest(
         city="Testville",
@@ -288,3 +381,563 @@ def test_preflight_reports_sizes_the_pool_cannot_serve(fixture_osm_path: Path) -
     group = report["groups"][0]
     assert group["skipped_sizes"] == [900] and group["status"] == "partial"
     assert group["pool_total"] >= 3
+
+
+def test_bulk_rows_that_would_share_a_file_name_never_overwrite(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    """The instance name encodes route_count, not the request fields, so rows can
+    collide even when their parameters differ. Nothing may be silently lost."""
+
+    def row() -> BulkRow:
+        return BulkRow(
+            request=GenerationRequest(
+                city="Testville",
+                osm_path=fixture_osm_path,
+                method="parametric_attach",
+                n_customers=3,
+                demand_type=1,
+                avg_route_size=1,
+            ),
+            explicit_seed=99,
+        )
+
+    result = generate_bulk_from_rows(
+        [row(), row()], output_root=tmp_path / "instances", base_seed=0
+    )
+    assert result["generated"] == 2
+    names = [entry["base_name"] for entry in result["results"]]
+    # Same parameters and same seed: the -s<seed> suffix cannot separate these.
+    assert len(set(names)) == 2, names
+    for entry in result["results"]:
+        assert (Path(entry["folder"]) / f"{entry['base_name']}_meta.json").is_file()
+
+
+def test_bulk_results_come_back_in_input_row_order(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    def row(depot_mode: str, n: int) -> BulkRow:
+        return BulkRow(
+            request=GenerationRequest(
+                city="Testville",
+                osm_path=fixture_osm_path,
+                method="parametric_attach",
+                n_customers=n,
+                depot_mode=depot_mode,
+                demand_type=1,
+                avg_route_size=1,
+            )
+        )
+
+    # Rows 0 and 2 pool together, row 1 does not: grouping alone would emit
+    # them as 3, 4, 3 instead of the order the caller listed.
+    rows = [row("center", 3), row("corner", 3), row("center", 4)]
+    result = generate_bulk_from_rows(rows, output_root=tmp_path / "instances", base_seed=0)
+    assert result["generated"] == 3
+    assert [entry["summary"]["customers"] for entry in result["results"]] == [3, 3, 4]
+    assert len({entry["base_name"] for entry in result["results"]}) == 3
+
+
+def test_notice_warns_when_the_road_graph_is_too_small(fixture_osm_path: Path) -> None:
+    # The fixture graph holds 5 vertices, so a parametric request for 20 cannot
+    # be served: the user must hear that before the job fails on it.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="parametric_attach",
+        n_customers=20,
+        seed=5,
+    )
+    with pytest.warns(UserWarning, match="candidate graph vertices"):
+        composition = build_generation_selection(request).params["composition"]
+    assert composition["delivered"] < composition["requested"]
+    notice = composition_notice(composition)
+    assert notice is not None and "Generation will fail unless" in notice
+
+
+def test_bulk_reports_the_outcome_of_every_input_row(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    def row(n: int) -> BulkRow:
+        return BulkRow(
+            request=GenerationRequest(
+                city="Testville",
+                osm_path=fixture_osm_path,
+                method="parametric_attach",
+                n_customers=n,
+                seed=3,
+            )
+        )
+
+    # The fixture pool cannot serve 900, so that row is dropped by the driver and
+    # the total alone would not say which row went missing.
+    result = generate_bulk_from_rows([row(3), row(900), row(4)], output_root=tmp_path)
+    reports = result["row_reports"]
+    assert [entry["index"] for entry in reports] == [0, 1, 2]
+    assert [entry["status"] for entry in reports] == ["generated", "skipped", "generated"]
+    assert "pool holds" in reports[1]["reason"]
+    assert reports[0]["base_name"] and reports[0]["parametric_customers"] == 3
+
+
+def test_graph_options_recorded_are_the_ones_the_loader_used(fixture_osm_path: Path) -> None:
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="parametric_attach",
+        n_customers=3,
+        seed=3,
+    )
+    selection = build_generation_selection(request)
+    params = selection.params
+    # The trim rebuilds itself with trim_to_connected=False once the nodes are
+    # removed, so only the loader's own record can be trusted here.
+    assert selection.graph.loaded_with == (True, True)
+    assert params["only_intersections"] is True
+    assert params["trim_to_connected_graph"] is True
+    assert params["requested_graph_options"] == {
+        "only_intersections": True,
+        "trim_to_connected_graph": True,
+    }
+    assert params["composition"]["graph_options_relaxed"] is None
+    assert composition_notice(params["composition"]) is None
+
+    # A relaxation must be spelled out rather than left in the metadata.
+    relaxed = dict(params["composition"])
+    relaxed["graph_options_relaxed"] = {
+        "only_intersections": True,
+        "trim_to_connected_graph": True,
+    }
+    notice = composition_notice(relaxed)
+    assert notice is not None and "loaded with relaxed options" in notice
+
+
+def test_poi_taken_by_the_depot_is_named_as_the_cause(fixture_osm_path: Path) -> None:
+    # The cafe of node 2 sits at the center of the fixture, so a centered depot
+    # claims the only matching POI and the shortfall has nothing to do with the
+    # extract being short of amenities.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=3,
+        categories=["cafe"],
+        depot_mode="center",
+        seed=5,
+    )
+    with pytest.warns(UserWarning):
+        composition = build_generation_selection(request).params["composition"]
+    assert composition["poi_customers"] == 0 and composition["poi_used_as_depot"] == 1
+    notice = composition_notice(composition)
+    assert notice is not None
+    assert "1 matching POI(s) became the depot rather than a customer" in notice
+
+
+def test_poi_run_completed_parametrically_is_recorded_as_hybrid(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    # One matching POI for four customers: the instance is three quarters
+    # parametric, so calling it a POI instance would misname the artifact.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=4,
+        categories=["cafe"],
+        depot_mode="corner",
+        seed=5,
+    )
+    with pytest.warns(UserWarning):
+        params = build_generation_selection(request).params
+    assert params["method"] == "hybrid" and params["requested_method"] == "poi_categories"
+    assert params["composition"]["effective_method"] == "hybrid"
+
+    with pytest.warns(UserWarning):
+        result = generate_single_instance(request, tmp_path / "instances")
+    assert "_hyb-" in result["base_name"]
+    meta = json.loads((Path(result["folder"]) / f"{result['base_name']}_meta.json").read_text())
+    assert meta["method"] == "hybrid"
+    assert "recorded and named as 'hybrid'" in result["notice"]
+
+
+@pytest.mark.parametrize("method", ["poi_categories", "hybrid"])
+def test_a_run_without_any_poi_is_recorded_as_parametric(
+    fixture_osm_path: Path, method: str
+) -> None:
+    # A centered depot claims the only cafe, so no customer sits on an amenity.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method=method,
+        n_customers=3,
+        categories=["cafe"],
+        hybrid_poi_share=0.5,
+        depot_mode="center",
+        seed=5,
+    )
+    with pytest.warns(UserWarning):
+        params = build_generation_selection(request).params
+    assert params["method"] == "parametric_attach"
+    assert params["requested_method"] == method
+    assert params["composition"]["poi_customers"] == 0
+
+
+def test_bulk_rows_take_every_available_poi_before_parametric_points(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    def row(n: int) -> BulkRow:
+        return BulkRow(
+            request=GenerationRequest(
+                city="Testville",
+                osm_path=fixture_osm_path,
+                method="poi_categories",
+                n_customers=n,
+                categories=["restaurant", "cafe", "school", "bar"],
+                depot_mode="corner",
+                seed=3,
+            )
+        )
+
+    # Both rows share one pool sized for the larger of them. The small row must
+    # still be served POIs first rather than drawn from the mixed pool.
+    result = generate_bulk_from_rows([row(2), row(4)], output_root=tmp_path, base_seed=1)
+    compositions = [entry["summary"]["composition"] for entry in result["results"]]
+    assert compositions[0]["parametric_customers"] == 0
+    assert compositions[0]["poi_customers"] == 2
+    # The larger row exhausts the POIs and is named for what it really is.
+    assert compositions[1]["poi_customers"] == 3
+    assert compositions[1]["parametric_customers"] == 1
+    assert "_poi-" in result["results"][0]["base_name"]
+    assert "_hyb-" in result["results"][1]["base_name"]
+
+
+def test_hybrid_degrades_to_parametric_when_no_category_has_a_poi(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    # The fixture has no ferry terminal: the POI half of the request cannot be
+    # served at all, but its parametric half can, so the run goes through.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="hybrid",
+        n_customers=3,
+        categories=["ferry_terminal"],
+        hybrid_poi_share=0.5,
+        depot_mode="corner",
+        seed=5,
+    )
+    selection = build_generation_selection(request)
+    composition = selection.params["composition"]
+    assert selection.source_tags == ["depot", "param", "param", "param"]
+    assert composition["poi_customers"] == 0 and composition["poi_pool_matching"] == 0
+    assert selection.params["method"] == "parametric_attach"
+    assert selection.params["requested_method"] == "hybrid"
+
+    notice = composition_notice(composition)
+    assert notice is not None
+    assert "None of the 1 selected category has a POI in this extract" in notice
+    assert "Select other POI categories" in notice
+    assert "recorded and named as 'parametric_attach'" in notice
+    # Neither remedy applies when the pool is empty, so neither is offered.
+    assert "lower the POI share" not in notice and "reduce the customer count" not in notice
+
+    result = generate_single_instance(request, tmp_path / "instances")
+    assert "_par-" in result["base_name"]
+
+
+def test_poi_categories_still_refuses_a_city_without_any_matching_poi(
+    fixture_osm_path: Path,
+) -> None:
+    # Only hybrid degrades: a pure POI run with nothing to draw from is a
+    # request that cannot be honoured, not one to quietly reinterpret.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=3,
+        categories=["ferry_terminal"],
+        seed=5,
+    )
+    with pytest.raises(NoPoiFoundError, match="No POI found for selected categories"):
+        build_generation_selection(request)
+
+
+def test_find_pois_reads_ways_and_relations_not_just_nodes(fixture_osm_path: Path) -> None:
+    pois = find_pois(fixture_osm_path, list(POI_CATEGORIES))
+    by_ref = {(poi.osm_type, poi.osm_id): poi for poi in pois}
+    # The building-outline pub and the multipolygon marketplace are located by
+    # the <center> Overpass computes, since they have no position of their own.
+    pub = by_ref[("way", 4)]
+    assert pub.category == "pub" and pub.name == "Le Quatre"
+    assert (pub.lat, pub.lon) == (45.0056, 4.005)
+    market = by_ref[("relation", 20)]
+    assert market.category == "marketplace" and market.name == "Marché Vingt"
+    # Node 4 and way 4 are different places: the id alone cannot identify either.
+    assert by_ref[("node", 4)].category == "school"
+    assert all(poi.osm_type == "node" for poi in find_pois(fixture_osm_path, ["cafe"]))
+
+
+def test_way_mapped_pois_become_customers_with_their_type_recorded(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=2,
+        categories=["pub", "marketplace"],
+        depot_mode="corner",
+        seed=5,
+    )
+    selection = build_generation_selection(request)
+    types = [poi.osm_type if poi else None for poi in selection.poi_meta]
+    assert "way" in types or "relation" in types
+
+    result = generate_single_instance(request, tmp_path / "instances")
+    meta = json.loads((Path(result["folder"]) / f"{result['base_name']}_meta.json").read_text())
+    poi_nodes = [node for node in meta["nodes"] if node["poi_osm_id"] is not None]
+    assert poi_nodes, "the way-mapped POIs must reach the metadata"
+    for node in poi_nodes:
+        assert node["poi_osm_type"] in ("node", "way", "relation")
+    # The depot is parametric here, so its POI columns stay null on both halves.
+    assert meta["nodes"][0]["poi_osm_id"] is None
+    assert meta["nodes"][0]["poi_osm_type"] is None
+
+
+def test_manual_picks_distinguish_a_way_from_a_node_of_the_same_id(
+    fixture_osm_path: Path,
+) -> None:
+    # Way 4 (the pub) and node 4 (the school) are different places; picking one
+    # must never resolve to the other. They sit on the same intersection, so the
+    # two are picked in separate runs rather than collapsed into one.
+    def pick(*refs: tuple[str, int]) -> list[tuple[str | None, str]]:
+        selection = build_generation_selection(
+            GenerationRequest(
+                city="Testville",
+                osm_path=fixture_osm_path,
+                method="manual",
+                manual_poi_refs=list(refs),
+                manual_depot_poi_ref=("node", 1),
+                seed=7,
+            )
+        )
+        assert selection.params["manual_selection"]["depot_poi_osm_type"] == "node"
+        return [(poi.name, poi.osm_type) for poi in selection.poi_meta[1:] if poi]
+
+    assert pick(("way", 4), ("node", 2)) == [("Le Quatre", "way"), ("Café Deux", "node")]
+    assert pick(("node", 4), ("node", 2)) == [("École Quatre", "node"), ("Café Deux", "node")]
+
+    # Bare ids still mean nodes, so payloads written before ways were selectable
+    # keep resolving to exactly what they used to.
+    legacy = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="manual",
+        manual_poi_ids=[2, 3, 4],
+        manual_depot_poi_id=1,
+        seed=7,
+    )
+    legacy_picked = [
+        (poi.osm_type, poi.osm_id) for poi in build_generation_selection(legacy).poi_meta[1:] if poi
+    ]
+    assert all(kind == "node" for kind, _ in legacy_picked)
+
+
+def test_pois_sharing_a_road_point_are_named_on_the_surviving_customer(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    # Two pairs of amenities sit on the same intersections: the school and the
+    # pub outline on one, the pharmacy and the marketplace relation on the
+    # other. Each pair yields one customer, and the loser must not vanish.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=2,
+        categories=["school", "pub", "pharmacy", "marketplace"],
+        depot_mode="corner",
+        seed=5,
+    )
+    selection = build_generation_selection(request)
+    assert len(selection.vertices) == 3
+    for index in (1, 2):
+        chosen = selection.poi_meta[index]
+        merged = selection.poi_merged[index]
+        assert chosen is not None and len(merged) == 1, "one amenity lost this point"
+        # Whichever won, the pair is the same set of places.
+        names = {chosen.name, merged[0].name}
+        assert names in ({"École Quatre", "Le Quatre"}, {None, "Marché Vingt"})
+
+    result = generate_single_instance(request, tmp_path / "instances")
+    meta = json.loads((Path(result["folder"]) / f"{result['base_name']}_meta.json").read_text())
+    merged_rows = [node["poi_merged"] for node in meta["nodes"] if node["poi_merged"]]
+    assert len(merged_rows) == 2
+    assert {row[0]["osm_type"] for row in merged_rows} <= {"node", "way", "relation"}
+    assert all("category" in row[0] and "osm_id" in row[0] for row in merged_rows)
+    # A node standing for a single amenity keeps an empty list, not a null.
+    assert all(isinstance(node["poi_merged"], list) for node in meta["nodes"])
+
+
+def test_manual_picks_that_collapse_are_named_on_the_customer_that_kept_the_point(
+    fixture_osm_path: Path,
+) -> None:
+    # Node 4 (the school) and way 4 (the pub) snap to the same intersection, so
+    # one pick becomes a customer and the other has to be accounted for on it.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="manual",
+        manual_poi_refs=[("node", 4), ("way", 4), ("node", 2), ("node", 3)],
+        manual_depot_poi_ref=("node", 1),
+        seed=7,
+    )
+    selection = build_generation_selection(request)
+    report = selection.params["manual_selection"]
+    assert report["collapsed_poi_ids"] == [4]
+
+    merged_by_name = {
+        (poi.name if poi else None): [other.name for other in selection.poi_merged[index]]
+        for index, poi in enumerate(selection.poi_meta)
+    }
+    assert merged_by_name["École Quatre"] == ["Le Quatre"]
+    # The picks that kept a point of their own carry nothing extra.
+    assert merged_by_name["Café Deux"] == []
+
+
+def test_pool_ceiling_counts_every_attachable_vertex(fixture_osm_path: Path) -> None:
+    # Six POIs in these categories, but two pairs share a point: the ceiling on
+    # POI customers is four, not six, and it is reported even though this small
+    # request is served in full.
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=2,
+        categories=["school", "pub", "pharmacy", "marketplace", "restaurant", "cafe"],
+        depot_mode="corner",
+        seed=5,
+    )
+    composition = build_generation_selection(request).params["composition"]
+    assert composition["poi_pool_matching"] == 6
+    assert composition["poi_pool_attachable"] == 4
+
+
+def test_poi_attachment_is_computed_once_per_extract_and_graph(
+    fixture_osm_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mamut_routing_tools.generation import select as select_module
+    from mamut_routing_tools.roadgraph.build import load_road_graph
+
+    select_module._ATTACHMENT_CACHE.clear()
+    graph = load_road_graph(fixture_osm_path)
+    calls = 0
+    real = graph.nearest_nodes
+
+    def counted(points, *args, **kwargs):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        return real(points, *args, **kwargs)
+
+    monkeypatch.setattr(graph, "nearest_nodes", counted)
+    first = select_module.catalog_attachment(graph, fixture_osm_path)
+    second = select_module.catalog_attachment(graph, fixture_osm_path)
+    # Preview, preflight and generate all ask the same question of the same
+    # extract, and one batched pass answers it for every category filter.
+    assert calls == 1 and first is second
+    assert any(vertex is not None for vertex in first)
+
+
+def _bank_request(fixture_osm_path: Path, **overrides) -> GenerationRequest:
+    return GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=3,
+        categories=["bank", "cafe", "restaurant"],
+        depot_mode="corner",
+        seed=5,
+        **overrides,
+    )
+
+
+def test_strict_attachment_discards_a_poi_whose_nearest_node_is_mid_segment(
+    fixture_osm_path: Path,
+) -> None:
+    # The bank sits beside the disconnected island, so its nearest road node is
+    # not a graph vertex. The published rule drops it and tops the instance up
+    # parametrically -- the reason an amenity present in the extract can never
+    # show up anywhere.
+    with pytest.warns(UserWarning, match="POI-attached"):
+        selection = build_generation_selection(_bank_request(fixture_osm_path))
+    names = [poi.name for poi in selection.poi_meta if poi]
+    assert "Banque de l'île" not in names
+    composition = selection.params["composition"]
+    assert composition["poi_customers"] == 2 and composition["parametric_customers"] == 1
+    assert composition["poi_pool_unattached"] == 1
+    assert composition["poi_attach_mode"] == "nearest_node"
+    # The way out is named, with the count that makes it worth trying.
+    notice = composition_notice(composition)
+    assert notice is not None
+    assert "switch POI attachment to 'nearest vertex'" in notice
+    assert "1 POI(s) here sit closest to a mid-segment road node" in notice
+
+
+def test_snapping_attachment_makes_that_poi_a_customer_and_records_the_distance(
+    tmp_path: Path, fixture_osm_path: Path
+) -> None:
+    request = _bank_request(
+        fixture_osm_path, poi_attach_mode="nearest_vertex", poi_attach_radius_m=400.0
+    )
+    selection = build_generation_selection(request)
+    names = [poi.name for poi in selection.poi_meta if poi]
+    assert "Banque de l'île" in names
+    assert selection.params["composition"]["parametric_customers"] == 0
+    assert selection.params["poi_attach_mode"] == "nearest_vertex"
+    assert selection.params["poi_attach_radius_m"] == 400.0
+
+    index = next(i for i, poi in enumerate(selection.poi_meta) if poi and "Banque" in (poi.name or ""))
+    # How far the amenity had to move to reach a routable point, as manual
+    # picking has always recorded it.
+    assert 300 < selection.snap_distances_m[index] < 400
+    others = [
+        distance
+        for i, distance in enumerate(selection.snap_distances_m)
+        if i != index
+    ]
+    assert all(distance == 0.0 for distance in others), "POIs on a vertex never move"
+
+    result = generate_single_instance(request, tmp_path / "instances")
+    # utf-8 explicitly: the name carries an accent, and the platform default is
+    # cp1252 on Windows, which would read it back as something else entirely.
+    meta = json.loads(
+        (Path(result["folder"]) / f"{result['base_name']}_meta.json").read_text(encoding="utf-8")
+    )
+    bank = next(node for node in meta["nodes"] if node["poi_name"] == "Banque de l'île")
+    assert 300 < bank["snap_distance_m"] < 400
+    assert meta["generation_params"]["poi_attach_mode"] == "nearest_vertex"
+
+
+def test_a_radius_too_short_to_reach_a_vertex_still_drops_the_poi(
+    fixture_osm_path: Path,
+) -> None:
+    # Snapping is bounded: the customer must stay where the amenity is.
+    with pytest.warns(UserWarning, match="POI-attached"):
+        selection = build_generation_selection(
+            _bank_request(
+                fixture_osm_path, poi_attach_mode="nearest_vertex", poi_attach_radius_m=50.0
+            )
+        )
+    assert "Banque de l'île" not in [poi.name for poi in selection.poi_meta if poi]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"poi_attach_mode": "teleport"}, "Unsupported POI attach mode"),
+        ({"poi_attach_radius_m": 0}, "poi_attach_radius_m"),
+    ],
+)
+def test_generation_request_rejects_invalid_attachment_controls(
+    fixture_osm_path: Path, overrides: dict, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        GenerationRequest(city="Testville", osm_path=fixture_osm_path, **overrides).validate()

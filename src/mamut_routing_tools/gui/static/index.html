@@ -404,6 +404,14 @@
   }
   .bulk-delete-btn:hover { color: var(--cor); background: var(--cor-t); }
   .bulk-empty { padding: 22px; text-align: center; }
+  .bulk-modal.confirm-modal { width: min(560px, 100%); height: auto; }
+  .confirm-modal-body {
+    padding: 16px 18px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+  .confirm-modal-body p { margin: 0; }
   .preflight-line { font-size: 11px; line-height: 1.5; }
   .preflight-line.warn { color: var(--am); }
   .preflight-line.bad { color: var(--cor); }
@@ -435,6 +443,28 @@
     padding: 6px 8px;
     user-select: none;
   }
+  .osm-audit-body { padding: 6px 8px 8px; border-top: 1px solid var(--div); }
+  .osm-audit-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 190px;
+    overflow-y: auto;
+    margin: 4px 0;
+  }
+  .osm-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10.5px;
+    padding: 2px 0;
+  }
+  .osm-row .nm { color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .osm-row .cnt { color: var(--mut); font-variant-numeric: tabular-nums; }
+  .osm-row .chip { font-size: 9.5px; padding: 1px 5px; border-radius: 999px; }
+  .osm-row .chip.ok { color: var(--gr); background: color-mix(in srgb, var(--gr) 16%, transparent); }
+  .osm-row .chip.old { color: var(--am); background: color-mix(in srgb, var(--am) 16%, transparent); }
+  .osm-row .chip.bad { color: var(--cor); background: var(--cor-t); }
   .poi-list {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -712,6 +742,22 @@
       <label class="field" style="flex:1"><span>Fetch a new city (Nominatim + Overpass)</span><input id="fetch-name" type="text" placeholder="e.g. Brest"></label>
       <button class="btn btn-secondary" id="fetch" type="button">Fetch</button>
     </div>
+    <details class="poi-menu" id="osm-audit-panel">
+      <summary>Stored OSM extracts · POI coverage</summary>
+      <div class="osm-audit-body">
+        <div class="poi-toolbar">
+          <button id="osm-audit-check" class="mini-btn" type="button">Check extracts</button>
+          <button id="osm-audit-refresh" class="mini-btn" type="button" disabled>Update outdated</button>
+          <span id="osm-audit-count" class="poi-count"></span>
+        </div>
+        <div id="osm-audit-list" class="osm-audit-list">
+          <div class="empty-note">Not checked yet.</div>
+        </div>
+        <p class="note">Extracts fetched before amenities mapped as building outlines were downloaded hold
+          only the POIs mapped as points — roughly two thirds of a city's amenities. Updating re-runs the
+          amenity query alone and leaves the road network in place.</p>
+      </div>
+    </details>
     <div class="grid-2">
       <label class="field"><span>Customers</span><input id="n" type="number" value="30" min="2"></label>
       <label class="field"><span>Seed</span><input id="seed" type="number" value="0"></label>
@@ -770,6 +816,31 @@
         <div id="poi-list" class="poi-list"></div>
       </details>
       <p class="note">City fetches store every listed category. These checks only filter which POIs generation may select.</p>
+      <div class="field">
+        <div class="field-head">
+          <span>POI attachment</span>
+          <button class="help-btn" type="button" data-help="help-attach" aria-expanded="false" aria-label="How POIs bind to the road graph">i</button>
+        </div>
+        <select id="poi-attach-mode">
+          <option value="nearest_node">Strict · POI must sit on an intersection</option>
+          <option value="nearest_vertex">Snap · move the POI to the nearest intersection</option>
+        </select>
+        <div class="help-body" id="help-attach" hidden>
+          How an amenity binds to the road graph, which decides how many of them can be customers at all.
+          <dl>
+            <dt>Strict</dt><dd>The POI's nearest road node must itself be a graph intersection. Matches the
+              published Julia pipeline exactly, and discards most of a city: an amenity whose closest node
+              sits mid-segment is dropped even when a real intersection stands a metre further.</dd>
+            <dt>Snap</dt><dd>The POI moves to the closest intersection within the radius below, the way
+              hand-picked POIs have always worked. Far more of the extract becomes usable; each customer
+              records how far its amenity moved.</dd>
+          </dl>
+        </div>
+      </div>
+      <label class="field" id="poi-attach-radius-field" hidden>
+        <span>Snap radius (m)</span>
+        <input id="poi-attach-radius" type="number" value="50" min="1" step="10">
+      </label>
     </div>
     <div id="manual-options" class="option-group" hidden>
       <div class="poi-pick-summary">
@@ -838,6 +909,7 @@
         <dl id="help-band-table"></dl>
       </div>
     </div>
+    <div id="gen-notice" class="preflight-line" hidden></div>
     <div class="row">
       <button id="preview" class="btn btn-secondary" type="button">Preview</button>
       <button id="generate" class="btn" type="button">Generate</button>
@@ -847,7 +919,7 @@
       <span id="bulk-count-badge" class="poi-count">0 instances</span>
       <button id="bulk-download" class="btn btn-ghost" type="button" disabled>Download zip</button>
     </div>
-    <p class="note">Runs the published Poryos2026 v2 workbench pipeline locally: 3-metric CVRPLIB artifacts with shared road / geo / distance sidecars, plus VRPTW twins on request. Everything is written to your workspace.</p>
+    <p class="note">Runs the published Mamut Routing workbench pipeline locally: 3-metric CVRPLIB artifacts with shared road / geo / distance sidecars, plus VRPTW twins on request. Everything is written to your workspace.</p>
   </section>
 
   <section class="section" id="jobsSection">
@@ -981,6 +1053,7 @@
             <thead>
               <tr>
                 <th><input type="checkbox" id="bulk-select-all" aria-label="Select every row"></th>
+                <th>Outcome</th>
                 <th>Type</th><th>City</th><th>n</th><th>Demand</th><th>Route size</th>
                 <th>Method</th><th>Seed</th><th>Depot</th><th>Customer</th><th>TW method</th>
                 <th>Intersections</th><th>Clusters</th><th>Decay (m)</th><th>Hybrid</th>
@@ -997,6 +1070,20 @@
       <button id="bulk-run" class="btn" type="button">Generate all</button>
       <button id="bulk-check" class="btn btn-secondary" type="button">Check feasibility</button>
       <button id="bulk-close-2" class="btn btn-ghost" type="button">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="confirm-modal" class="bulk-modal-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+  <div class="bulk-modal confirm-modal">
+    <div class="bulk-modal-header">
+      <h2 id="confirm-modal-title">Check the selection</h2>
+      <button id="confirm-close" class="bulk-modal-close" type="button" aria-label="Close">&times;</button>
+    </div>
+    <div class="confirm-modal-body"><p id="confirm-text"></p></div>
+    <div class="bulk-modal-footer">
+      <button id="confirm-ok" class="btn" type="button">Generate anyway</button>
+      <button id="confirm-cancel" class="btn btn-ghost" type="button">Cancel</button>
     </div>
   </div>
 </div>
@@ -1168,7 +1255,8 @@ const state = {
   poiPool: [],
   poiPoolCity: null,
   manualPicks: new Map(),
-  manualDepotId: null,
+  manualDepotKey: null,
+  osmAudit: null,
   // Bulk configuration table
   bulkRows: [],
   bulkNextId: 1,
@@ -1270,6 +1358,8 @@ function updateGenerationControls() {
   const usesClusters = usesParametric && el("customer-mode").value !== "random";
   el("cluster-options").hidden = !usesClusters;
   el("cluster-note").hidden = !usesClusters;
+  // The radius only means anything when POIs are allowed to move.
+  el("poi-attach-radius-field").hidden = el("poi-attach-mode").value !== "nearest_vertex";
   // n is derived from the picks in manual mode.
   el("n").disabled = manual;
   if (!manual) clearPoiPool();
@@ -1285,6 +1375,7 @@ el("poi-all").addEventListener("click", () => setPoiSelection(POI_CATEGORIES));
 el("poi-clear").addEventListener("click", () => setPoiSelection([]));
 el("method").addEventListener("change", updateGenerationControls);
 el("customer-mode").addEventListener("change", updateGenerationControls);
+el("poi-attach-mode").addEventListener("change", updateGenerationControls);
 el("hybrid-poi-share").addEventListener("input", () => {
   updateHybridShare();
   updateGenerationControls();
@@ -1297,17 +1388,25 @@ function requestBody() {
   if ((method === "poi_categories" || (method === "hybrid" && hybridPoiShare > 0)) && !categories.length) {
     throw new Error("Select at least one POI category for this sampling method.");
   }
-  const manualIds = [...state.manualPicks.keys()];
+  // Sent as {type, id} pairs: an id alone would be ambiguous between a node, a
+  // way and a relation carrying the same number.
+  const manualPois = [...state.manualPicks.keys()].map((key) => {
+    const [osmType, osmId] = key.split("/");
+    return { type: osmType, id: Number(osmId) };
+  });
+  const depotKey = state.manualDepotKey;
   if (method === "manual") {
-    const customers = manualIds.filter((id) => id !== state.manualDepotId).length;
+    const customers = [...state.manualPicks.keys()].filter((key) => key !== depotKey).length;
     if (customers < 2) {
       throw new Error("Pick at least 2 POIs (besides the depot) on the map for manual generation.");
     }
   }
   return {
     city: el("city").value,
-    manualPoiIds: method === "manual" ? manualIds : undefined,
-    manualDepotPoiId: method === "manual" ? state.manualDepotId : undefined,
+    manualPois: method === "manual" ? manualPois : undefined,
+    manualDepotPoi: method === "manual" && depotKey
+      ? { type: depotKey.split("/")[0], id: Number(depotKey.split("/")[1]) }
+      : undefined,
     nCustomers: Number(el("n").value),
     seed: Number(el("seed").value),
     method,
@@ -1316,6 +1415,8 @@ function requestBody() {
     clusterSeeds: Number(el("cluster-seeds").value),
     clusterDecayMeters: Number(el("cluster-decay").value),
     hybridPoiShare,
+    poiAttachMode: el("poi-attach-mode").value,
+    poiAttachRadiusM: Number(el("poi-attach-radius").value) || 50,
     categories,
     demandType: Number(el("demand").value),
     avgRouteSize: Number(el("ars").value),
@@ -1401,6 +1502,14 @@ function drawPreview(geojson) {
   if (bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
 }
 
+/* What a merged amenity reads as: its name, or its category when unnamed, and
+   the element type when it is an outline rather than a point — otherwise a list
+   of names gives no clue which of them came from a way or a relation. */
+function mergedPoiLabel(entry) {
+  const base = entry.name || `(unnamed ${String(entry.category || "poi").replaceAll("_", " ")})`;
+  return entry.osm_type && entry.osm_type !== "node" ? `${base} [${entry.osm_type}]` : base;
+}
+
 /* A node's label: its OSM name when the pipeline captured one, else the
    amenity, else just the source tag. */
 function nodeTooltip(properties) {
@@ -1408,13 +1517,31 @@ function nodeTooltip(properties) {
   if (properties.poi_name) parts.push(properties.poi_name);
   else if (properties.poi_category) parts.push(properties.poi_category.replaceAll("_", " "));
   parts.push(String(properties.source_tag || ""));
+  // Several amenities on one road point collapse into this single customer;
+  // naming them is the only way to see what the node really stands for.
+  const merged = properties.poi_merged || [];
+  if (merged.length) {
+    parts.push(`+${merged.length} here: ${merged.map(mergedPoiLabel).join(", ")}`);
+  }
+  // Worth showing: a way or relation POI is a building outline reduced to its
+  // centre, so its position is approximate in a way a node's is not.
+  if (properties.poi_osm_type && properties.poi_osm_type !== "node") {
+    parts.push(`${properties.poi_osm_type} centre`);
+  }
   if (properties.snap_distance_m > 1) parts.push(`snapped ${Math.round(properties.snap_distance_m)} m`);
   return parts.join(" · ");
 }
 
 /* ── Manual POI picking ── */
 function poiLabel(properties) {
-  return properties.name || `(unnamed ${String(properties.category || "poi").replaceAll("_", " ")})`;
+  const base = properties.name
+    || `(unnamed ${String(properties.category || "poi").replaceAll("_", " ")})`;
+  // Way and relation POIs are outlines reduced to their centre; saying so also
+  // separates two picks that share a name but not an element type.
+  const kind = properties.osm_type && properties.osm_type !== "node"
+    ? ` [${properties.osm_type}]`
+    : "";
+  return `${base}${kind}`;
 }
 
 function clearPoiPool() {
@@ -1429,14 +1556,30 @@ async function loadPoiPool() {
   const categories = selectedPoiCategories();
   const query = new URLSearchParams({ city, categories: categories.join(",") });
   const data = await api(`/api/workbench/generation/pois?${query.toString()}`);
+  // Picks from another city cannot resolve against this extract. Compared
+  // against the city the pool was last loaded for, not against data.city, which
+  // is the request's own parameter echoed back and so can never differ.
+  const previousCity = state.poiPoolCity;
+  const dropped = previousCity && previousCity !== city ? state.manualPicks.size : 0;
+  if (dropped) {
+    state.manualPicks.clear();
+    state.manualDepotKey = null;
+  }
   state.poiPool = data.geojson.features;
   state.poiPoolCity = city;
-  // Picks from another city cannot resolve against this extract.
-  if (data.city !== city) state.manualPicks.clear();
   renderPoiMarkers(true);
-  el("manual-available").textContent =
-    `${data.returned} POI(s) shown of ${data.total_in_extract} in the extract · ${data.named} named.`;
-  status(`Loaded ${data.returned} POI(s) for ${city}; click markers to pick them.`);
+  el("manual-available").textContent = data.truncated
+    ? `${data.returned} of ${data.matching} matching POI(s) shown (capped) · ${data.named} named.`
+      + " Narrow the categories to see the rest."
+    : `${data.returned} POI(s) shown of ${data.total_in_extract} in the extract · ${data.named} named.`;
+  status(`Loaded ${data.returned} POI(s) for ${city}; click markers to pick them.`
+    + (dropped ? ` Cleared ${dropped} pick(s) made in ${previousCity}.` : ""));
+}
+
+/* OSM ids repeat across element types — node 42 and way 42 are different places
+   — so a pick is identified by both halves. */
+function poiKey(properties) {
+  return `${properties.osm_type || "node"}/${properties.osm_id}`;
 }
 
 function renderPoiMarkers(fit = false) {
@@ -1445,9 +1588,9 @@ function renderPoiMarkers(fit = false) {
   const bounds = [];
   state.poiPool.forEach((feature) => {
     const [lon, lat] = feature.geometry.coordinates;
-    const osmId = feature.properties.osm_id;
-    const picked = state.manualPicks.has(osmId);
-    const isDepot = state.manualDepotId === osmId;
+    const key = poiKey(feature.properties);
+    const picked = state.manualPicks.has(key);
+    const isDepot = state.manualDepotKey === key;
     bounds.push([lat, lon]);
     const marker = L.circleMarker([lat, lon], {
       radius: isDepot ? 7 : picked ? 5.5 : 3.5,
@@ -1460,8 +1603,8 @@ function renderPoiMarkers(fit = false) {
     marker.bindTooltip(`${poiLabel(feature.properties)}${suffix}`);
     marker.on("click", (event) => {
       // Shift-click promotes a POI to the depot instead of toggling it.
-      if (event.originalEvent && event.originalEvent.shiftKey) setManualDepot(osmId, feature);
-      else toggleManualPick(osmId, feature);
+      if (event.originalEvent && event.originalEvent.shiftKey) setManualDepot(key, feature);
+      else toggleManualPick(key, feature);
     });
     marker.addTo(poiPickLayers);
   });
@@ -1469,24 +1612,24 @@ function renderPoiMarkers(fit = false) {
   renderManualPicks();
 }
 
-function toggleManualPick(osmId, feature) {
-  if (state.manualPicks.has(osmId)) {
-    state.manualPicks.delete(osmId);
-    if (state.manualDepotId === osmId) state.manualDepotId = null;
+function toggleManualPick(key, feature) {
+  if (state.manualPicks.has(key)) {
+    state.manualPicks.delete(key);
+    if (state.manualDepotKey === key) state.manualDepotKey = null;
   } else {
-    state.manualPicks.set(osmId, feature.properties);
+    state.manualPicks.set(key, feature.properties);
   }
   renderPoiMarkers();
 }
 
-function setManualDepot(osmId, feature) {
-  if (!state.manualPicks.has(osmId)) state.manualPicks.set(osmId, feature.properties);
-  state.manualDepotId = state.manualDepotId === osmId ? null : osmId;
+function setManualDepot(key, feature) {
+  if (!state.manualPicks.has(key)) state.manualPicks.set(key, feature.properties);
+  state.manualDepotKey = state.manualDepotKey === key ? null : key;
   renderPoiMarkers();
 }
 
 function renderManualPicks() {
-  const customers = [...state.manualPicks.keys()].filter((id) => id !== state.manualDepotId).length;
+  const customers = [...state.manualPicks.keys()].filter((key) => key !== state.manualDepotKey).length;
   el("manual-count").textContent = String(customers);
   const list = el("manual-list");
   list.innerHTML = "";
@@ -1494,14 +1637,14 @@ function renderManualPicks() {
     list.innerHTML = '<div class="empty-note">No POI picked yet.</div>';
     return;
   }
-  state.manualPicks.forEach((properties, osmId) => {
+  state.manualPicks.forEach((properties, key) => {
     const row = document.createElement("div");
     row.className = "picked-row";
     const name = document.createElement("span");
     name.className = "nm";
     name.textContent = poiLabel(properties);
     row.append(name);
-    if (state.manualDepotId === osmId) {
+    if (state.manualDepotKey === key) {
       const flag = document.createElement("span");
       flag.className = "depot-flag";
       flag.textContent = "depot";
@@ -1517,8 +1660,8 @@ function renderManualPicks() {
     remove.textContent = "×";
     remove.title = "Remove this pick";
     remove.addEventListener("click", () => {
-      state.manualPicks.delete(osmId);
-      if (state.manualDepotId === osmId) state.manualDepotId = null;
+      state.manualPicks.delete(key);
+      if (state.manualDepotKey === key) state.manualDepotKey = null;
       renderPoiMarkers();
     });
     row.append(remove);
@@ -1533,11 +1676,11 @@ el("manual-load").addEventListener("click", async () => {
 });
 el("manual-clear").addEventListener("click", () => {
   state.manualPicks.clear();
-  state.manualDepotId = null;
+  state.manualDepotKey = null;
   renderPoiMarkers();
 });
 el("manual-depot-clear").addEventListener("click", () => {
-  state.manualDepotId = null;
+  state.manualDepotKey = null;
   renderPoiMarkers();
 });
 
@@ -1570,7 +1713,20 @@ function drawInstanceNodes(routes = null, fit = false) {
     });
     const label = isDepot ? "Depot" : `Customer ${properties.model_node_id}`;
     const named = properties.poi_name ? ` · ${properties.poi_name}` : "";
-    marker.bindTooltip(`${label}${named} · demand ${properties.demand} · ${properties.source_tag}`);
+    // The amenities that collapsed onto this same road point, so a node holding
+    // several places does not read as one arbitrary winner.
+    const merged = properties.poi_merged || [];
+    const alsoHere = merged.length
+      ? ` · +${merged.length} here: ${merged.map(mergedPoiLabel).join(", ")}`
+      : "";
+    // Non-zero when the amenity was snapped to a routable point rather than
+    // sitting on one, so the node is not exactly where the place is.
+    const snapped = properties.snap_distance_m > 1
+      ? ` · snapped ${Math.round(properties.snap_distance_m)} m`
+      : "";
+    marker.bindTooltip(
+      `${label}${named} · demand ${properties.demand} · ${properties.source_tag}`
+      + `${snapped}${alsoHere}`);
     marker.addTo(instanceNodeLayers);
     bounds.push([lat, lon]);
   });
@@ -1966,21 +2122,70 @@ async function handleFinishedJob(job) {
   const result = job.result || {};
   if (job.kind === "fetch-osm") {
     await loadCities();
-    status(`Fetched ${result.city || job.request?.city || "city"}.`);
+    // An extract fetched without its amenities still generates, just parametrically:
+    // the fetcher says so and the user has to hear it now, not at generation time.
+    const mode = result.dataset_mode && result.dataset_mode !== "roads_and_amenities"
+      ? ` Dataset: ${result.dataset_mode.replaceAll("_", " ")}.`
+      : "";
+    status(`Fetched ${result.city || job.request?.city || "city"}.`
+      + mode + (result.warning ? ` ${result.warning}` : ""));
+  } else if (job.kind === "refresh-pois") {
+    // The extracts changed on disk, so anything cached from them is stale.
+    clearPoiPool();
+    try {
+      const report = await api("/api/workbench/osmdata/audit");
+      state.osmAudit = report;
+      renderOsmAudit(report);
+    } catch { /* the status line below still reports the run itself */ }
+    const failed = (result.results || []).filter((entry) => !entry.ok);
+    status(`Updated ${result.refreshed || 0} extract(s), ${result.gained || 0} POI(s) gained.`
+      + (failed.length
+        ? ` ${failed.length} failed: ${failed.map((entry) => `${entry.city} (${entry.error || "incomplete"})`).join(", ")}.`
+        : ""));
   } else if (job.kind === "generate") {
     state.hiddenRoutes = new Set();
     state.lastRendered = null;
     clearRouteLayers();
     await loadInstances(result.base_name);
     activateTab("visualize");
-    status(`Generated ${result.base_name}: capacity ${result.summary?.capacity}, ~${result.summary?.route_count} routes.`);
+    const composition = result.summary?.composition;
+    const split = composition
+      ? ` — ${composition.poi_customers} POI + ${composition.parametric_customers} parametric`
+      : "";
+    status(`Generated ${result.base_name}: capacity ${result.summary?.capacity}, ~${result.summary?.route_count} routes${split}.`
+      + (result.notice ? ` ${result.notice}` : "")
+      + (result.vrptw_error ? ` VRPTW twin failed: ${result.vrptw_error}` : ""));
   } else if (job.kind === "bulk-generate") {
     const results = Array.isArray(result.results) ? result.results : [];
     state.bulkBases = results.map((entry) => entry.base_name).filter(Boolean);
     el("bulk-download").disabled = state.bulkBases.length === 0;
     await loadInstances(state.bulkBases[0]);
     activateTab("visualize");
-    status(`Bulk generated ${result.generated || 0} instance(s).`);
+    // Rows the pool could not serve are dropped by the driver, and a twin can
+    // fail on its own: both would otherwise leave the count silently short.
+    const problems = (result.city_reports || [])
+      .filter((report) => report.status && report.status !== "ok")
+      .map((report) => report.error
+        ? `${report.city}: ${report.error}`
+        : `${report.city}: pool holds ${report.pool_total ?? 0} (${report.poi_available ?? 0} POI`
+          + ` + ${report.parametric_filled ?? 0} parametric), so n = `
+          + `${(report.skipped_sizes || []).join(", ")} was skipped`);
+    // row_reports is index-aligned with the instances payload, which is built
+    // from state.bulkRows in order, so each row learns its own outcome.
+    // Only when the table still holds the rows that were submitted: editing it
+    // mid-run would otherwise pin outcomes onto the wrong rows.
+    const rowReports = Array.isArray(result.row_reports) ? result.row_reports : [];
+    if (rowReports.length && rowReports.length === state.bulkRows.length) {
+      state.bulkRows.forEach((row, index) => { row.outcome = rowReports[index]; });
+      renderBulkTable();
+    }
+    const twinFailures = results.filter((entry) => entry.vrptw_error).length;
+    const requested = (job.request?.instances || []).length;
+    status(`Bulk generated ${result.generated || 0}`
+      + (requested ? ` of ${requested} requested` : "")
+      + ` instance(s).`
+      + (problems.length ? ` ${problems.join(" · ")}.` : "")
+      + (twinFailures ? ` ${twinFailures} VRPTW twin(s) could not be derived.` : ""));
   } else if (job.kind === "solve") {
     const preferredRunId = result.solution?.run_id || null;
     let selectedByHandler = false;
@@ -2017,18 +2222,88 @@ async function refreshJobs() {
 }
 
 /* ── Actions ── */
+
+/* A modal question the caller can await; resolves false when dismissed. */
+let confirmResolver = null;
+function askConfirm(title, text, okLabel) {
+  el("confirm-modal-title").textContent = title;
+  el("confirm-text").textContent = text;
+  el("confirm-ok").textContent = okLabel || "Generate anyway";
+  el("confirm-modal").hidden = false;
+  el("confirm-ok").focus();
+  return new Promise((resolve) => { confirmResolver = resolve; });
+}
+
+function closeConfirm(answer) {
+  el("confirm-modal").hidden = true;
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  if (resolve) resolve(answer);
+}
+
+el("confirm-ok").addEventListener("click", () => closeConfirm(true));
+el("confirm-cancel").addEventListener("click", () => closeConfirm(false));
+el("confirm-close").addEventListener("click", () => closeConfirm(false));
+el("confirm-modal").addEventListener("click", (event) => {
+  if (event.target === el("confirm-modal")) closeConfirm(false);
+});
+
+/* The composition line under the form: what the instance will actually hold,
+   in green when the request is served as asked and amber when POIs ran out. */
+function showGenNotice(notice, summary) {
+  const box = el("gen-notice");
+  const composition = summary && summary.composition;
+  if (notice) {
+    box.className = "preflight-line warn";
+    box.textContent = notice;
+    box.hidden = false;
+  } else if (composition) {
+    box.className = "preflight-line good";
+    box.textContent = `${composition.delivered} customers = ${composition.poi_customers} POI`
+      + ` + ${composition.parametric_customers} parametric.`;
+    box.hidden = false;
+  } else {
+    box.hidden = true;
+    box.textContent = "";
+  }
+}
+
 el("preview").addEventListener("click", async () => {
   try {
     status("Previewing selection…");
     const data = await api("/api/workbench/generation/preview", requestBody());
     drawPreview(data.geojson);
-    status(`Preview: ${data.summary.customers} customers (${data.summary.poi_customers} POI · ${data.summary.parametric_customers} parametric).`);
+    showGenNotice(data.notice, data.summary);
+    status(`Preview: ${data.summary.customers} customers (${data.summary.poi_customers} POI · ${data.summary.parametric_customers} parametric).`
+      + (data.notice ? ` ${data.notice}` : ""));
   } catch (error) { status(`Preview failed: ${error.message}`); }
 });
 
 el("generate").addEventListener("click", async () => {
+  let body;
+  try { body = requestBody(); }
+  catch (error) { status(error.message); return; }
   try {
-    const job = await submitJob("generate", requestBody());
+    // The same selection the job will build, so the split shown here is the one
+    // that lands on disk; the road graph is cached, so the job does not repay it.
+    status("Checking how many customers can sit on a real POI…");
+    const report = await api("/api/workbench/generation/preflight", body);
+    showGenNotice(report.notice, report.summary);
+    if (report.notice) {
+      const composition = report.summary?.composition || {};
+      let title = "Not enough POIs for this request";
+      if (composition.method === "manual") title = "Some picks cannot be used";
+      else if (composition.poi_pool_matching === 0) title = "No POI in the selected categories";
+      else if (composition.delivered < composition.requested) {
+        title = "This city cannot serve that many customers";
+      }
+      const proceed = await askConfirm(title, report.notice);
+      if (!proceed) {
+        status("Generation cancelled — lower the customer count or select more POI categories.");
+        return;
+      }
+    }
+    const job = await submitJob("generate", body);
     status(`Generation queued as job ${job.job_id.slice(0, 8)}.`);
   } catch (error) { status(`Cannot queue generation: ${error.message}`); }
 });
@@ -2060,6 +2335,73 @@ el("download").addEventListener("click", async () => {
   } catch (error) { status(`Download failed: ${error.message}`); }
 });
 
+/* ── Stored extracts · POI coverage ── */
+const OSM_STATUS_LABELS = {
+  complete: ["ok", "up to date"],
+  nodes_only: ["old", "points only"],
+  no_amenities: ["old", "no POIs"],
+  unreadable: ["bad", "unreadable"],
+};
+
+function renderOsmAudit(report) {
+  const list = el("osm-audit-list");
+  list.innerHTML = "";
+  const extracts = report.extracts || [];
+  if (!extracts.length) {
+    list.innerHTML = '<div class="empty-note">No .osm extract in the workspace yet.</div>';
+    el("osm-audit-count").textContent = "";
+    el("osm-audit-refresh").disabled = true;
+    return;
+  }
+  extracts.forEach((entry) => {
+    const [chipClass, label] = OSM_STATUS_LABELS[entry.status] || ["bad", entry.status || "?"];
+    const row = document.createElement("div");
+    row.className = "osm-row";
+    const name = document.createElement("span");
+    name.className = "nm";
+    name.textContent = entry.city;
+    const count = document.createElement("span");
+    count.className = "cnt";
+    // Ways and relations are the half that older extracts are missing entirely.
+    count.textContent = entry.error
+      ? entry.error
+      : `${entry.poi_total} POI (${entry.poi_nodes}n / ${entry.poi_ways}w / ${entry.poi_relations}r)`;
+    const chip = document.createElement("span");
+    chip.className = `chip ${chipClass}`;
+    chip.textContent = label;
+    row.append(name, count, chip);
+    list.append(row);
+  });
+  const outdated = report.outdated || 0;
+  el("osm-audit-count").textContent = outdated
+    ? `${outdated} of ${extracts.length} outdated`
+    : `${extracts.length} up to date`;
+  el("osm-audit-refresh").disabled = outdated === 0;
+}
+
+el("osm-audit-check").addEventListener("click", async () => {
+  try {
+    status("Checking the POI coverage of the stored extracts…");
+    const report = await api("/api/workbench/osmdata/audit");
+    state.osmAudit = report;
+    renderOsmAudit(report);
+    status(report.outdated
+      ? `${report.outdated} extract(s) hold only point-mapped POIs; updating adds the ones mapped as building outlines.`
+      : `All ${(report.extracts || []).length} extract(s) already hold way-mapped POIs.`);
+  } catch (error) { status(`Cannot check the extracts: ${error.message}`); }
+});
+
+el("osm-audit-refresh").addEventListener("click", async () => {
+  const outdated = (state.osmAudit?.extracts || [])
+    .filter((entry) => entry.can_refresh && entry.status !== "complete")
+    .map((entry) => entry.city);
+  if (!outdated.length) return;
+  try {
+    const job = await submitJob("refresh-pois", { cities: outdated });
+    status(`Updating ${outdated.length} extract(s) as job ${job.job_id.slice(0, 8)}: ${outdated.join(", ")}.`);
+  } catch (error) { status(`Cannot queue the update: ${error.message}`); }
+});
+
 el("fetch").addEventListener("click", async () => {
   const name = el("fetch-name").value.trim();
   if (!name) return;
@@ -2083,7 +2425,10 @@ function bulkBaseRow() {
     demandType: Number(el("demand").value) || 7,
     avgRouteSize: Number(el("ars").value) || 4,
     method: el("method").value === "manual" ? "poi_categories" : el("method").value,
-    seed: Number(el("seed").value) || 0,
+    // null = let the generator derive a seed per (city, n, demand type, band),
+    // which is what makes instances of one batch differ. Copying the Generate
+    // form's seed into every row would pin them all to the same value.
+    seed: null,
     depotMode: el("depot-mode").value,
     customerMode: el("customer-mode").value,
     twMethod: el("bulk-tw")?.value || "route_centered",
@@ -2121,10 +2466,14 @@ function bulkCell(row, field, kind, options) {
     input = document.createElement("input");
     input.type = kind;
     input.value = String(row[field] ?? "");
+    if (options?.placeholder) input.placeholder = options.placeholder;
     if (kind === "number") { input.min = options?.min ?? 0; if (options?.step) input.step = options.step; }
   }
   input.addEventListener("change", () => {
     if (kind === "checkbox") row[field] = input.checked;
+    // An emptied optional number means "unset", not 0: the seed column relies
+    // on null to hand the choice back to the generator.
+    else if (options?.nullable && input.value.trim() === "") row[field] = null;
     else if (BULK_INT_FIELDS.has(field)) row[field] = Number.parseInt(input.value, 10) || 0;
     else if (BULK_FLOAT_FIELDS.has(field)) row[field] = Number.parseFloat(input.value) || 0;
     else row[field] = input.value;
@@ -2133,11 +2482,37 @@ function bulkCell(row, field, kind, options) {
   return cell;
 }
 
+/* What the last bulk run did with this row: rows the city pool could not serve
+   are dropped by the driver, so without this the table looks like it all ran. */
+function bulkOutcomeCell(row) {
+  const cell = document.createElement("td");
+  const outcome = row.outcome;
+  if (!outcome) {
+    cell.className = "preflight-line";
+    cell.textContent = "—";
+    return cell;
+  }
+  if (outcome.status === "skipped") {
+    cell.className = "preflight-line bad";
+    cell.textContent = "skipped";
+    cell.title = outcome.reason || "Skipped by the last run";
+    return cell;
+  }
+  const parametric = Number(outcome.parametric_customers) || 0;
+  cell.className = parametric || outcome.vrptw_error ? "preflight-line warn" : "preflight-line good";
+  cell.textContent = outcome.vrptw_error
+    ? "no twin"
+    : (parametric ? `${outcome.poi_customers} POI + ${parametric} param` : "generated");
+  cell.title = [outcome.base_name, outcome.notice, outcome.vrptw_error]
+    .filter(Boolean).join(" · ") || "Generated";
+  return cell;
+}
+
 function renderBulkTable() {
   const body = el("bulk-table-body");
   body.innerHTML = "";
   if (!state.bulkRows.length) {
-    body.innerHTML = '<tr><td colspan="17" class="bulk-empty empty-note">'
+    body.innerHTML = '<tr><td colspan="18" class="bulk-empty empty-note">'
       + "No rows yet. Build combinations on the left, add rows by hand, or import a CSV.</td></tr>";
     refreshBulkCounts();
     return;
@@ -2154,6 +2529,9 @@ function renderBulkTable() {
     box.setAttribute("aria-label", "Select this row");
     check.append(box);
     tr.append(check);
+    // Kept at the front: a skipped row must be visible without scrolling the
+    // table sideways past a dozen parameter columns.
+    tr.append(bulkOutcomeCell(row));
 
     tr.append(bulkCell(row, "problemType", "select", [["cvrp", "CVRP"], ["vrptw", "VRPTW"]]));
     tr.append(bulkCell(row, "city", "select", cityOptions.length ? cityOptions : [[row.city, row.city]]));
@@ -2161,7 +2539,7 @@ function renderBulkTable() {
     tr.append(bulkCell(row, "demandType", "select", DEMAND_TYPES.map((e) => [String(e.value), `${e.value} · ${e.label}`])));
     tr.append(bulkCell(row, "avgRouteSize", "select", ROUTE_SIZE_BANDS.map((e) => [String(e.value), `${e.value} · ${e.label}`])));
     tr.append(bulkCell(row, "method", "select", SAMPLING_METHODS.filter((m) => m !== "manual").map((m) => [m, m])));
-    tr.append(bulkCell(row, "seed", "number", { min: 0 }));
+    tr.append(bulkCell(row, "seed", "number", { min: 0, nullable: true, placeholder: "auto" }));
     tr.append(bulkCell(row, "depotMode", "select", DEPOT_MODES.map((m) => [m, m])));
     tr.append(bulkCell(row, "customerMode", "select", CUSTOMER_MODES.map((m) => [m, m])));
     tr.append(bulkCell(row, "twMethod", "select", TW_METHODS.map((m) => [m, m])));
@@ -2302,6 +2680,10 @@ function bulkPayload() {
   if (!state.bulkRows.length) throw new Error("Add at least one instance row.");
   return {
     seed: Number(el("seed").value) || 0,
+    // Shared by every row: the server merges top-level fields into each one, so
+    // this needs no column of its own in an already wide table.
+    poiAttachMode: el("poi-attach-mode").value,
+    poiAttachRadiusM: Number(el("poi-attach-radius").value) || 50,
     instances: state.bulkRows.map((row) => ({
       problemType: row.problemType,
       city: row.city,
@@ -2385,7 +2767,10 @@ el("bulk-modal").addEventListener("click", (event) => {
   if (event.target === el("bulk-modal")) closeBulkModal();
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !el("bulk-modal").hidden) closeBulkModal();
+  if (event.key !== "Escape") return;
+  // The confirm dialog sits on top of the bulk modal, so it closes first.
+  if (!el("confirm-modal").hidden) closeConfirm(false);
+  else if (!el("bulk-modal").hidden) closeBulkModal();
 });
 el("bulk-city-all").addEventListener("click", () => {
   el("bulk-cities").querySelectorAll("input").forEach((box) => { box.checked = true; });
@@ -2428,16 +2813,24 @@ el("bulk-check").addEventListener("click", async () => {
     line.textContent = "Checking how many customers each city pool can offer…";
     const report = await api("/api/workbench/generation/bulk-preflight", bulkPayload());
     const bad = report.groups.filter((group) => group.skipped_sizes?.length || group.status === "skipped");
-    if (!bad.length) {
+    // A pool that fits can still be short of POIs: rows bigger than the POI
+    // count take parametric road points, which is worth saying up front.
+    const thin = report.groups.filter((group) => !bad.includes(group)
+      && group.method !== "parametric_attach" && group.method !== "manual"
+      && (group.sizes_needing_parametric || []).length);
+    if (!bad.length && !thin.length) {
       line.className = "preflight-line good";
       line.textContent = `All ${report.instances} instance(s) fit their city pool.`;
       return;
     }
     line.className = "preflight-line warn";
-    line.textContent = bad
-      .map((group) => `${group.city}: pool holds ${group.pool_total ?? 0}, `
-        + `so n = ${(group.skipped_sizes || []).join(", ")} would be skipped`)
-      .join(" · ");
+    line.textContent = [
+      ...bad.map((group) => `${group.city}: pool holds ${group.pool_total ?? 0}, `
+        + `so n = ${(group.skipped_sizes || []).join(", ")} would be skipped`),
+      ...thin.map((group) => `${group.city}: only ${group.poi_available ?? 0} POI(s) attach to the `
+        + `road graph, so n = ${(group.sizes_needing_parametric || []).join(", ")} will be `
+        + "completed with parametric points"),
+    ].join(" · ");
   } catch (error) {
     line.className = "preflight-line bad";
     line.textContent = `Feasibility check failed: ${error.message}`;
@@ -2446,7 +2839,10 @@ el("bulk-check").addEventListener("click", async () => {
 
 el("bulk-run").addEventListener("click", async () => {
   try {
-    const job = await submitJob("bulk-generate", bulkPayload());
+    const payload = bulkPayload();
+    state.bulkRows.forEach((row) => { row.outcome = null; });
+    renderBulkTable();
+    const job = await submitJob("bulk-generate", payload);
     status(`Bulk generation of ${state.bulkRows.length} instance(s) queued as job ${job.job_id.slice(0, 8)}.`);
     closeBulkModal();
   } catch (error) { status(`Cannot queue bulk generation: ${error.message}`); }

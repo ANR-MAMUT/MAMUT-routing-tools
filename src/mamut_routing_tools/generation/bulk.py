@@ -25,10 +25,12 @@ from mamut_routing_tools.generation.single import (
     GenerationRequest,
     Selection,
     build_generation_selection,
+    effective_method,
     generate_single_instance,
     materialize_instance,
+    selection_composition,
 )
-from mamut_routing_tools.generation.vrptw import derive_vrptw_from_cvrp, stable_seed
+from mamut_routing_tools.generation.vrptw import TW_METHODS, derive_vrptw_from_cvrp, stable_seed
 from mamut_routing_tools.generation.writers import slugify
 
 PROBLEM_TYPES = ("cvrp", "vrptw")
@@ -56,6 +58,10 @@ class BulkRow:
     def validate(self) -> None:
         if self.problem_type not in PROBLEM_TYPES:
             raise ValueError(f"Unsupported problem type '{self.problem_type}'")
+        # Checked up front rather than at derivation time: a bad method would
+        # otherwise only surface once part of the batch is already on disk.
+        if self.problem_type == "vrptw" and self.tw_method not in TW_METHODS:
+            raise ValueError(f"Unsupported time window method '{self.tw_method}'")
 
 
 def _pool_key(request: GenerationRequest) -> tuple[Any, ...]:
@@ -76,11 +82,22 @@ def _pool_key(request: GenerationRequest) -> tuple[Any, ...]:
         request.hybrid_poi_share,
         request.only_intersections,
         request.trim_to_connected_graph,
+        # Two rows that bind POIs to the graph differently draw from genuinely
+        # different pools and must not share one.
+        request.poi_attach_mode,
+        request.poi_attach_radius_m,
     )
 
 
 def _name_key(request: GenerationRequest) -> tuple[Any, ...]:
-    """Everything the generated file name encodes, seed excluded."""
+    """Rows that obviously want a readable ``-s<seed>`` suffix, seed excluded.
+
+    Only a hint for nicer names: it cannot decide collisions on its own, because
+    the real name encodes ``route_count`` (roughly n/r, so two demand types on
+    one band collide) and, in manual mode, the *resolved* customer count rather
+    than the requested one. ``materialize_instance`` holds the actual guarantee
+    through its reserved-name set.
+    """
     return (
         request.city,
         request.method,
@@ -99,14 +116,27 @@ class _Group:
 
 
 def _derive_twin(result: dict[str, Any], row: BulkRow, seed: int) -> None:
-    """Attach the VRPTW twin in place when the row asks for one."""
-    result["vrptw"] = derive_vrptw_from_cvrp(
-        result["folder"],
-        result["base_name"],
-        tw_method=row.tw_method,
-        place_slug=slugify(row.request.city),
-        source_seed=seed,
-    )
+    """Attach the VRPTW twin in place when the row asks for one.
+
+    A twin that cannot be derived is reported on its own instance instead of
+    aborting the batch: the CVRP files are already written and valid, and losing
+    the other N-1 instances of a long run to one bad row is far worse than
+    finishing with one row flagged.
+    """
+    try:
+        result["vrptw"] = derive_vrptw_from_cvrp(
+            result["folder"],
+            result["base_name"],
+            tw_method=row.tw_method,
+            place_slug=slugify(row.request.city),
+            source_seed=seed,
+        )
+    except (ValueError, OSError) as error:
+        warnings.warn(
+            f"{result['base_name']}: VRPTW derivation failed ({error})", stacklevel=2
+        )
+        result["vrptw"] = None
+        result["vrptw_error"] = str(error)
 
 
 def generate_bulk_instances(
@@ -180,8 +210,32 @@ def generate_bulk_from_rows(
         name_counts[_name_key(row.request)] = name_counts.get(_name_key(row.request), 0) + 1
     ambiguous = {key for key, count in name_counts.items() if count > 1}
 
-    results: list[dict[str, Any]] = []
+    # Results are collected against their input index and re-sorted at the end,
+    # so callers get them in the order they asked for rather than grouped by
+    # pool key -- the bulk table has no other way to line rows up with results.
+    indexed_results: list[tuple[int, dict[str, Any]]] = []
     city_reports: list[dict[str, Any]] = []
+    # One entry per input row, so a caller with a row table can say which of its
+    # rows produced nothing instead of only reporting a total that came up short.
+    row_reports: dict[int, dict[str, Any]] = {}
+
+    def row_generated(index: int, result: dict[str, Any]) -> None:
+        composition = (result.get("summary") or {}).get("composition") or {}
+        row_reports[index] = {
+            "index": index,
+            "status": "generated",
+            "base_name": result.get("base_name"),
+            "poi_customers": composition.get("poi_customers"),
+            "parametric_customers": composition.get("parametric_customers"),
+            "notice": result.get("notice"),
+            "vrptw_error": result.get("vrptw_error"),
+        }
+
+    def row_skipped(index: int, reason: str) -> None:
+        row_reports[index] = {"index": index, "status": "skipped", "reason": reason}
+    # Guarantees no two rows of this run write the same files; see
+    # materialize_instance. Empty at the start, so earlier runs still overwrite.
+    reserved_names: set[str] = set()
     done = 0
     total = len(rows)
 
@@ -196,13 +250,20 @@ def generate_bulk_from_rows(
                 total=total,
             )
 
+    def skip(count: int, reason: str) -> None:
+        """Account for rows that will never be generated, and say so."""
+        nonlocal done
+        done += count
+        if context is not None:
+            context.progress(f"{done}/{total} handled: {reason}", current=done, total=total)
+
     for group in groups.values():
         if context is not None:
             context.check_cancelled()
 
         # Hand-picked selections are per-row by construction; nothing to pool.
         if group.rows[0][1].request.method == "manual":
-            for _, row in group.rows:
+            for index, row in group.rows:
                 if context is not None:
                     context.check_cancelled()
                 seed = row.explicit_seed if row.explicit_seed is not None else row.request.seed
@@ -210,10 +271,12 @@ def generate_bulk_from_rows(
                     replace(row.request, seed=seed),
                     output_root,
                     name_suffix=f"-s{seed}" if _name_key(row.request) in ambiguous else "",
+                    reserved_names=reserved_names,
                 )
                 if row.problem_type == "vrptw":
                     _derive_twin(result, row, seed)
-                results.append(result)
+                indexed_results.append((index, result))
+                row_generated(index, result)
                 advance(row)
             continue
 
@@ -235,10 +298,29 @@ def generate_bulk_from_rows(
         except (ValueError, FileNotFoundError) as error:
             warnings.warn(f"City {group.city}: selection failed, skipping ({error})", stacklevel=2)
             city_reports.append({"city": group.city, "status": "skipped", "error": str(error)})
-            done += len(group.rows)
+            for index, _row in group.rows:
+                row_skipped(index, f"{group.city} selection failed: {error}")
+            skip(len(group.rows), f"{group.city} selection failed, {len(group.rows)} row(s) skipped")
             continue
 
         actual_max_nc = len(pool.vertices) - 1
+        pool_composition = pool.params.get("composition") or {}
+        # The pool may have been reclassified by its own fallback; rows are sized
+        # differently and each has to be judged against what was asked for.
+        pool_requested_method = str(pool.params.get("requested_method") or pool.params["method"])
+        pool_poi_indices = [
+            i for i in range(1, len(pool.source_tags)) if is_poi_source_tag(pool.source_tags[i])
+        ]
+        pool_parametric_indices = [
+            i for i in range(1, len(pool.source_tags)) if not is_poi_source_tag(pool.source_tags[i])
+        ]
+        # Reconstructed from the pool report so each sliced row can be described
+        # against the same POI pool without re-scanning the extract.
+        pool_poi_stats = {
+            "pool_matching": pool_composition.get("poi_pool_matching", 0),
+            "attached": pool_composition.get("poi_pool_attachable") or 0,
+            "exhausted": pool_composition.get("poi_pool_attachable") is not None,
+        }
         requested_sizes = sorted({row.request.n_customers for _, row in group.rows})
         valid_rows = [(i, row) for i, row in group.rows if row.request.n_customers <= actual_max_nc]
         skipped_sizes = sorted({n for n in requested_sizes if n > actual_max_nc})
@@ -250,13 +332,28 @@ def generate_bulk_from_rows(
                 "poi_available": pool_poi,
                 "parametric_filled": actual_max_nc - pool_poi,
                 "pool_total": actual_max_nc,
+                "poi_pool_matching": pool_composition.get("poi_pool_matching"),
+                "poi_pool_attachable": pool_composition.get("poi_pool_attachable"),
                 "requested_sizes": requested_sizes,
                 "valid_sizes": sorted({row.request.n_customers for _, row in valid_rows}),
                 "skipped_sizes": skipped_sizes,
                 "status": "skipped" if not valid_rows else ("partial" if skipped_sizes else "ok"),
             }
         )
-        done += len(group.rows) - len(valid_rows)
+        if len(valid_rows) < len(group.rows):
+            valid_indices = {index for index, _row in valid_rows}
+            for index, row in group.rows:
+                if index not in valid_indices:
+                    row_skipped(
+                        index,
+                        f"{group.city} pool holds {actual_max_nc} customers, "
+                        f"short of the {row.request.n_customers} this row asks for",
+                    )
+            skip(
+                len(group.rows) - len(valid_rows),
+                f"{group.city} pool holds {actual_max_nc}, so n = "
+                f"{', '.join(str(n) for n in skipped_sizes)} cannot be served",
+            )
         if not valid_rows:
             continue
 
@@ -266,7 +363,7 @@ def generate_bulk_from_rows(
         d_eucl_full, coords_full = euclidean_matrix_from_vertices(pool.graph, pool.vertices)
         total_vertices = len(pool.vertices)
 
-        for _, row in valid_rows:
+        for index, row in valid_rows:
             if context is not None:
                 context.check_cancelled()
             nc = row.request.n_customers
@@ -278,32 +375,62 @@ def generate_bulk_from_rows(
                 )
             )
             rng = random.Random(inst_seed)
-            if nc < actual_max_nc:
+            if nc >= actual_max_nc:
+                sel_indices = list(range(total_vertices))
+            elif pool_poi_indices:
+                # POIs first, then parametric points: drawing from the union
+                # would hand a small row an almost purely parametric instance
+                # just because a larger row in the batch grew the pool.
+                poi_part = list(pool_poi_indices)
+                param_part = list(pool_parametric_indices)
+                rng.shuffle(poi_part)
+                rng.shuffle(param_part)
+                sel_indices = [0, *sorted((poi_part + param_part)[:nc])]
+            else:
+                # No POI in the pool: keep the original single-shuffle draw, so
+                # parametric batches reproduce byte for byte across this change.
                 perm = list(range(1, total_vertices))
                 rng.shuffle(perm)
                 sel_indices = [0, *sorted(perm[:nc])]
-            else:
-                sel_indices = list(range(total_vertices))
 
             vertices = [pool.vertices[i] for i in sel_indices]
             subset = set(vertices)
+            source_tags = [pool.source_tags[i] for i in sel_indices]
             params = dict(pool.params)
             params["seed"] = inst_seed
             params["n_customers"] = nc
             params["demand_type"] = row.request.demand_type
             params["avg_route_size"] = row.request.avg_route_size
+            # The pool's own composition describes the oversized pool, not this
+            # slice: recompute it from the tags this row actually drew, and let
+            # the row be named after what it holds rather than after the pool.
+            params["method"] = effective_method(pool_requested_method, source_tags[1:])
+            params["composition"] = selection_composition(
+                method=pool_requested_method,
+                requested=nc,
+                customer_tags=source_tags[1:],
+                poi_stats=pool_poi_stats,
+                poi_share=float(pool.params.get("hybrid_poi_share") or 0.0),
+                categories=list(pool.params.get("categories") or []),
+                graph_options_relaxed=pool.params.get("graph_options_relaxed"),
+                effective=params["method"],
+            )
             selection = Selection(
                 graph=pool.graph,
                 vertices=vertices,
                 poi_lats=[pool.poi_lats[i] for i in sel_indices],
                 poi_lons=[pool.poi_lons[i] for i in sel_indices],
-                source_tags=[pool.source_tags[i] for i in sel_indices],
+                source_tags=source_tags,
                 params=params,
                 poi_meta=[
                     pool.poi_meta[i] if i < len(pool.poi_meta) else None for i in sel_indices
                 ],
                 snap_distances_m=[
                     pool.snap_distances_m[i] if i < len(pool.snap_distances_m) else 0.0
+                    for i in sel_indices
+                ],
+                poi_merged=[
+                    pool.poi_merged[i] if i < len(pool.poi_merged) else []
                     for i in sel_indices
                 ],
             )
@@ -331,13 +458,25 @@ def generate_bulk_from_rows(
                 rng=rng,
                 precomputed=precomputed,
                 name_suffix=f"-s{inst_seed}" if _name_key(row.request) in ambiguous else "",
+                reserved_names=reserved_names,
             )
             if row.problem_type == "vrptw":
                 _derive_twin(result, row, inst_seed)
-            results.append(result)
+            indexed_results.append((index, result))
+            row_generated(index, result)
             advance(row)
 
-    return {"ok": True, "generated": len(results), "results": results, "city_reports": city_reports}
+    results = [result for _, result in sorted(indexed_results, key=lambda pair: pair[0])]
+    return {
+        "ok": True,
+        "generated": len(results),
+        "results": results,
+        "city_reports": city_reports,
+        "row_reports": [
+            row_reports.get(index, {"index": index, "status": "skipped", "reason": "not reached"})
+            for index in range(len(rows))
+        ],
+    }
 
 
 def preflight_rows(rows: list[BulkRow], *, base_seed: int = 0) -> dict[str, Any]:
@@ -392,6 +531,7 @@ def preflight_rows(rows: list[BulkRow], *, base_seed: int = 0) -> dict[str, Any]
         available = len(pool.vertices) - 1
         skipped = [n for n in requested_sizes if n > available]
         pool_poi = sum(1 for tag in pool.source_tags[1:] if is_poi_source_tag(tag))
+        pool_composition = pool.params.get("composition") or {}
         reports.append(
             {
                 "city": group.city,
@@ -399,6 +539,13 @@ def preflight_rows(rows: list[BulkRow], *, base_seed: int = 0) -> dict[str, Any]
                 "pool_total": available,
                 "poi_available": pool_poi,
                 "parametric_filled": available - pool_poi,
+                "poi_pool_matching": pool_composition.get("poi_pool_matching"),
+                "poi_pool_attachable": pool_composition.get("poi_pool_attachable"),
+                # Rows are served POIs first, so only sizes past the POI count
+                # have to take parametric points.
+                "sizes_needing_parametric": [
+                    n for n in requested_sizes if n <= available and n > pool_poi
+                ],
                 "instances": len(group.rows),
                 "requested_sizes": requested_sizes,
                 "skipped_sizes": skipped,

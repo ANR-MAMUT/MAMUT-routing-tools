@@ -377,6 +377,85 @@ def osm_fetch_city_cmd(
     typer.echo(json.dumps(summary, indent=1))
 
 
+@osm_app.command("refresh-pois")
+def osm_refresh_pois_cmd(
+    cities: Annotated[Optional[list[str]], typer.Argument(help="Cities to refresh (default: every extract in --osm-dir).")] = None,
+    osm_dir: Annotated[Optional[Path], typer.Option("--osm-dir", help="Directory holding the <city>.osm extracts (default: the workbench workspace osmdata/).")] = None,
+    output_dir: Annotated[Optional[Path], typer.Option("--output-dir", help="Workspace directory, when --osm-dir is not given.")] = None,
+    check: Annotated[bool, typer.Option("--check", help="Report coverage and exit without downloading anything.")] = False,
+    all_extracts: Annotated[bool, typer.Option("--all", help="Refresh every extract, not only those missing way-mapped POIs.")] = False,
+    poi_category: Annotated[Optional[list[str]], typer.Option("--poi-category", help="Amenity category to backfill (repeatable; default: the full catalog).")] = None,
+    tile_cache: Annotated[bool, typer.Option("--tile-cache/--no-tile-cache", help="Reuse successful tiles across interrupted or repeated runs.")] = True,
+) -> None:
+    """Backfill amenities mapped as ways and relations into existing extracts.
+
+    Extracts fetched before ways and relations were queried hold only the POIs
+    mapped as nodes -- roughly two thirds of a real city's amenities -- and
+    nothing invalidates them, so generation keeps drawing from the smaller pool.
+    Only the amenity query is re-run: the road network in each file is left
+    alone, so this is far cheaper than re-fetching the cities.
+    """
+    from mamut_routing_tools.generation.pois import POI_CATEGORIES
+    from mamut_routing_tools.osm import audit_extracts, refresh_extracts
+    from mamut_routing_tools.workspace import osmdata_dir, resolve_workspace
+
+    root = Path(osm_dir) if osm_dir is not None else osmdata_dir(resolve_workspace(output_dir))
+    reports = audit_extracts(root)
+    if not reports:
+        typer.echo(f"No .osm extract found under {root}", err=True)
+        raise typer.Exit(code=1)
+
+    wanted = {value.strip().lower() for value in (cities or []) if value.strip()}
+    if wanted:
+        reports = [entry for entry in reports if entry["city"].lower() in wanted]
+        missing = wanted - {entry["city"].lower() for entry in reports}
+        if missing:
+            typer.echo(f"No extract for: {', '.join(sorted(missing))}", err=True)
+            raise typer.Exit(code=1)
+
+    for entry in reports:
+        typer.echo(
+            f"{entry['city']:<24} {entry.get('status', '?'):<13} "
+            f"{entry.get('poi_total', 0):>6} POIs "
+            f"({entry.get('poi_nodes', 0)} nodes / {entry.get('poi_ways', 0)} ways "
+            f"/ {entry.get('poi_relations', 0)} relations)",
+            err=True,
+        )
+
+    stale = [
+        entry for entry in reports
+        if entry.get("can_refresh") and (all_extracts or entry.get("status") != "complete")
+    ]
+    if check:
+        typer.echo(json.dumps({"osm_dir": str(root), "extracts": reports}, indent=1))
+        raise typer.Exit()
+    if not stale:
+        typer.echo("Every extract already holds way-mapped POIs; nothing to do.", err=True)
+        typer.echo(json.dumps({"osm_dir": str(root), "refreshed": 0, "results": []}, indent=1))
+        raise typer.Exit()
+
+    def on_city(index: int, total: int, path: Path) -> None:
+        typer.echo(f"[osm refresh-pois] {index + 1}/{total} {path.stem}", err=True)
+
+    def report_progress(event: dict) -> None:
+        typer.echo(
+            f"    {event.get('phase', 'amenities')} tiles "
+            f"{event.get('current')}/{event.get('total')} "
+            f"(ok={event.get('tiles_ok')}, cached={event.get('cache_hits', 0)})",
+            err=True,
+        )
+
+    summary = refresh_extracts(
+        [Path(entry["path"]) for entry in stale],
+        poi_categories=tuple(poi_category) if poi_category else tuple(POI_CATEGORIES),
+        on_city=on_city,
+        progress=report_progress,
+        use_tile_cache=tile_cache,
+    )
+    summary["osm_dir"] = str(root)
+    typer.echo(json.dumps(summary, indent=1))
+
+
 @osm_app.command("validate")
 def osm_validate_cmd(
     osm_path: Annotated[
