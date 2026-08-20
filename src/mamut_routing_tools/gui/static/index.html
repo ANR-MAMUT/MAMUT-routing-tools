@@ -561,9 +561,12 @@
 <section class="activity" id="activity" aria-label="Activity">
   <button class="activity-summary" id="activity-toggle" type="button" aria-expanded="false" aria-controls="activity-body">
     <span class="dot" id="activity-dot" aria-hidden="true"></span>
-    <span id="status" title="">Ready.</span>
+    <span id="status" role="status" aria-live="polite" title="">Ready.</span>
     <span id="activity-count" class="poi-count"></span>
     <svg class="activity-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg>
+    <!-- A hairline along the strip's bottom edge: the running job stays legible without
+         opening anything, which is the whole point of the collapsed line. -->
+    <div class="activity-bar" id="activity-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" hidden><i></i></div>
   </button>
   <div class="activity-body" id="activity-body" hidden>
     <div class="activity-toolbar">

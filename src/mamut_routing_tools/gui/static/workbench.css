@@ -213,6 +213,21 @@ html, body {
 .rail-btn:hover { color: var(--acc); background: var(--acc-t); }
 .rail-btn.rail-active { color: var(--acc); background: var(--acc-t); }
 .rail-btn svg { width: 17px; height: 17px; }
+/* Collapsing the left panel hides the job list but not the fact that a job is running.
+   The button is only 28px square, so this is a dot rather than a numbered badge — a digit
+   at that size is a smudge, and the exact count lives in the button's title instead. */
+.rail-btn { position: relative; }
+.rail-btn[data-job-count]::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--cy);
+  box-shadow: 0 0 0 2px var(--panel);
+}
 
 /* Collapsed: the panel becomes a rail of icons. Everything else is hidden rather
    than removed so no scroll position or form state is lost. */
@@ -836,11 +851,43 @@ details.poi-menu > summary {
 .job-state.completed { background: var(--gr); }
 .job-state.failed, .job-state.interrupted { background: var(--cor); }
 .job-state.cancelled { background: var(--am); }
-.job-main { min-width: 0; }
-.job-name { font-weight: 500; color: var(--ink); }
+.job-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.job-name { font-weight: 500; color: var(--ink); display: flex; gap: 8px; align-items: baseline; }
+.job-clock { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; font-weight: 400; }
 .job-progress { color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-actions { display: flex; gap: 3px; }
 .job-actions button { padding: 3px 6px; font-size: 10px; }
+
+/* ── Progress bars ── */
+/* One shared form in two sizes: a 3px bar under a job row, a 2px hairline pinned to the
+   bottom edge of the collapsed activity strip. Determinate whenever the job knows its own
+   extent (a solve knows its time budget; a bulk run knows its row count), indeterminate
+   otherwise — a fake percentage would be worse than an honest "something is happening". */
+.job-bar, .activity-bar {
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--cy-t);
+}
+.job-bar { height: 3px; }
+.job-bar > i, .activity-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: var(--cy);
+  transition: width 320ms linear;
+}
+.job-bar.indeterminate > i, .activity-bar.indeterminate > i {
+  width: 34%;
+  transition: none;
+}
+.activity-bar {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 3px;
+  height: 2px;
+}
 .mono-output {
   margin: 0;
   max-height: 140px;
@@ -921,6 +968,7 @@ details.poi-menu > summary {
    strip stops tracking its width and stands on its own. */
 [data-left-collapsed="true"] .activity { width: min(46vw, 420px); }
 .activity-summary {
+  position: relative;
   cursor: pointer;
   font: inherit;
   text-align: left;
@@ -1136,3 +1184,24 @@ details.poi-menu > summary {
   padding: 2px 7px;
 }
 .sheet-toggle:hover { color: var(--acc); border-color: var(--edge); }
+
+/* ── Motion ── */
+/* The only animation in the workbench, and deliberately so: everything else here is still,
+   and a running job is the one thing that has to look alive from across the room. Both are
+   opt-in, so with reduced motion the strip falls back to exactly the static look it had. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes wb-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.32; }
+  }
+  @keyframes wb-drift {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(390%); }
+  }
+  .activity .dot.busy, .job-state.running, .rail-btn[data-job-count]::after {
+    animation: wb-pulse 1.8s ease-in-out infinite;
+  }
+  .job-bar.indeterminate > i, .activity-bar.indeterminate > i {
+    animation: wb-drift 1.6s ease-in-out infinite;
+  }
+}

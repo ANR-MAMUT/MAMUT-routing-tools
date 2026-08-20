@@ -1134,12 +1134,18 @@ def _import_solution_payload(
     }
 
 
-def _solve_payload(payload: dict[str, Any], *, instance_path: Path | None = None) -> dict[str, Any]:
+def _solve_payload(
+    payload: dict[str, Any],
+    *,
+    instance_path: Path | None = None,
+    monitor: Any | None = None,
+) -> dict[str, Any]:
     """Solve and canonically validate a static CVRP/VRPTW instance.
 
     The compatibility endpoint still accepts inline TSPLIB/JSON.  Persistent
     jobs pass ``instance_path`` so collection sidecars and provenance remain
-    available to the solver and checker.
+    available to the solver and checker, and a ``SolveMonitor`` so the search
+    reports itself while it runs.
     """
     import tempfile
 
@@ -1182,6 +1188,7 @@ def _solve_payload(payload: dict[str, Any], *, instance_path: Path | None = None
             seed=seed,
             objective_function=objective,
             instance_path=instance_file if input_source != "vrp_text" else None,
+            monitor=monitor,
         )
         validation = validate_solution(instance, result.routes, instance_path=instance_file)
         canonical_cost = validation.get("routing_cost")
@@ -1207,6 +1214,48 @@ def _solve_payload(payload: dict[str, Any], *, instance_path: Path | None = None
             temporary_path.unlink(missing_ok=True)
 
 
+# How often a solve that is not improving still writes a line to its job log. The log endpoint
+# returns the whole file on every poll, so this trades detail for a bounded log.
+_SOLVE_LOG_HEARTBEAT_S = 15.0
+
+
+def _solve_monitor(context: JobContext, *, budget_s: int) -> Any:
+    """A `SolveMonitor` that republishes the search as job progress and honours cancellation.
+
+    A solve is otherwise a black box: it publishes one message and then blocks for the whole
+    budget. PyVRP calls its stopping criterion every iteration, so this turns that call into
+    the job's heartbeat — elapsed against the known budget for the bar, iterations and the
+    incumbent for the message. The log gets a line only when the incumbent improves or the
+    phase changes, so a ten-minute solve leaves a convergence trace rather than 600 heartbeats
+    (the log endpoint returns the whole file on every poll).
+    """
+    from mamut_routing_lib.solvers.pyvrp import SolveMonitor, SolveTick
+
+    seen: dict[str, Any] = {"phase": None, "best": None, "logged_at": -_SOLVE_LOG_HEARTBEAT_S}
+
+    def on_tick(tick: SolveTick) -> bool:
+        best = "no feasible solution yet" if tick.best_cost is None else f"best {tick.best_cost:,.0f}"
+        context.progress(
+            f"{tick.phase} · {tick.iterations:,} iters · {best}",
+            current=min(int(tick.elapsed_s), budget_s),
+            total=budget_s,
+            unit="s",
+        )
+        improved = tick.best_cost is not None and (seen["best"] is None or tick.best_cost < seen["best"])
+        # A search that stalls on its first incumbent would otherwise leave a one-line log
+        # for a ten-minute run, which reads as a dead job rather than a converged one.
+        heartbeat = tick.elapsed_s - seen["logged_at"] >= _SOLVE_LOG_HEARTBEAT_S
+        if improved or heartbeat or tick.phase != seen["phase"]:
+            context.log(f"{tick.phase} · iter {tick.iterations:,} · t={tick.elapsed_s:.0f}s · {best}")
+            seen["phase"] = tick.phase
+            seen["logged_at"] = tick.elapsed_s
+            if improved:
+                seen["best"] = tick.best_cost
+        return context.cancelled
+
+    return SolveMonitor(on_tick)
+
+
 def _solve_workspace_payload(
     workspace: Path,
     instance_id: str,
@@ -1218,13 +1267,17 @@ def _solve_workspace_payload(
     record = _workspace_instance(workspace, instance_id)
     metric = str(payload.get("metric") or "fastest").lower()
     instance_path = _instance_variant_path(record, metric)
+    monitor = None
     if context is not None:
         context.progress(f"Solving {record['base_name']} ({metric})")
         context.check_cancelled()
-    result = _solve_payload(payload, instance_path=instance_path)
+        monitor = _solve_monitor(context, budget_s=max(1, int(float(payload.get("time_limit") or 30.0))))
+    result = _solve_payload(payload, instance_path=instance_path, monitor=monitor)
     if context is not None:
-        context.progress("Persisting validated solution")
+        # The monitor stops the search by returning True rather than raising, so the
+        # cancellation surfaces here — before anything is written to the solution store.
         context.check_cancelled()
+        context.progress("Persisting validated solution")
     solution = store.record(
         instance_id=instance_id,
         instance_name=str(record["base_name"]),

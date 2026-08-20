@@ -49,14 +49,25 @@ class JobContext:
         *,
         current: int | None = None,
         total: int | None = None,
+        unit: str | None = None,
     ) -> None:
-        self._manager._progress(self.job_id, message, current=current, total=total)
+        self._manager._progress(self.job_id, message, current=current, total=total, unit=unit)
 
     def log(self, message: str) -> None:
         self._manager._log(self.job_id, message)
 
+    @property
+    def cancelled(self) -> bool:
+        """Whether cancellation has been requested, without raising.
+
+        Callbacks handed to a solver run underneath foreign (often native) frames, where an
+        exception has nowhere safe to unwind to; they ask the solver to stop instead and let
+        the runner raise at its next checkpoint.
+        """
+        return self._manager.cancel_requested(self.job_id)
+
     def check_cancelled(self) -> None:
-        if self._manager.cancel_requested(self.job_id):
+        if self.cancelled:
             raise JobCancelled("Cancellation requested")
 
 
@@ -105,7 +116,7 @@ class JobManager:
             "created_at": _now(),
             "started_at": None,
             "finished_at": None,
-            "progress": {"message": "Queued", "current": None, "total": None},
+            "progress": {"message": "Queued", "current": None, "total": None, "unit": None},
             "cancel_requested": False,
             "request": payload,
             "result": None,
@@ -123,12 +134,12 @@ class JobManager:
             if record["cancel_requested"]:
                 record["status"] = "cancelled"
                 record["finished_at"] = _now()
-                record["progress"] = {"message": "Cancelled", "current": None, "total": None}
+                record["progress"] = {"message": "Cancelled", "current": None, "total": None, "unit": None}
                 self._persist(record)
                 return
             record["status"] = "running"
             record["started_at"] = _now()
-            record["progress"] = {"message": "Starting", "current": None, "total": None}
+            record["progress"] = {"message": "Starting", "current": None, "total": None, "unit": None}
             self._persist(record)
 
         context = JobContext(self, job_id)
@@ -141,7 +152,7 @@ class JobManager:
                 record = self._records[job_id]
                 record["status"] = "cancelled"
                 record["finished_at"] = _now()
-                record["progress"] = {"message": "Cancelled", "current": None, "total": None}
+                record["progress"] = {"message": "Cancelled", "current": None, "total": None, "unit": None}
                 record["error"] = str(error)
                 self._persist(record)
             context.log(str(error))
@@ -151,7 +162,7 @@ class JobManager:
                 record = self._records[job_id]
                 record["status"] = "failed"
                 record["finished_at"] = _now()
-                record["progress"] = {"message": "Failed", "current": None, "total": None}
+                record["progress"] = {"message": "Failed", "current": None, "total": None, "unit": None}
                 record["error"] = str(error)
                 self._persist(record)
         else:
@@ -159,7 +170,7 @@ class JobManager:
                 record = self._records[job_id]
                 record["status"] = "completed"
                 record["finished_at"] = _now()
-                record["progress"] = {"message": "Completed", "current": 1, "total": 1}
+                record["progress"] = {"message": "Completed", "current": 1, "total": 1, "unit": None}
                 record["result"] = result
                 self._persist(record)
             context.log("Job completed")
@@ -171,10 +182,16 @@ class JobManager:
         *,
         current: int | None,
         total: int | None,
+        unit: str | None = None,
     ) -> None:
         with self._lock:
             record = self._records[job_id]
-            record["progress"] = {"message": message, "current": current, "total": total}
+            record["progress"] = {
+                "message": message,
+                "current": current,
+                "total": total,
+                "unit": unit,
+            }
             self._persist(record)
 
     def _log(self, job_id: str, message: str) -> None:
@@ -218,6 +235,7 @@ class JobManager:
                 "message": "Cancellation requested; waiting for the current safe checkpoint",
                 "current": record.get("progress", {}).get("current"),
                 "total": record.get("progress", {}).get("total"),
+                "unit": record.get("progress", {}).get("unit"),
             }
             future = self._futures.get(job_id)
             if future is not None and future.cancel():

@@ -1236,6 +1236,69 @@ el("compare").addEventListener("click", async () => {
 /* ── Persistent jobs ── */
 const ACTIVE_JOB_STATUSES = ["queued", "running"];
 
+/* Buttons that own a job kind: while one is in flight the button says so and refuses a
+   second click. Before this, clicking Queue solve five times queued five solves with no
+   sign that any of them had started. */
+const BUSY_BUTTONS = [
+  { id: "solve", kind: "solve", verb: "Solving" },
+  { id: "generate", kind: "generate", verb: "Generating" },
+  { id: "fetch", kind: "fetch-osm", verb: "Fetching" },
+  { id: "osm-audit-refresh", kind: "refresh-pois", verb: "Updating" },
+];
+const busyButtonState = new Map();
+
+function formatClock(seconds) {
+  const whole = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+/* Seconds since the job started — or since it was created, while it still waits for a
+   worker. The 1 Hz poll re-renders anyway, so the clock ticks without a timer of its own. */
+function jobElapsed(job) {
+  const started = Date.parse(job.started_at || job.created_at || "");
+  if (!Number.isFinite(started)) return null;
+  const finished = job.finished_at ? Date.parse(job.finished_at) : NaN;
+  const end = Number.isFinite(finished) ? finished : Date.now();
+  return Math.max(0, (end - started) / 1000);
+}
+
+/* A fraction in [0,1] when the job knows its own extent, otherwise null — the caller draws
+   an indeterminate bar rather than inventing a number. */
+function jobFraction(job) {
+  const total = job.progress?.total;
+  if (!total || !(total > 0)) return null;
+  return Math.min(1, Math.max(0, (job.progress.current || 0) / total));
+}
+
+/* "0:18 / 0:30" for a time budget, "3/12" for a count of things. */
+function jobCounter(job) {
+  const progress = job.progress || {};
+  if (!progress.total) return "";
+  if (progress.unit === "s") return `${formatClock(progress.current || 0)} / ${formatClock(progress.total)}`;
+  return `${progress.current || 0}/${progress.total}`;
+}
+
+function makeBar(className) {
+  const bar = document.createElement("div");
+  bar.className = className;
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", "100");
+  bar.append(document.createElement("i"));
+  return bar;
+}
+
+function setBar(bar, job) {
+  const active = ACTIVE_JOB_STATUSES.includes(job.status);
+  bar.hidden = !active;
+  if (!active) return;
+  const fraction = jobFraction(job);
+  bar.classList.toggle("indeterminate", fraction === null);
+  bar.firstChild.style.width = fraction === null ? "" : `${(fraction * 100).toFixed(1)}%`;
+  if (fraction === null) bar.removeAttribute("aria-valuenow");
+  else bar.setAttribute("aria-valuenow", String(Math.round(fraction * 100)));
+}
+
 /* The collapsed strip has to say enough that opening it is usually unnecessary. */
 function renderActivitySummary() {
   const active = state.jobs.filter((job) => ACTIVE_JOB_STATUSES.includes(job.status));
@@ -1246,14 +1309,59 @@ function renderActivitySummary() {
   const lastFailed = state.jobs.length > 0 && state.jobs[0].status === "failed";
   dot.classList.toggle("busy", active.length > 0);
   dot.classList.toggle("bad", active.length === 0 && lastFailed);
+
   const parts = [];
-  if (active.length) {
-    const first = active[0];
-    const counts = first.progress?.total ? ` ${first.progress.current || 0}/${first.progress.total}` : "";
-    parts.push(`${active.length} running · ${first.kind}${counts}`);
+  const first = active[0];
+  if (first) {
+    const elapsed = jobElapsed(first);
+    parts.push([
+      active.length > 1 ? `${active.length} running · ${first.kind}` : first.kind,
+      first.progress?.message,
+      jobCounter(first) || (elapsed === null ? "" : formatClock(elapsed)),
+    ].filter(Boolean).join(" · "));
   }
   if (failed.length) parts.push(`${failed.length} failed`);
   el("activity-count").textContent = parts.join(" · ");
+
+  const bar = el("activity-bar");
+  if (first) setBar(bar, first);
+  else bar.hidden = true;
+
+  // The rail survives collapsing the left panel, so the running count has to live there too.
+  const rail = document.querySelector('[data-rail-target="jobs"]');
+  if (rail) {
+    if (active.length) {
+      rail.dataset.jobCount = String(active.length);
+      rail.title = `Jobs · ${active.length} running`;
+    } else {
+      delete rail.dataset.jobCount;
+      rail.title = "Jobs";
+    }
+  }
+}
+
+function renderBusyButtons() {
+  BUSY_BUTTONS.forEach(({ id, kind, verb }) => {
+    const button = el(id);
+    if (!button) return;
+    const job = state.jobs.find((entry) => entry.kind === kind && ACTIVE_JOB_STATUSES.includes(entry.status));
+    const saved = busyButtonState.get(id);
+    if (job) {
+      /* Capture the resting label and disabled state once. Some of these buttons are
+         disabled for reasons of their own, so restoring a blanket `false` would wrongly
+         re-enable them. */
+      if (!saved) busyButtonState.set(id, { label: button.textContent, disabled: button.disabled });
+      const elapsed = jobElapsed(job);
+      button.textContent = job.status === "queued"
+        ? "Queued…"
+        : `${verb}…${elapsed === null ? "" : ` ${formatClock(elapsed)}`}`;
+      button.disabled = true;
+    } else if (saved) {
+      button.textContent = saved.label;
+      button.disabled = saved.disabled;
+      busyButtonState.delete(id);
+    }
+  });
 }
 
 /* The log pane is pinned below the job list and shows one job at a time. While that
@@ -1299,61 +1407,103 @@ function jobMatchesFilter(job) {
   return true;
 }
 
+const jobRowParts = new WeakMap();
+
+/* Build a row once. Its buttons resolve the job from `state.jobs` at click time rather than
+   closing over it, because the row now outlives the record it was first built from. */
+function createJobRow(jobId) {
+  const row = document.createElement("div");
+  row.className = "job-row";
+  row.dataset.jobId = jobId;
+
+  const dot = document.createElement("span");
+  dot.className = "job-state";
+
+  const main = document.createElement("div");
+  main.className = "job-main";
+  const name = document.createElement("div");
+  name.className = "job-name";
+  const title = document.createElement("span");
+  const clock = document.createElement("span");
+  clock.className = "job-clock";
+  name.append(title, clock);
+  const progress = document.createElement("div");
+  progress.className = "job-progress";
+  const bar = makeBar("job-bar");
+  main.append(name, progress, bar);
+
+  const actions = document.createElement("div");
+  actions.className = "job-actions";
+  const logButton = document.createElement("button");
+  logButton.type = "button";
+  logButton.className = "btn btn-ghost";
+  logButton.textContent = "Log";
+  logButton.setAttribute("aria-controls", "jobLogPane");
+  logButton.addEventListener("click", () => {
+    if (state.openJobLogId === jobId) return closeJobLog();
+    const job = state.jobs.find((entry) => entry.job_id === jobId);
+    if (job) openJobLog(job);
+  });
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "btn btn-ghost";
+  cancelButton.textContent = "Cancel";
+  cancelButton.addEventListener("click", async () => {
+    cancelButton.disabled = true;
+    try { await apiDelete(`/api/jobs/${encodeURIComponent(jobId)}`); await refreshJobs(); }
+    catch (error) { status(`Cancellation failed: ${error.message}`); cancelButton.disabled = false; }
+  });
+  actions.append(logButton, cancelButton);
+
+  row.append(dot, main, actions);
+  jobRowParts.set(row, { dot, title, clock, progress, bar, logButton, cancelButton });
+  return row;
+}
+
+function updateJobRow(row, job) {
+  const { dot, title, clock, progress, bar, logButton, cancelButton } = jobRowParts.get(row);
+  dot.className = `job-state ${job.status}`;
+  title.textContent = `${job.kind} · ${job.status}`;
+  const elapsed = jobElapsed(job);
+  clock.textContent = elapsed === null ? "" : formatClock(elapsed);
+  progress.textContent = [job.error || job.progress?.message || "", jobCounter(job)]
+    .filter(Boolean)
+    .join(" · ");
+  progress.title = progress.textContent;
+  setBar(bar, job);
+  logButton.setAttribute("aria-expanded", String(state.openJobLogId === job.job_id));
+  const active = ACTIVE_JOB_STATUSES.includes(job.status);
+  cancelButton.hidden = !active;
+  if (active && !job.cancel_requested) cancelButton.disabled = false;
+}
+
+/* Reconcile rather than rebuild: this runs once a second, and `innerHTML = ""` would restart
+   every pulse and discard every bar transition before it could play. */
 function renderJobs() {
   const list = el("jobList");
-  list.innerHTML = "";
   renderActivitySummary();
-  if (!state.jobs.length) {
-    list.innerHTML = '<div class="empty-note">No workbench jobs yet.</div>';
-    return;
-  }
+  renderBusyButtons();
+
   const shown = state.jobs.filter(jobMatchesFilter).slice(0, 40);
   if (!shown.length) {
-    list.innerHTML = '<div class="empty-note">No job matches this filter.</div>';
+    list.innerHTML = `<div class="empty-note">${
+      state.jobs.length ? "No job matches this filter." : "No workbench jobs yet."
+    }</div>`;
     return;
   }
-  shown.forEach((job) => {
-    const row = document.createElement("div");
-    row.className = "job-row";
-    const dot = document.createElement("span");
-    dot.className = `job-state ${job.status}`;
-    const main = document.createElement("div");
-    main.className = "job-main";
-    const name = document.createElement("div");
-    name.className = "job-name";
-    name.textContent = `${job.kind} · ${job.status}`;
-    const progress = document.createElement("div");
-    progress.className = "job-progress";
-    const counts = job.progress?.total ? ` ${job.progress.current || 0}/${job.progress.total}` : "";
-    progress.textContent = `${job.error || job.progress?.message || ""}${counts}`;
-    main.append(name, progress);
-    const actions = document.createElement("div");
-    actions.className = "job-actions";
-    const logButton = document.createElement("button");
-    logButton.type = "button";
-    logButton.className = "btn btn-ghost";
-    logButton.textContent = "Log";
-    logButton.setAttribute("aria-expanded", String(state.openJobLogId === job.job_id));
-    logButton.setAttribute("aria-controls", "jobLogPane");
-    logButton.addEventListener("click", () => {
-      if (state.openJobLogId === job.job_id) closeJobLog();
-      else openJobLog(job);
-    });
-    actions.append(logButton);
-    if (["queued", "running"].includes(job.status)) {
-      const cancelButton = document.createElement("button");
-      cancelButton.type = "button";
-      cancelButton.className = "btn btn-ghost";
-      cancelButton.textContent = "Cancel";
-      cancelButton.addEventListener("click", async () => {
-        try { await apiDelete(`/api/jobs/${encodeURIComponent(job.job_id)}`); await refreshJobs(); }
-        catch (error) { status(`Cancellation failed: ${error.message}`); }
-      });
-      actions.append(cancelButton);
-    }
-    row.append(dot, main, actions);
-    list.append(row);
+
+  const existing = new Map();
+  list.querySelectorAll(".job-row").forEach((row) => existing.set(row.dataset.jobId, row));
+  list.querySelector(".empty-note")?.remove();
+
+  shown.forEach((job, index) => {
+    let row = existing.get(job.job_id);
+    if (row) existing.delete(job.job_id);
+    else row = createJobRow(job.job_id);
+    updateJobRow(row, job);
+    if (list.children[index] !== row) list.insertBefore(row, list.children[index] || null);
   });
+  existing.forEach((row) => row.remove());
 }
 
 async function handleFinishedJob(job) {

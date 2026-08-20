@@ -860,3 +860,96 @@ def test_poi_attach_mode_travels_from_the_payload_to_the_instance(client: TestCl
         "/api/workbench/generation/preflight", json={**body, "poiAttachMode": "teleport"}
     )
     assert rejected.json()["ok"] is False
+
+
+def test_running_solve_reports_live_progress_and_a_search_trace(client: TestClient) -> None:
+    """A solve used to publish one message and then go silent for its whole budget.
+
+    This pins the whole live-progress feature: while the job runs its progress message must
+    keep changing, and it must carry the elapsed-against-budget pair the UI draws its bar
+    from. The job log must end up holding the search trace rather than only the request line.
+    """
+    generated = client.post(
+        "/api/workbench/generation/single",
+        json={"city": "Testville", "nCustomers": 4, "seed": 7, "method": "parametric_attach"},
+    ).json()
+    assert generated["ok"]
+
+    budget = 4
+    submitted = client.post(
+        "/api/jobs",
+        json={
+            "kind": "solve",
+            "payload": {
+                "instance_id": generated["instance_id"],
+                "metric": "fastest",
+                "objective_function": "MonoCost",
+                "seed": 3,
+                "time_limit": budget,
+            },
+        },
+    ).json()
+    job_id = submitted["job"]["job_id"]
+
+    seen: list[dict] = []
+    for _ in range(400):
+        job = client.get(f"/api/jobs/{job_id}").json()["job"]
+        if job["status"] == "running":
+            seen.append(job["progress"])
+        if job["status"] in {"completed", "failed", "cancelled", "interrupted"}:
+            break
+        time.sleep(0.02)
+
+    assert job["status"] == "completed", job.get("error")
+    messages = [entry["message"] for entry in seen]
+    assert len(set(messages)) > 1, f"the solve never reported anything new: {set(messages)}"
+
+    timed = [entry for entry in seen if entry.get("unit") == "s"]
+    assert timed, "no progress carried the elapsed/budget pair the progress bar needs"
+    assert all(entry["total"] == budget for entry in timed)
+    assert all(0 <= entry["current"] <= budget for entry in timed)
+    assert any("iters" in entry["message"] for entry in timed)
+
+    log = client.get(f"/api/jobs/{job_id}/log").json()["log"]
+    assert "iter" in log, f"the job log holds no search trace: {log!r}"
+
+
+def test_cancelling_a_running_solve_stops_it_without_recording_a_run(client: TestClient) -> None:
+    """Cancel used to be a lie on a running solve: the only checkpoints straddled the
+    blocking call, so the job ran its full budget and only then reported 'cancelled'.
+    The monitor now carries the request into the search."""
+    generated = client.post(
+        "/api/workbench/generation/single",
+        json={"city": "Testville", "nCustomers": 4, "seed": 7, "method": "parametric_attach"},
+    ).json()
+    instance_id = generated["instance_id"]
+    before = len(client.get(f"/api/instances/{instance_id}/solutions").json()["runs"])
+
+    submitted = client.post(
+        "/api/jobs",
+        json={
+            "kind": "solve",
+            "payload": {
+                "instance_id": instance_id,
+                "metric": "fastest",
+                "objective_function": "MonoCost",
+                "seed": 5,
+                "time_limit": 120,
+            },
+        },
+    ).json()
+    job_id = submitted["job"]["job_id"]
+
+    for _ in range(400):
+        if client.get(f"/api/jobs/{job_id}").json()["job"]["status"] == "running":
+            break
+        time.sleep(0.02)
+
+    started = time.monotonic()
+    assert client.delete(f"/api/jobs/{job_id}").json()["ok"]
+    job = _wait_for_job(client, job_id)
+
+    assert job["status"] == "cancelled", job
+    assert time.monotonic() - started < 30, "cancellation waited out the 120 s budget"
+    after = client.get(f"/api/instances/{instance_id}/solutions").json()["runs"]
+    assert len(after) == before, "a cancelled solve must not persist a truncated run"
