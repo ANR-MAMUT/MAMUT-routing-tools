@@ -66,7 +66,7 @@ To find out which build you are actually running, use `--version` (or `-V`):
 
 ```bash
 uv run mamut-tools --version
-# mamut-tools 0.3.3 (/path/to/MAMUT-routing-tools/src/mamut_routing_tools)
+# mamut-tools 0.4.0 (/path/to/MAMUT-routing-tools/src/mamut_routing_tools)
 ```
 
 It prints the version alongside the package location, which tells you whether you are on a PyPI install or an editable source checkout.
