@@ -50,7 +50,7 @@ uv run mamut-tools --help
 uv run pytest
 ```
 
-In both variants the `MAMUT-routing-lib` contract library resolves from PyPI; the vendored submodule checkout exists for contract reference and unreleased-lib development.
+The two variants differ in where the `MAMUT-routing-lib` contract library comes from. A PyPI install resolves it from PyPI. A source checkout builds it from the vendored submodule, at the exact commit this repository pins, because the tools regularly use library features that are not released yet. That is why the clone must be recursive, and why the submodule has to be up to date before `uv sync`.
 
 ## Onboarding: discovering the CLI
 

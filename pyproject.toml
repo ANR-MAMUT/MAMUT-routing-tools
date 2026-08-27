@@ -66,6 +66,15 @@ dev = [
     "pytest>=8.0",
 ]
 
+[tool.uv.sources]
+# The tools track the MAMUT-routing-lib commit pinned by the submodule, which is
+# regularly ahead of the published release (the GUI solve monitor lives there before
+# it ships). Source checkouts and CI therefore build against the exact lib commit
+# this repository pins, instead of silently testing a different library than the one
+# the code was written for. The published wheel is unaffected: it keeps the PyPI
+# requirement declared in [project.dependencies] above.
+mamut-routing-lib = { path = "MAMUT-routing-lib", editable = true }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

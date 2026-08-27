@@ -12,7 +12,12 @@ jobs:
       matrix:
         python-version: ["3.11", "3.13"]
     steps:
+      # The MAMUT-routing-lib submodule is the library the tools are built
+      # against (see [tool.uv.sources] in pyproject.toml), so it must be there
+      # before uv resolves anything.
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
