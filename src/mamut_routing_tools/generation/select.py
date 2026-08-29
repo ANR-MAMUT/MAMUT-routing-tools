@@ -7,7 +7,7 @@ import random
 import warnings
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from mamut_routing_tools.geo import LLA, haversine_m
 from mamut_routing_tools.generation.pois import (
@@ -241,11 +241,19 @@ def select_customers_poi(
     stats: dict[str, Any] | None = None,
     attach_mode: str = POI_ATTACH_NEAREST_NODE,
     attach_radius_m: float = DEFAULT_POI_ATTACH_RADIUS_M,
+    exclude: Iterable[int] | None = None,
 ) -> tuple[list[int], list[float], list[float], list[str], list[Poi | None]]:
     """Chosen vertices plus, per vertex, the POI it came from.
 
     The trailing ``list[Poi | None]`` carries the amenity value, OSM node id and
     display name so callers can persist them; ``None`` marks a non-POI customer.
+
+    ``exclude`` names vertices that must not become customers -- in practice the
+    depot. Without it the caller has to drop a POI that landed on the depot
+    *after* the fact, which silently costs one customer: the selection returns
+    the ``n`` it was asked for, one is discarded, and the shortfall is made up
+    with a sampled road point. A POI-only instance then quietly stops being one,
+    even in a city with four times the amenities it needs.
 
     ``stats``, when given, is filled with how big the pool actually was:
     ``pool_matching`` (POIs of these categories in the extract), ``attached``
@@ -281,7 +289,10 @@ def select_customers_poi(
     rows = list(range(len(pois)))
     rng.shuffle(rows)
 
-    taken: set[int] = set()
+    # Seeded rather than filtered afterwards: a vertex that must not be a
+    # customer is simply never taken, so the walk goes on to the next POI and
+    # still returns the full count.
+    taken: set[int] = set(exclude or ())
     verts: list[int] = []
     poi_lats: list[float] = []
     poi_lons: list[float] = []
@@ -301,6 +312,9 @@ def select_customers_poi(
         v, distance = hit
         attachable.add(v)
         if v in taken:
+            # Amenities standing on an excluded vertex are still worth naming --
+            # the depot is usually a real place too -- so they are recorded the
+            # same way as ones that lost a corner to another customer.
             co_located.setdefault(v, []).append(pois[i])
             continue
         # The pool keeps being walked past the requested count, which costs one

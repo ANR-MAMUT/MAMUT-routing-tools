@@ -87,4 +87,12 @@ def capacity_from_avg_route_size(r: float, demands: list[int]) -> int:
         candidate = max(max_demand, math.ceil(r * total / len(demands)))
     if len(demands) < 2:
         return max(max_demand, candidate)
-    return min(max(candidate, max_demand), total - 1)
+    # No ``total - 1`` clamp. It used to sit here to "guarantee two routes", but
+    # when r is large it is the *binding* constraint rather than a safety net: it
+    # produces Q = total - 1, so one route carries every customer but the handful
+    # that overflow it. Five published v2 instances were exactly that, with best
+    # known solutions of shape [99, 1] and [147, 1]. The clamp is not in the
+    # CVRPLIB generator this module ports. Whether a configuration yields a
+    # genuine VRP is decided where it is visible -- by the campaign's route-size
+    # admissibility rule and the LB_cap gate -- not silently patched up here.
+    return max(candidate, max_demand)

@@ -299,6 +299,59 @@ def solve_cmd(
     typer.echo(json.dumps(payload, indent=1))
 
 
+@generate_app.command("materialize-distances")
+def generate_materialize_distances_cmd(
+    instances: Annotated[
+        list[Path],
+        typer.Argument(
+            help=(
+                "One or more published .vrp.json files, or directories to search "
+                "recursively for them."
+            )
+        ),
+    ],
+    collection_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--collection-root",
+            help="Collection root; found from the marker file above the instance when omitted.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool, typer.Option("--force/--no-force", help="Rebuild sidecars that are already present.")
+    ] = False,
+) -> None:
+    """Rebuild the distance sidecars a large instance ships as pins rather than bytes.
+
+    Instances above the size where a distance matrix is worth storing publish
+    the road graph and the matrix's sha256, not the matrix. This recomputes
+    them from the committed road sidecar and refuses to write anything whose
+    digest does not match the pin, so what lands on disk is byte-for-byte what
+    the instance was published against.
+    """
+    from mamut_routing_tools.family import materialize_distances
+
+    targets: list[Path] = []
+    for entry in instances:
+        if entry.is_dir():
+            targets.extend(sorted(entry.rglob("*.vrp.json")))
+        else:
+            targets.append(entry)
+    if not targets:
+        raise typer.BadParameter("no .vrp.json files found")
+
+    results = []
+    for target in targets:
+        record = materialize_distances(target, collection_root=collection_root, force=force)
+        record["path"] = str(record["path"]) if record.get("path") else None
+        results.append(record)
+
+    counts: dict[str, int] = {}
+    for record in results:
+        counts[record["status"]] = counts.get(record["status"], 0) + 1
+    typer.echo(json.dumps({"instances": len(results), "status": counts, "results": results}, indent=1))
+
+
 @generate_app.command("derive-vrptw")
 def generate_derive_vrptw_cmd(
     folder: Annotated[Path, typer.Argument(help="Folder holding the generated CVRP base files.")],

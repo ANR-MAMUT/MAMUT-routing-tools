@@ -22,6 +22,7 @@ from mamut_routing_tools.generation.demands import (
     generate_demands,
 )
 from mamut_routing_tools.generation.pois import POI_CATEGORIES, NoPoiFoundError, find_pois
+from mamut_routing_tools.generation.select import POI_ATTACH_NEAREST_VERTEX
 from mamut_routing_tools.generation.single import (
     GenerationRequest,
     build_generation_selection,
@@ -62,6 +63,24 @@ def test_capacity_formula_bounds() -> None:
     assert max(demands) <= capacity <= sum(demands) - 1
     # Unit demands: capacity is the route size itself.
     assert capacity_from_avg_route_size(4.7, [1] * 10) == 4
+
+
+def test_capacity_never_clamps_into_a_two_route_instance() -> None:
+    """A route-size target larger than n must not become ``Q = total - 1``.
+
+    That clamp used to sit at the end of the formula to "guarantee two routes".
+    What it actually guaranteed was a TSP with a cosmetic second route holding
+    the overflow -- five published v2 instances had best known solutions of
+    shape [99, 1] or [147, 1]. Capacity now answers only to the route-size
+    target; whether the configuration is a genuine VRP is the campaign's
+    admissibility rule to decide, where it is visible.
+    """
+    demands = [5] * 100
+    total = sum(demands)
+    # r far beyond n: the old code returned total - 1 and forced K = 2.
+    assert capacity_from_avg_route_size(180.0, demands) > total
+    # A sane target is unaffected, and stays well clear of the old clamp.
+    assert capacity_from_avg_route_size(10.0, demands) == 50
 
 
 @pytest.mark.parametrize(
@@ -530,6 +549,38 @@ def test_poi_taken_by_the_depot_is_named_as_the_cause(fixture_osm_path: Path) ->
     notice = composition_notice(composition)
     assert notice is not None
     assert "1 matching POI(s) became the depot rather than a customer" in notice
+
+
+def test_the_depot_does_not_cost_the_request_a_poi_customer(fixture_osm_path: Path) -> None:
+    """A depot standing on an amenity must not turn a POI run into a hybrid one.
+
+    The depot is picked first, and it can land on a vertex an amenity attaches
+    to. Filtering that POI out of the selection *after* the fact silently costs
+    one customer: the run returns the n it was asked for, one is discarded, and
+    the shortfall is topped up with a sampled road point -- so the instance is
+    relabelled ``hybrid`` and stops being POI-only. Measured on the real
+    campaign, this hit 5 of 50 POI rungs, including one in a city with four
+    times the amenities it needed. Excluding the depot from the draw instead
+    lets the walk continue to the next amenity.
+    """
+    request = GenerationRequest(
+        city="Testville",
+        osm_path=fixture_osm_path,
+        method="poi_categories",
+        n_customers=2,
+        # Every category, so the fixture has amenities to spare and any shortfall
+        # can only come from the depot collision.
+        categories=list(POI_CATEGORIES),
+        depot_mode="center",
+        poi_attach_mode=POI_ATTACH_NEAREST_VERTEX,
+        seed=5,
+    )
+    selection = build_generation_selection(request)
+
+    assert selection.params["method"] == "poi_categories"
+    assert selection.source_tags[1:] == ["poi", "poi"]
+    assert selection.params["composition"]["poi_customers"] == 2
+    assert selection.vertices[0] not in selection.vertices[1:], "depot served itself"
 
 
 def test_poi_run_completed_parametrically_is_recorded_as_hybrid(

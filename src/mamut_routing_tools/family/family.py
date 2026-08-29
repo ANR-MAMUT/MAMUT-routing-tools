@@ -39,7 +39,9 @@ import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from random import Random
-from typing import Any
+from typing import Any, Mapping
+
+from mamut_routing_tools.generation.binpacking import minimum_bins
 
 from mamut_routing_lib.distances import (
     InstanceDistances,
@@ -54,8 +56,13 @@ from mamut_routing_lib.geo import (
     compute_geo_sha256,
     save_instance_geo,
 )
-from mamut_routing_lib.json_utils import save_json_to_file
-from mamut_routing_lib.sidecars import COLLECTION_MARKER_FILENAME, CollectionMarker, save_collection_marker
+from mamut_routing_lib.json_utils import load_json_from_file, save_json_to_file
+from mamut_routing_lib.sidecars import (
+    COLLECTION_MARKER_FILENAME,
+    CollectionMarker,
+    find_collection_root,
+    save_collection_marker,
+)
 from mamut_routing_lib.td import (
     InstanceRoadGraph,
     TrafficOverlay,
@@ -82,6 +89,7 @@ from mamut_routing_tools.family.naming import (
     TW_SET_SPREAD,
     TW_SET_TD_SHARED,
     TW_SET_TIGHT,
+    FAMILIES_WITH_FLEET_IN_NAME,
     base_instance_name,
     cvrp_dir,
     sidecar_dir,
@@ -108,8 +116,19 @@ TD_HORIZON = (0.0, 86400.0)
 DEFAULT_EXTENSION_END = 172800.0
 DEFAULT_SAMPLE_STEP = 60.0
 DISTANCE_DECIMALS = 3
+#: Above this, the geo sidecar carries node coordinates but no pinned paths, so
+#: the website draws routes as straight lines rather than along real streets.
+#: Held at 100 because the cache is the single most expensive artifact per
+#: instance: measured on the published collection, a geo sidecar is 2.23 MB with
+#: it and 0.01 MB without -- a factor of ~200 -- and it grows with n^2.
 ROAD_CACHE_MAX_N = 100
-VRP_EXPORT_MAX_N = 100
+#: Above this, an instance is ``.vrp.json``-only: the CVRPLIB explicit-matrix
+#: format writes n x n costs as text, so the file is quadratic and quickly
+#: absurd (~9 MB per metric at n=1000). Raised from 100 to 200 for the size
+#: ladder, where every instance has a distinct n and a cutoff at 100 would leave
+#: exactly one of a hundred instances readable by a CVRPLIB-only solver. At 200
+#: it is thirty of them, for ~17 MB.
+VRP_EXPORT_MAX_N = 200
 TD_MODELS = ("bpr", "wave")
 TD_INTENSITIES = ("light", "moderate", "heavy")
 GENERATOR_NAME = "mamut-routing-tools"
@@ -139,11 +158,11 @@ def sampling_seed(base: str) -> int:
     return _stable_seed(base, "sample")
 
 
-def ensure_collection_root(collection_root: str | Path) -> Path:
+def ensure_collection_root(collection_root: str | Path, family: str = FAMILY) -> Path:
     root = Path(collection_root)
     marker_path = root / COLLECTION_MARKER_FILENAME
     if not marker_path.exists():
-        save_collection_marker(CollectionMarker(family=FAMILY), root)
+        save_collection_marker(CollectionMarker(family=family), root)
     return root
 
 
@@ -161,6 +180,7 @@ def _full_city_road_graph(
     simplify_tolerance: float,
     extension_end: float,
     generator: dict[str, Any],
+    family: str = FAMILY,
 ) -> InstanceRoadGraph:
     osm_ids = sorted({osm for osm_u, osm_v, _, _, _ in graph.edges for osm in (osm_u, osm_v)})
     index_of = {osm: index for index, osm in enumerate(osm_ids)}
@@ -176,7 +196,7 @@ def _full_city_road_graph(
         raise ValueError(f"bridge bins {graph.num_bins} x {graph.bin_seconds}s do not tile the horizon")
     return InstanceRoadGraph(
         base_name=base,
-        benchmark_name=FAMILY,
+        benchmark_name=family,
         num_customers=len(nodes.node_osm_ids) - 1,
         horizon=TD_HORIZON,
         extension_end=extension_end,
@@ -200,17 +220,22 @@ def _collect_tree_paths(
     return compute_fastest_path_tree(road, adjacency, source)
 
 
-def _trim_road_graph(full: InstanceRoadGraph) -> tuple[InstanceRoadGraph, list[list[float]]]:
-    """Trim to the union of pinned free-flow fastest-path edges between
-    instance nodes, verify node-to-node free-flow times are bit-identical,
-    and return the trimmed graph plus the full-graph node time matrix."""
-    adjacency = build_adjacency(full)
-    node_set = full.node_vertices
+def _pinned_tree_edges(
+    graph_ir: InstanceRoadGraph,
+    adjacency: list[list[int]],
+) -> tuple[set[int], list[list[float]]]:
+    """Edges lying on the pinned shortest-path trees between instance nodes.
+
+    Also returns the node-to-node distance matrix those trees induce, under
+    whatever weighting ``graph_ir`` carries: free-flow times on the graph as
+    built, lengths on its :func:`_length_weighted` twin.
+    """
+    node_set = graph_ir.node_vertices
     used_edges: set[int] = set()
-    full_dists: list[list[float]] = []
+    node_dists: list[list[float]] = []
     for source in node_set:
-        dist, pred_edge = _collect_tree_paths(full, adjacency, source)
-        full_dists.append([dist[target] for target in node_set])
+        dist, pred_edge = _collect_tree_paths(graph_ir, adjacency, source)
+        node_dists.append([dist[target] for target in node_set])
         walked: set[int] = {source}
         for target in node_set:
             if target == source:
@@ -222,12 +247,44 @@ def _trim_road_graph(full: InstanceRoadGraph) -> tuple[InstanceRoadGraph, list[l
                 edge_index = pred_edge[vertex]
                 if edge_index < 0:
                     raise ValueError(
-                        f"vertex OSM {full.vertex_osm_ids[target]} unreachable from "
-                        f"OSM {full.vertex_osm_ids[source]} in the bridge graph"
+                        f"vertex OSM {graph_ir.vertex_osm_ids[target]} unreachable from "
+                        f"OSM {graph_ir.vertex_osm_ids[source]} in the bridge graph"
                     )
                 used_edges.add(edge_index)
                 walked.add(vertex)
-                vertex = full.edges[edge_index][0]
+                vertex = graph_ir.edges[edge_index][0]
+    return used_edges, node_dists
+
+
+def _trim_road_graph(
+    full: InstanceRoadGraph,
+    *,
+    pin_shortest_paths: bool = False,
+) -> tuple[InstanceRoadGraph, list[list[float]]]:
+    """Trim to the union of pinned free-flow fastest-path edges between
+    instance nodes, verify node-to-node free-flow times are bit-identical,
+    and return the trimmed graph plus the full-graph node time matrix.
+
+    ``pin_shortest_paths`` widens the trim to also cover the shortest-*distance*
+    trees. The two metrics follow different roads, so the default trim -- built
+    from the fastest-time trees alone -- cannot reproduce the shortest matrix,
+    and the published ``distances-shortest`` sidecar is therefore computed on
+    the untrimmed city graph instead. That is fine while the sidecar is
+    committed, and not fine when it is only sha-pinned and regenerated from
+    published bytes: reproducing it would then need the OSM extract, which is
+    gitignored and not stable over time. Set this for any instance whose
+    distance sidecars are not committed.
+    """
+    adjacency = build_adjacency(full)
+    used_edges, full_dists = _pinned_tree_edges(full, adjacency)
+    if pin_shortest_paths:
+        length_weighted = _length_weighted(full)
+        shortest_edges, _ = _pinned_tree_edges(
+            length_weighted, build_adjacency(length_weighted)
+        )
+        # Edge indices are shared: _length_weighted rewrites the speeds in place
+        # and preserves the edge order.
+        used_edges |= shortest_edges
 
     kept = sorted(used_edges)
     kept_osm_ids = sorted(
@@ -354,6 +411,9 @@ class BuiltBase:
     num_road_edges: int
     build_seconds: float
     cvrp_paths: dict[str, Path] = field(default_factory=dict)
+    #: False when the distance sidecars were pinned but not written, so the
+    #: caller can report which instances need local materialization.
+    distances_committed: bool = True
 
 
 def _write_cvrplib(
@@ -405,20 +465,29 @@ def _static_instance_payload(
     method_tag: str,
     geo_ref: dict[str, Any],
     generated_at: str,
+    family: str = FAMILY,
 ) -> dict[str, Any]:
     nodes = meta["nodes"]
     reference_lla = meta["reference_lla"]
     demands = [int(node["demand"]) for node in nodes]
     capacity = int(manifest["capacity"])
-    lb_cap = capacity_lower_bound(demands, capacity)
-    if lb_cap < 2:
-        raise ValueError(f"{base}: LB_cap={lb_cap}; Poryos2026 instances must be genuine VRPs")
+    # The exact bin-packing minimum, which is what the base name carries. The
+    # continuous bound ``ceil(sum / Q)`` is only its relaxation, and publishing
+    # the two side by side would have the payload disagree with its own name.
+    fleet = minimum_bins(demands[1:], capacity)
+    lb_cap = fleet.lower
+    floor = MINIMUM_ROUTES_BY_FAMILY.get(family, 2)
+    if lb_cap < floor:
+        raise ValueError(
+            f"{base}: LB_cap={lb_cap}; {family} instances must need at least "
+            f"{floor} routes"
+        )
     if max(demands[1:], default=0) > capacity:
         raise ValueError(f"{base}: a customer demand exceeds vehicle capacity")
     return {
         "instance_name": base,
         "instance_origin": "OsmCvrpGen",
-        "benchmark_name": FAMILY,
+        "benchmark_name": family,
         "num_customers": len(nodes) - 1,
         "num_vehicles": None,
         "vehicle_capacity": capacity,
@@ -440,7 +509,11 @@ def _static_instance_payload(
             "city": city,
             "method": method_tag,
             "base_instance_name": base,
+            # A lower bound on a solution's route count, following CVRPLIB's
+            # ``X-n101-k25``. Not a fleet cap: ``num_vehicles`` stays null.
             "num_vehicles_lb": lb_cap,
+            "num_vehicles_lb_proven": fleet.proven,
+            "num_vehicles_lb_method": fleet.method,
             "generator": _base_generator(
                 "generate-base",
                 {
@@ -453,6 +526,44 @@ def _static_instance_payload(
             "sidecars": {"geo": dict(geo_ref)},
         },
     }
+
+
+#: Fewest routes a published instance of each family may require.
+#:
+#: Two only means "not a TSP", and it is not enough: 22 of the 110 bases in the
+#: v2 Mamut2026 collection cleared it and were still trivially partitioned, 19 of
+#: them into exactly two routes, five with a second route holding a single
+#: customer. Mamut2026 v3 requires a real fleet. Poryos2026 keeps the old floor
+#: because its instances are published and its sizes are drawn differently; this
+#: gate must not retroactively invalidate them.
+#:
+#: This is the last line of defence, not the mechanism: the campaign's route-size
+#: admissibility rule is what makes the property hold by construction.
+MINIMUM_ROUTES_BY_FAMILY = {"Mamut2026": 6}
+
+
+def _cvrplib_comment(
+    family: str, metric: str, city: str, base: str, manifest: Mapping[str, Any]
+) -> str:
+    """The COMMENT line of a published ``.vrp``.
+
+    "No of trucks" is how CVRPLIB records the fleet in a comment, and how the
+    readers that care about it find the value. Ours is a lower bound, so the
+    wording says so rather than letting a reader assume a cap.
+
+    Only families that already put the fleet in their names get the clause.
+    Poryos2026's ``.vrp`` files are published, and a comment is bytes: adding a
+    field there would change every one of their digests to say something their
+    names do not.
+    """
+    head = f"{family} {metric} metric; city {city}; "
+    fleet = ""
+    if family in FAMILIES_WITH_FLEET_IN_NAME:
+        fleet = (
+            f"No of trucks: {int(manifest['route_count'])} "
+            "(lower bound, fleet not fixed); "
+        )
+    return f"{head}{fleet}3-decimal seconds/meters; ENU ref in {base}.vrp.json"
 
 
 def build_base(
@@ -468,12 +579,35 @@ def build_base(
     extension_end: float = DEFAULT_EXTENSION_END,
     generated_at: str | None = None,
     force: bool = False,
+    family: str = FAMILY,
+    commit_distances: bool = True,
 ) -> BuiltBase | None:
-    """Publish the base: road + geo + distances sidecars and the 3 CVRP instances."""
+    """Publish the base: road + geo + distances sidecars and the 3 CVRP instances.
+
+    ``commit_distances=False`` computes and hashes the distance matrices exactly
+    as usual, records the pins in every instance's ``arc_costs_source``, and then
+    does not write the two ``.distances-*.json.gz`` files. The instance is a
+    complete descriptor that a consumer regenerates its matrices for, verified
+    against the pins -- the treatment the Blauth2024 family already uses for its
+    oversized sidecars. It implies ``pin_shortest_paths``, since a regenerated
+    shortest matrix has to come from the published road graph.
+    """
     started = time.perf_counter()
     num_customers = len(nodes.node_osm_ids) - 1
-    base = base_instance_name(city, num_customers, method_tag)
-    root = ensure_collection_root(collection_root)
+    # Generation already solved the bin-packing minimum and recorded it; families
+    # that put the fleet in the name read it from there rather than recomputing.
+    base = base_instance_name(
+        city,
+        num_customers,
+        method_tag,
+        family,
+        route_count=(
+            int(manifest["route_count"])
+            if family in FAMILIES_WITH_FLEET_IN_NAME
+            else None
+        ),
+    )
+    root = ensure_collection_root(collection_root, family)
     generated_at = generated_at or time.strftime("%Y-%m-%d")
 
     side_dir = sidecar_dir(root, city, num_customers, base)
@@ -499,8 +633,12 @@ def build_base(
         simplify_tolerance=tolerance,
         extension_end=extension_end,
         generator=generator,
+        family=family,
     )
-    road, _ = _trim_road_graph(full)
+    # An uncommitted distance sidecar has to be reproducible from published
+    # bytes alone, which means the road graph must pin the shortest-distance
+    # paths as well as the fastest-time ones.
+    road, _ = _trim_road_graph(full, pin_shortest_paths=not commit_distances)
     save_instance_road_graph(road, road_path)
     road_sha = compute_road_graph_sha256(road)
 
@@ -513,18 +651,31 @@ def build_base(
         shortest_full, want_paths=num_customers <= ROAD_CACHE_MAX_N
     )
     shortest_matrix = _round_matrix(shortest_values)
+
+    if not commit_distances:
+        # The pin is a promise that these bytes can be rebuilt from what is
+        # published. Check it here rather than discovering at load time that the
+        # trim lost an edge the shortest metric needed.
+        rebuilt, _ = _node_paths(_length_weighted(road), want_paths=False)
+        if _round_matrix(rebuilt) != shortest_matrix:
+            raise AssertionError(
+                f"{base}: the published road graph does not reproduce "
+                "distances-shortest; the trim is missing shortest-path edges"
+            )
+
     distances_sha: dict[str, str] = {}
     for metric, values in (("fastest", fastest_matrix), ("shortest", shortest_matrix)):
         distances = InstanceDistances(
             base_name=base,
-            benchmark_name=FAMILY,
+            benchmark_name=family,
             metric=metric,
             num_customers=num_customers,
             values=values,
             generator=_base_generator("generate-base"),
         )
-        save_instance_distances(distances, side_dir / f"{base}.distances-{metric}.json.gz")
         distances_sha[metric] = compute_distances_sha256(distances)
+        if commit_distances:
+            save_instance_distances(distances, side_dir / f"{base}.distances-{metric}.json.gz")
 
     # Geo sidecar: nodes + (n <= 100) the complete indexed road cache with
     # fastest paths pinned on the trimmed graph and shortest paths on the
@@ -556,7 +707,7 @@ def build_base(
     meta_nodes = meta["nodes"]
     geo = InstanceGeo(
         base_name=base,
-        benchmark_name=FAMILY,
+        benchmark_name=family,
         city=city,
         method=method_tag,
         source_osm_file=str(meta.get("source_osm_file", graph.osm_file)),
@@ -616,6 +767,7 @@ def build_base(
             method_tag=method_tag,
             geo_ref=geo_ref,
             generated_at=generated_at,
+            family=family,
         )
         target = cvrp_json_paths[metric]
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -636,7 +788,7 @@ def build_base(
             _write_cvrplib(
                 target.parent / f"{base}.vrp",
                 name=base,
-                comment=f"{FAMILY} {metric} metric; city {city}; 3-decimal seconds/meters; ENU ref in {base}.vrp.json",
+                comment=_cvrplib_comment(family, metric, city, base, manifest),
                 coordinates=coordinates,
                 demands=demands,
                 matrix=matrix,
@@ -655,6 +807,7 @@ def build_base(
         num_road_edges=len(road.edges),
         build_seconds=time.perf_counter() - started,
         cvrp_paths=cvrp_json_paths,
+        distances_committed=commit_distances,
     )
 
 
@@ -708,6 +861,80 @@ def _annotate_tw_set(path: Path) -> bool:
     return True
 
 
+def materialize_distances(
+    instance_path: str | Path,
+    *,
+    collection_root: str | Path | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Rebuild an instance's distance sidecar from its published road graph.
+
+    The counterpart of ``build_base(commit_distances=False)``. Large instances
+    ship as descriptors: the ``.vrp.json`` records the sidecar's path and its
+    sha256, and the bytes themselves are regenerated locally rather than stored.
+    This recomputes them from the committed ``.road.json.gz`` and refuses to
+    write anything whose digest does not match the recorded pin, so a
+    materialized sidecar is exactly the one the instance was published against.
+
+    Returns a record describing what happened; ``status`` is ``written``,
+    ``kept`` (already present) or ``euclidean`` (nothing to do -- that variant
+    derives its costs from the coordinates).
+    """
+    path = Path(instance_path)
+    payload = load_json_from_file(path)
+    base = str(payload["instance_name"])
+    source = payload.get("arc_costs_source") or {}
+    if source.get("model") != "distances-sidecar":
+        return {"instance": base, "status": "euclidean", "path": None}
+
+    reference = source["distances"]
+    if collection_root is not None:
+        root = Path(collection_root)
+    else:
+        discovered = find_collection_root(path)
+        if discovered is None:
+            raise FileNotFoundError(
+                f"{path}: no {COLLECTION_MARKER_FILENAME} above it; "
+                "pass collection_root explicitly"
+            )
+        root = Path(discovered)
+    target = root / reference["path"]
+    if target.exists() and not force:
+        return {"instance": base, "status": "kept", "path": target}
+
+    metric = str(payload["metric_variant"])
+    road_path = target.parent / f"{base}.road.json.gz"
+    if not road_path.is_file():
+        raise FileNotFoundError(
+            f"{base}: road sidecar {road_path} is required to rebuild {metric} distances"
+        )
+    road = load_instance_road_graph(road_path)
+
+    if metric == "fastest":
+        values = free_flow_node_times(road)
+    elif metric == "shortest":
+        values, _ = _node_paths(_length_weighted(road), want_paths=False)
+    else:
+        raise ValueError(f"{base}: cannot rebuild distances for metric {metric!r}")
+
+    distances = InstanceDistances(
+        base_name=base,
+        benchmark_name=str(payload["benchmark_name"]),
+        metric=metric,
+        num_customers=int(payload["num_customers"]),
+        values=_round_matrix(values),
+        generator=_base_generator("generate-base"),
+    )
+    digest = compute_distances_sha256(distances)
+    if digest != reference["sha256"]:
+        raise AssertionError(
+            f"{base}: rebuilt {metric} distances hash {digest}, "
+            f"but the instance pins {reference['sha256']}"
+        )
+    save_instance_distances(distances, target)
+    return {"instance": base, "status": "written", "path": target, "sha256": digest}
+
+
 def derive_vrptw(
     *,
     collection_root: str | Path,
@@ -717,6 +944,11 @@ def derive_vrptw(
     tw_set: str = TW_SET_TD_SHARED,
     generated_at: str | None = None,
     force: bool = False,
+    family: str = FAMILY,
+    #: Bin-packing minimum fleet, for families whose base names carry it.
+    #: Required for those and rejected for the others -- see
+    #: ``naming.base_instance_name``.
+    route_count: int | None = None,
 ) -> tuple[str, Path]:
     """Emit one VRPTW TW-set instance of a base.
 
@@ -730,7 +962,9 @@ def derive_vrptw(
     if tw_set not in ALL_TW_SETS:
         raise ValueError(f"unknown TW set {tw_set!r} (expected one of {ALL_TW_SETS})")
     root = Path(collection_root)
-    base = base_instance_name(city, num_customers, method_tag)
+    base = base_instance_name(
+        city, num_customers, method_tag, family, route_count=route_count
+    )
     name = vrptw_instance_name(base, tw_set)
     target_dir = vrptw_dir(root, city, num_customers, base)
     target = target_dir / f"{name}.vrp.json"
@@ -840,6 +1074,7 @@ def _align_overlay(
     road: InstanceRoadGraph,
     graph: BridgeGraph,
     speeds: BridgeSpeeds,
+    family: str = FAMILY,
 ) -> TrafficOverlay:
     """Project the citywide speed field onto the trimmed graph's edge order,
     clamped at each edge's static free-flow limit."""
@@ -851,7 +1086,7 @@ def _align_overlay(
         edge_speeds.append([speed if speed <= speed_limit else speed_limit for speed in row])
     return TrafficOverlay(
         base_name=road.base_name,
-        benchmark_name=FAMILY,
+        benchmark_name=family,
         traffic_model=speeds.model,
         intensity=speeds.intensity,
         bin_edges=list(road.bin_edges),
@@ -949,12 +1184,19 @@ def build_td(
     verify: bool = True,
     tdvrptw_only: bool = False,
     reuse_traffic: bool = False,
+    family: str = FAMILY,
+    #: Bin-packing minimum fleet, for families whose base names carry it.
+    #: Required for those and rejected for the others -- see
+    #: ``naming.base_instance_name``.
+    route_count: int | None = None,
 ) -> BuiltTDBase | None:
     """Publish the TD layer of a base: 6 overlays, TW lift, 12 slim twins."""
     reuse_traffic = reuse_traffic or tdvrptw_only
     started = time.perf_counter()
     root = Path(collection_root)
-    base = base_instance_name(city, num_customers, method_tag)
+    base = base_instance_name(
+        city, num_customers, method_tag, family, route_count=route_count
+    )
     side_dir = sidecar_dir(root, city, num_customers, base)
     road_path = side_dir / f"{base}.road.json.gz"
     if not road_path.exists():
@@ -1031,7 +1273,7 @@ def build_td(
         else:
             if (model, intensity) not in speeds_by_combo:
                 raise ValueError(f"missing traffic speeds for {base}: {(model, intensity)}")
-            overlay = _align_overlay(road, graph, speeds_by_combo[(model, intensity)])
+            overlay = _align_overlay(road, graph, speeds_by_combo[(model, intensity)], family)
             save_traffic_overlay(overlay, overlay_path)
         overlay_sha[sub] = compute_traffic_overlay_sha256(overlay)
         overlay_refs[sub] = {
@@ -1042,7 +1284,7 @@ def build_td(
         probe_payload = {
             "instance_name": name,
             "instance_origin": "OsmCvrpGen",
-            "benchmark_name": FAMILY,
+            "benchmark_name": family,
             "num_customers": num_customers,
             "num_vehicles": None,
             "vehicle_capacity": int(vrptw_payload["vehicle_capacity"]),
@@ -1154,7 +1396,7 @@ def build_td(
         common = {
             "instance_name": name,
             "instance_origin": "OsmCvrpGen",
-            "benchmark_name": FAMILY,
+            "benchmark_name": family,
             "num_customers": num_customers,
             "num_vehicles": None,
             "vehicle_capacity": int(vrptw_payload["vehicle_capacity"]),

@@ -796,6 +796,42 @@ def build_bridge(
     return BridgeBuild(graph=bridge_graph, speeds=speeds, nodes=nodes)
 
 
+def build_static_bridge(
+    *,
+    osm_path: str | Path,
+    city_slug: str,
+    metas: list[dict] | tuple[dict, ...] = (),
+    only_intersections: bool = True,
+    trim_to_connected: bool = True,
+) -> BridgeBuild:
+    """The bridge a CVRP-only family needs: the graph and the nodes, no speeds.
+
+    :func:`build_bridge` simulates six traffic overlays per city, which is the
+    dominant cost and is pure waste for a static family. This builds the same
+    :class:`BridgeGraph` and :class:`BridgeNodes` records and leaves ``speeds``
+    empty, so ``family.build_base`` works unchanged while ``family.build_td``
+    stays unavailable (it would raise on the missing combinations, which is the
+    correct failure for a collection that has no time-dependent layer).
+    """
+    graph, edges, _vertex_ll, _center = _load_bridge_road_graph(
+        osm_path, only_intersections, trim_to_connected
+    )
+    bridge_graph = build_bridge_graph(
+        graph, edges, city_slug, osm_path, only_intersections, trim_to_connected
+    )
+    nodes: dict[str, BridgeNodes] = {}
+    for meta in metas:
+        record = build_bridge_nodes(
+            graph,
+            meta,
+            city_slug,
+            only_intersections=only_intersections,
+            trim_to_connected=trim_to_connected,
+        )
+        nodes[record.instance_base] = record
+    return BridgeBuild(graph=bridge_graph, speeds={}, nodes=nodes)
+
+
 def export_bridge(
     *,
     osm_path: str | Path,

@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from mamut_routing_tools.generation.binpacking import minimum_bins
 from mamut_routing_tools.generation.demands import capacity_from_avg_route_size, generate_demands
 from mamut_routing_tools.generation.matrices import compute_matrices, euclidean_matrix_from_vertices
 from mamut_routing_tools.generation.pois import (
@@ -446,19 +447,18 @@ def build_generation_selection(request: GenerationRequest) -> Selection:
         verts, lats, lons, sources, metas = select_customers_poi(
             graph, request.osm_path, request.n_customers, categories, rng, poi_stats,
             request.poi_attach_mode, request.poi_attach_radius_m,
+            exclude={depot_vertex},
         )
-        cust = [
-            (v, lats[i], lons[i], sources[i], metas[i])
-            for i, v in enumerate(verts)
-            if v != depot_vertex
-        ]
-        # Counted, because a POI that landed on the depot vertex is a customer
-        # the user asked for and will not get; kept, because the depot is then
-        # standing on a named place worth showing.
-        poi_stats["used_as_depot"] = len(verts) - len(cust)
-        poi_stats["depot_pois"] = [
-            metas[i] for i, v in enumerate(verts) if v == depot_vertex and metas[i] is not None
-        ]
+        cust = [(v, lats[i], lons[i], sources[i], metas[i]) for i, v in enumerate(verts)]
+        # Amenities that snapped to the depot vertex. They are not customers --
+        # the depot is excluded from the draw, so the selection reaches its full
+        # count without them -- but they are still the reason a sparse request
+        # can come up short, and the depot is standing on a real place worth
+        # naming. Read from the co-located map rather than from the returned
+        # list, which by construction no longer holds the depot.
+        on_depot = (poi_stats.get("co_located") or {}).get(depot_vertex, [])
+        poi_stats["used_as_depot"] = len(on_depot)
+        poi_stats["depot_pois"] = list(on_depot)
         cust_vertices = [c[0] for c in cust]
         cust_lat = [c[1] for c in cust]
         cust_lon = [c[2] for c in cust]
@@ -512,9 +512,10 @@ def build_generation_selection(request: GenerationRequest) -> Selection:
     # depot also gets its list: a POI standing on it was dropped as a customer,
     # so naming what is there is just as useful.
     co_located: dict[int, list[Poi]] = poi_stats.get("co_located") or {}
-    depot_merged = list(poi_stats.get("depot_pois") or []) + list(
-        co_located.get(depot_vertex, [])
-    )
+    # ``depot_pois`` is already exactly the co-located list for the depot on the
+    # POI path, and empty elsewhere, so take whichever is populated rather than
+    # concatenating and double-counting.
+    depot_merged = list(poi_stats.get("depot_pois") or co_located.get(depot_vertex, []))
     poi_merged = [depot_merged] + [
         list(co_located.get(vertex, [])) for vertex in cust_vertices[:n_actual]
     ]
@@ -883,7 +884,13 @@ def materialize_instance(
     demand_values, sum_demands, _max_demand, r = generate_demands(rng, customer_ll, demand_type, avg_route_size)
     demands = [0, *demand_values]
     capacity = capacity_from_avg_route_size(r, demand_values)
-    route_count = -(-sum_demands // capacity)
+    # The exact bin-packing minimum, the way CVRPLIB derives the ``k`` in
+    # ``X-n101-k25`` -- not ``ceil(sum / capacity)``, which is only the
+    # continuous relaxation of it and can understate the fleet by a wide margin
+    # when the demands do not divide the capacity. It is a *lower bound* on a
+    # solution's route count, not a cap: ``num_vehicles`` stays unset.
+    fleet = minimum_bins(demand_values, capacity)
+    route_count = fleet.lower
 
     if precomputed is None:
         d_short, d_fast, geom_short, geom_fast = compute_matrices(graph, vertices)
@@ -994,6 +1001,8 @@ def materialize_instance(
         "demand_type": demand_type,
         "avg_route_size": avg_route_size,
         "route_count": route_count,
+        "route_count_proven": fleet.proven,
+        "route_count_method": fleet.method,
         "capacity": capacity,
         "total_demand": sum_demands,
     }
@@ -1019,6 +1028,8 @@ def materialize_instance(
             "demand_type": demand_type,
             "avg_route_size": avg_route_size,
             "route_count": route_count,
+            "route_count_proven": fleet.proven,
+            "route_count_method": fleet.method,
             "poi_customers": poi_count,
             "parametric_customers": n_customers - poi_count,
         },

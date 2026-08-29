@@ -19,7 +19,13 @@ from mamut_routing_tools.roadgraph.build import SPEED_ROADS_URBAN, RoadGraph
 EdgeGeometry = dict[str, list[list[float]]]
 
 
-def _metric_csr(graph: RoadGraph, metric: str) -> csr_matrix:
+def metric_csr(graph: RoadGraph, metric: str) -> csr_matrix:
+    """The road graph as a CSR weight matrix under one metric.
+
+    ``shortest`` weights are edge lengths in metres, ``fastest`` are free-flow
+    traversal times in seconds. Public because the campaign city profiler runs
+    its own partial Dijkstras over exactly these weights.
+    """
     rows = np.empty(graph.edge_count, dtype=np.int64)
     cols = np.empty(graph.edge_count, dtype=np.int64)
     data = np.empty(graph.edge_count, dtype=np.float64)
@@ -55,6 +61,25 @@ def _path_lonlat(graph: RoadGraph, path: list[int]) -> list[list[float]]:
     return [graph.node_lonlat(graph.node_of[vertex]) for vertex in path]
 
 
+#: Sources per Dijkstra call. ``dijkstra`` returns a dense ``(sources, |V|)``
+#: array, so asking for every source at once is quadratic in the wrong thing:
+#: 5000 sources over a 100k-vertex city graph is 4 GB of float64 for a result
+#: that is immediately sliced down to 5000 columns. Chunking keeps the peak flat
+#: without changing a single output value.
+DIJKSTRA_SOURCE_CHUNK = 256
+
+
+def _instance_block(csr: csr_matrix, index_array: np.ndarray) -> np.ndarray:
+    """The instance-vertex-to-instance-vertex distance block, in source chunks."""
+    rows = [
+        dijkstra(csr, directed=True, indices=index_array[start : start + DIJKSTRA_SOURCE_CHUNK])[
+            :, index_array
+        ]
+        for start in range(0, len(index_array), DIJKSTRA_SOURCE_CHUNK)
+    ]
+    return np.vstack(rows)
+
+
 def compute_matrices(
     graph: RoadGraph,
     vertices: list[int],
@@ -71,9 +96,8 @@ def compute_matrices(
     geometry: dict[str, EdgeGeometry] = {}
 
     for metric in ("shortest", "fastest"):
-        csr = _metric_csr(graph, metric)
-        dist = dijkstra(csr, directed=True, indices=index_array)
-        block = dist[:, index_array]
+        csr = metric_csr(graph, metric)
+        block = _instance_block(csr, index_array)
         if not np.all(np.isfinite(block)):
             raise ValueError("Some instance vertices are mutually unreachable on the road graph")
         matrices[metric] = [[math.ceil(value) for value in row] for row in block]
