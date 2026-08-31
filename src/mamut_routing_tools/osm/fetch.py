@@ -31,7 +31,9 @@ USER_AGENT = "MAMUT-routing-tools/0.1 (OSM city fetch)"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
+    # Mail.ru is another public global instance listed by the OSM wiki. Keep
+    # independent fallbacks for transient backend failures.
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 ]
 
