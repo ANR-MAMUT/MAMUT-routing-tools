@@ -103,21 +103,26 @@ def vrptw_instance_name(base: str, tw_set: str) -> str:
     return f"{base}-tw-{tw_set}"
 
 
+def _city_dir(city: str) -> str:
+    """Canonical collection-tree spelling of a city component."""
+    return str(city).lower()
+
+
 def sidecar_dir(collection_root: str | Path, city: str, n: int, base: str) -> Path:
-    return Path(collection_root) / "sidecars" / city / f"n={n}" / base
+    return Path(collection_root) / "sidecars" / _city_dir(city) / f"n={n}" / base
 
 
 def sidecar_relpath(city: str, n: int, base: str, filename: str) -> str:
     """Collection-root-relative sidecar path (the form stored in instance refs)."""
-    return f"sidecars/{city}/n={n}/{base}/{filename}"
+    return f"sidecars/{_city_dir(city)}/n={n}/{base}/{filename}"
 
 
 def cvrp_dir(collection_root: str | Path, metric: str, city: str, n: int, base: str) -> Path:
-    return Path(collection_root) / "CVRP" / metric / city / f"n={n}" / base
+    return Path(collection_root) / "CVRP" / metric / _city_dir(city) / f"n={n}" / base
 
 
 def vrptw_dir(collection_root: str | Path, city: str, n: int, base: str) -> Path:
-    return Path(collection_root) / "VRPTW" / "fastest" / city / f"n={n}" / base
+    return Path(collection_root) / "VRPTW" / "fastest" / _city_dir(city) / f"n={n}" / base
 
 
 def td_instance_dir(
@@ -125,4 +130,4 @@ def td_instance_dir(
 ) -> Path:
     if problem_type not in ("TDVRP", "TDVRPTW"):
         raise ValueError(f"problem_type must be TDVRP or TDVRPTW, got {problem_type!r}")
-    return Path(collection_root) / problem_type / city / f"n={n}" / base / sub
+    return Path(collection_root) / problem_type / _city_dir(city) / f"n={n}" / base / sub
