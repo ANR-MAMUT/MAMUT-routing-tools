@@ -132,6 +132,18 @@ def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client
     # The right panel must reflow on narrow screens instead of disappearing.
     assert ".panel-right { display: none; }" not in html
     assert 'id="sheet-toggle"' in html
+    # The published workbench appearance controls are available locally too.
+    for control in (
+        "route-appearance",
+        "appearance-render-mode",
+        "appearance-depot-opacity",
+        "appearance-other-opacity",
+        "appearance-customers",
+        "appearance-arrows",
+        "appearance-depot-star",
+    ):
+        assert f'id="{control}"' in html
+    assert 'value="cached_road"' in html and 'value="straight_line"' in html
 
 
 def test_gui_shell_groups_the_form_and_moves_jobs_out_of_the_panel(client: TestClient) -> None:

@@ -55,6 +55,28 @@ const markerColors = () => (isDark()
   ? { depot: "#ff7a6e", poi: "#45e8a5", parametric: "#9d8bff" }
   : { depot: "#e8503f", poi: "#0f9e68", parametric: "#5b43e8" });
 
+function starPoints(centerX, centerY, outerRadius, innerRatio = 0.42, spikes = 5) {
+  const innerRadius = outerRadius * innerRatio;
+  const points = [];
+  for (let index = 0; index < spikes * 2; index += 1) {
+    const radius = index % 2 === 0 ? outerRadius : innerRadius;
+    const angle = -Math.PI / 2 + (index * Math.PI) / spikes;
+    points.push(`${(centerX + radius * Math.cos(angle)).toFixed(2)},${(centerY + radius * Math.sin(angle)).toFixed(2)}`);
+  }
+  return points.join(" ");
+}
+
+function depotStarIcon(color) {
+  const size = 26;
+  const outline = isDark() ? "rgba(12, 14, 32, 0.85)" : "rgba(255, 255, 255, 0.9)";
+  return L.divIcon({
+    className: "depot-star-marker",
+    html: `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><polygon points="${starPoints(12, 12, 11)}" fill="${color}" fill-opacity="0.95" stroke="${outline}" stroke-width="1.4" stroke-linejoin="round" /></svg>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  });
+}
+
 const el = (id) => document.getElementById(id);
 const status = (text) => { el("status").textContent = text; el("status").title = text; };
 
@@ -178,6 +200,15 @@ const state = {
   instances: [],
   selected: null,
   hiddenRoutes: new Set(),
+  focusedRoute: null,
+  routeView: {
+    fadedOpacity: 0.2,
+    depotLegOpacity: 0.25,
+    renderMode: "straight_line",
+    customersFollowRoutes: false,
+    arrowsEnabled: true,
+    depotStar: false,
+  },
   lastRendered: null,
   bulkBases: null,
   jobs: [],
@@ -261,6 +292,37 @@ el("selFacts").addEventListener("click", async (event) => {
   } catch (error) {
     status("Could not copy the path to the clipboard.");
   }
+});
+
+el("appearance-render-mode").addEventListener("change", (event) => {
+  state.routeView.renderMode = event.target.value;
+  redrawRoutes();
+});
+el("appearance-depot-opacity").addEventListener("input", (event) => {
+  state.routeView.depotLegOpacity = Number(event.target.value);
+  el("appearance-depot-value").textContent = `${Math.round(state.routeView.depotLegOpacity * 100)}%`;
+  redrawRoutes();
+});
+el("appearance-other-opacity").addEventListener("input", (event) => {
+  state.routeView.fadedOpacity = Number(event.target.value);
+  el("appearance-other-value").textContent = `${Math.round(state.routeView.fadedOpacity * 100)}%`;
+  redrawRoutes();
+});
+el("appearance-customers").addEventListener("change", (event) => {
+  state.routeView.customersFollowRoutes = event.target.checked;
+  redrawRoutes();
+});
+el("appearance-arrows").addEventListener("change", (event) => {
+  state.routeView.arrowsEnabled = event.target.checked;
+  redrawRoutes();
+});
+el("appearance-depot-star").addEventListener("change", (event) => {
+  state.routeView.depotStar = event.target.checked;
+  redrawRoutes();
+});
+
+map.on("zoomend", () => {
+  if (state.lastRendered && !state.previewGeojson) redrawRoutes();
 });
 
 /* ── Activity strip ── */
@@ -813,6 +875,54 @@ el("manual-depot-clear").addEventListener("click", () => {
   renderPoiMarkers();
 });
 
+function cachedRoadRenderingAvailable(rendered = state.lastRendered) {
+  return ["cached_road", "mixed"].includes(rendered?.summary?.render_mode);
+}
+
+function resetRouteViewDefaults(rendered = null) {
+  const routeCount = Array.isArray(state.selected?.solved?.routes) ? state.selected.solved.routes.length : 0;
+  state.hiddenRoutes.clear();
+  state.focusedRoute = null;
+  state.routeView.fadedOpacity = 0.2;
+  state.routeView.depotLegOpacity = 0.25;
+  state.routeView.renderMode = cachedRoadRenderingAvailable(rendered) ? "cached_road" : "straight_line";
+  state.routeView.customersFollowRoutes = false;
+  state.routeView.arrowsEnabled = routeCount <= 10;
+  state.routeView.depotStar = routeCount > 0;
+}
+
+function syncAppearanceControls() {
+  const visible = Boolean(state.selected?.solved && state.lastRendered);
+  el("route-appearance").hidden = !visible;
+  if (!visible) return;
+  const cachedAvailable = cachedRoadRenderingAvailable();
+  const renderSelect = el("appearance-render-mode");
+  const cachedOption = renderSelect.querySelector('[value="cached_road"]');
+  cachedOption.disabled = !cachedAvailable;
+  cachedOption.textContent = cachedAvailable ? "Cached road" : "Cached road (unavailable)";
+  if (!cachedAvailable && state.routeView.renderMode === "cached_road") {
+    state.routeView.renderMode = "straight_line";
+  }
+  renderSelect.value = state.routeView.renderMode;
+  el("appearance-depot-field").hidden = state.routeView.renderMode !== "straight_line";
+  el("appearance-depot-opacity").value = String(state.routeView.depotLegOpacity);
+  el("appearance-depot-value").textContent = `${Math.round(state.routeView.depotLegOpacity * 100)}%`;
+  el("appearance-other-opacity").value = String(state.routeView.fadedOpacity);
+  el("appearance-other-opacity").disabled = state.focusedRoute === null;
+  el("appearance-focus-hint").textContent = state.focusedRoute === null ? " (focus a route)" : "";
+  el("appearance-other-value").textContent = `${Math.round(state.routeView.fadedOpacity * 100)}%`;
+  el("appearance-customers").checked = state.routeView.customersFollowRoutes;
+  el("appearance-arrows").checked = state.routeView.arrowsEnabled;
+  el("appearance-depot-star").checked = state.routeView.depotStar;
+}
+
+function customerMarkerOpacity(routeIndex) {
+  if (!state.routeView.customersFollowRoutes || !Number.isInteger(routeIndex)) return 1;
+  if (state.hiddenRoutes.has(routeIndex)) return 0;
+  if (state.focusedRoute !== null && state.focusedRoute !== routeIndex) return state.routeView.fadedOpacity;
+  return 1;
+}
+
 function drawInstanceNodes(routes = null, fit = false) {
   instanceNodeLayers.clearLayers();
   const mapData = state.selected?.mapData;
@@ -828,18 +938,23 @@ function drawInstanceNodes(routes = null, fit = false) {
     const properties = feature.properties || {};
     const isDepot = properties.role === "depot";
     const routeIndex = assignments.get(Number(properties.model_node_id));
+    const opacity = isDepot ? 1 : customerMarkerOpacity(routeIndex);
+    if (opacity <= 0) return;
     const color = isDepot
       ? colors.depot
       : (routeIndex == null
         ? (String(properties.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric)
         : routeColor(routeIndex));
-    const marker = L.circleMarker([lat, lon], {
-      radius: isDepot ? 7 : 5,
-      color,
-      fillColor: color,
-      fillOpacity: 0.9,
-      weight: isDepot ? 3 : 2,
-    });
+    const marker = isDepot && state.routeView.depotStar && Array.isArray(routes) && routes.length > 0
+      ? L.marker([lat, lon], { icon: depotStarIcon(color), interactive: true, keyboard: false })
+      : L.circleMarker([lat, lon], {
+        radius: isDepot ? 7 : 5,
+        color,
+        fillColor: color,
+        opacity,
+        fillOpacity: 0.9 * opacity,
+        weight: isDepot ? 3 : 2,
+      });
     const label = isDepot ? "Depot" : `Customer ${properties.model_node_id}`;
     const named = properties.poi_name ? ` · ${properties.poi_name}` : "";
     // The amenities that collapsed onto this same road point, so a node holding
@@ -863,22 +978,127 @@ function drawInstanceNodes(routes = null, fit = false) {
   return bounds;
 }
 
+function straightRouteLines(rendered) {
+  const routes = state.selected?.solved?.routes || [];
+  const features = state.selected?.mapData?.geojson?.features || [];
+  const nodeCoordinates = new Map(features.map((feature) => [
+    Number(feature.properties?.model_node_id),
+    feature.geometry?.coordinates,
+  ]));
+  const depotId = Number(features.find((feature) => feature.properties?.role === "depot")?.properties?.model_node_id ?? 0);
+  return routes.map((route, routeIndex) => {
+    const sequence = [depotId, ...route.map(Number), depotId];
+    const segments = sequence.slice(0, -1).map((fromId, segmentIndex) => [
+      nodeCoordinates.get(fromId),
+      nodeCoordinates.get(sequence[segmentIndex + 1]),
+    ].filter((point) => Array.isArray(point) && point.length >= 2));
+    const properties = rendered?.geojson?.features?.[routeIndex]?.properties || {};
+    return {
+      routeIndex,
+      segments,
+      coordinates: segments.flatMap((segment, segmentIndex) => segmentIndex === 0 ? segment : segment.slice(1)),
+      properties: { ...properties, render_mode: "straight_line" },
+    };
+  });
+}
+
+function activeRouteGeometry(rendered) {
+  if (state.routeView.renderMode === "cached_road" && cachedRoadRenderingAvailable(rendered)) {
+    return {
+      routeMode: rendered.summary.render_mode,
+      routeLines: rendered.geojson.features.map((feature, routeIndex) => ({
+        routeIndex,
+        coordinates: feature.geometry?.coordinates || [],
+        segments: [feature.geometry?.coordinates || []],
+        properties: feature.properties || {},
+      })),
+    };
+  }
+  return { routeMode: "straight_line", routeLines: straightRouteLines(rendered) };
+}
+
+function calculateBearing(from, to) {
+  const lat1 = (from.lat * Math.PI) / 180;
+  const lat2 = (to.lat * Math.PI) / 180;
+  const dLon = ((to.lng - from.lng) * Math.PI) / 180;
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+function arrowSpacing() {
+  const zoom = map.getZoom();
+  if (zoom >= 16) return 150;
+  if (zoom >= 14) return 300;
+  if (zoom >= 12) return 600;
+  if (zoom >= 10) return 1200;
+  return 2500;
+}
+
+function addArrowsToPolyline(polyline, color, opacity, group) {
+  const latlngs = polyline.getLatLngs();
+  let distance = 0;
+  for (let index = 1; index < latlngs.length; index += 1) {
+    const from = latlngs[index - 1];
+    const to = latlngs[index];
+    const segmentDistance = map.distance(from, to);
+    if (segmentDistance < 3) continue;
+    distance += segmentDistance;
+    if (distance < arrowSpacing()) continue;
+    const overshoot = distance - arrowSpacing();
+    const ratio = Math.max(0, Math.min(1, (segmentDistance - overshoot) / segmentDistance));
+    const point = L.latLng(from.lat + (to.lat - from.lat) * ratio, from.lng + (to.lng - from.lng) * ratio);
+    const bearing = calculateBearing(from, to);
+    const icon = L.divIcon({
+      className: "arrow-marker",
+      html: `<div style="transform:rotate(${bearing - 90}deg);font-size:10px;line-height:10px;color:${color};font-weight:700;opacity:${Math.min(0.95, opacity).toFixed(3)}">▶</div>`,
+      iconSize: [10, 10],
+    });
+    L.marker(point, { icon, interactive: false, keyboard: false }).addTo(group);
+    distance = 0;
+  }
+}
+
 function drawRoutes(rendered, fit) {
   clearRouteLayers();
   previewLayers.clearLayers();
   const bounds = [];
-  rendered.geojson.features.forEach((feature, index) => {
+  const geometry = activeRouteGeometry(rendered);
+  const hasFocus = state.focusedRoute !== null && !state.hiddenRoutes.has(state.focusedRoute);
+  geometry.routeLines.forEach((routeLine, index) => {
     const group = L.layerGroup();
-    const line = feature.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-    bounds.push(...line);
-    L.polyline(line, { color: routeColor(index), weight: 3, opacity: 0.9 })
-      .bindTooltip(`R${feature.properties.route_index}: ${feature.properties.stops} stops, load ${feature.properties.load} (${feature.properties.render_mode})`)
-      .addTo(group);
+    const focused = hasFocus && state.focusedRoute === index;
+    const baseOpacity = hasFocus && !focused
+      ? state.routeView.fadedOpacity
+      : geometry.routeMode === "straight_line" ? 0.78 : 0.9;
+    routeLine.segments.forEach((segment, segmentIndex) => {
+      const line = segment
+        .filter((point) => Array.isArray(point) && point.length >= 2)
+        .map(([lon, lat]) => [Number(lat), Number(lon)]);
+      bounds.push(...line);
+      const isDepotLeg = geometry.routeMode === "straight_line"
+        && routeLine.segments.length > 1
+        && (segmentIndex === 0 || segmentIndex === routeLine.segments.length - 1);
+      const opacity = isDepotLeg ? Math.min(baseOpacity, state.routeView.depotLegOpacity) : baseOpacity;
+      if (line.length < 2 || opacity <= 0) return;
+      const properties = routeLine.properties;
+      const polyline = L.polyline(line, {
+        color: routeColor(index),
+        weight: focused ? 5 : 3,
+        opacity,
+        lineCap: "round",
+        lineJoin: "round",
+      })
+        .bindTooltip(`R${properties.route_index ?? index + 1}: ${properties.stops ?? "?"} stops, load ${properties.load ?? "?"} (${geometry.routeMode})`)
+        .addTo(group);
+      if (state.routeView.arrowsEnabled) addArrowsToPolyline(polyline, routeColor(index), opacity, group);
+    });
     routeLayerGroups.push(group);
     if (!state.hiddenRoutes.has(index)) group.addTo(map);
   });
   bounds.push(...drawInstanceNodes(state.selected?.solved?.routes || [], false));
   if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
+  syncAppearanceControls();
 }
 
 function redrawRoutes() {
@@ -890,6 +1110,7 @@ function redrawRoutes() {
     drawInstanceNodes(null, false);
   }
   renderLegend();
+  syncAppearanceControls();
 }
 
 /* ── Visualize tab list ── */
@@ -978,7 +1199,10 @@ function renderSelected() {
   const instance = state.selected;
   el("selEmpty").hidden = Boolean(instance);
   el("selBody").hidden = !instance;
-  if (!instance) return;
+  if (!instance) {
+    syncAppearanceControls();
+    return;
+  }
   el("selName").textContent = instance.base_name;
   el("selMeta").textContent = `CVRP · ${instance.city} · n=${instance.n}`;
   const facts = [
@@ -1007,6 +1231,11 @@ function renderSelected() {
     el("selObjective").hidden = true;
   }
   renderLegend();
+  syncAppearanceControls();
+}
+
+function routeVisibilityIcon(hidden) {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6z"/><circle cx="12" cy="12" r="2.5"/>${hidden ? '<path class="eye-slash" d="M4 4l16 16"/>' : ""}</svg>`;
 }
 
 function renderLegend() {
@@ -1014,28 +1243,47 @@ function renderLegend() {
   const instance = state.selected;
   if (!instance || !instance.solved || !state.lastRendered) {
     legend.innerHTML = '<div class="empty-note">Customer positions are displayed on the map. Select or create a saved solution to draw routes.</div>';
+    syncAppearanceControls();
     return;
   }
   legend.innerHTML = "";
   state.lastRendered.geojson.features.forEach((feature, index) => {
-    const row = document.createElement("button");
-    row.type = "button";
-    row.className = "legend-row" + (state.hiddenRoutes.has(index) ? " off" : "");
-    row.innerHTML = `<span class="dot" style="background:${routeColor(index)}"></span>` +
-      `<span class="lbl">R${feature.properties.route_index}</span>` +
-      `<span class="meta">${feature.properties.stops} stops · load ${feature.properties.load}</span>`;
-    row.addEventListener("click", () => {
+    const hidden = state.hiddenRoutes.has(index);
+    const focused = state.focusedRoute === index;
+    const row = document.createElement("div");
+    row.className = `legend-row${hidden ? " off" : ""}${focused ? " focused" : ""}`;
+    const eye = document.createElement("button");
+    eye.type = "button";
+    eye.className = "legend-eye";
+    eye.title = `${hidden ? "Show" : "Hide"} route ${index + 1}`;
+    eye.setAttribute("aria-label", eye.title);
+    eye.innerHTML = routeVisibilityIcon(hidden);
+    eye.addEventListener("click", () => {
       if (state.hiddenRoutes.has(index)) {
         state.hiddenRoutes.delete(index);
-        routeLayerGroups[index]?.addTo(map);
       } else {
         state.hiddenRoutes.add(index);
-        if (routeLayerGroups[index]) map.removeLayer(routeLayerGroups[index]);
       }
-      row.classList.toggle("off", state.hiddenRoutes.has(index));
+      if (state.focusedRoute === index && state.hiddenRoutes.has(index)) state.focusedRoute = null;
+      redrawRoutes();
     });
+    const focus = document.createElement("button");
+    focus.type = "button";
+    focus.className = "legend-focus";
+    focus.setAttribute("aria-pressed", String(focused));
+    focus.setAttribute("aria-label", `${focused ? "Clear focus from" : "Focus"} route ${index + 1}`);
+    focus.innerHTML = `<span class="dot" style="background:${routeColor(index)}"></span>` +
+      `<span class="lbl">R${feature.properties.route_index}</span>` +
+      `<span class="meta">${feature.properties.stops} stops · load ${feature.properties.load}</span>`;
+    focus.addEventListener("click", () => {
+      state.hiddenRoutes.delete(index);
+      state.focusedRoute = state.focusedRoute === index ? null : index;
+      redrawRoutes();
+    });
+    row.append(eye, focus);
     legend.append(row);
   });
+  syncAppearanceControls();
 }
 
 function selectInstance(index, preferredRunId = null) {
@@ -1046,8 +1294,8 @@ function selectInstance(index, preferredRunId = null) {
   state.solutionReferences = [];
   state.selectedRunId = null;
   state.previewGeojson = null;
-  state.hiddenRoutes = new Set();
   state.lastRendered = null;
+  resetRouteViewDefaults();
   previewLayers.clearLayers();
   instanceNodeLayers.clearLayers();
   clearRouteLayers();
@@ -1077,7 +1325,7 @@ async function displayInstanceOnly(fit = true) {
   instance.solved = null;
   instance.rendered = null;
   state.lastRendered = null;
-  state.hiddenRoutes = new Set();
+  resetRouteViewDefaults();
   state.previewGeojson = null;
   previewLayers.clearLayers();
   clearRouteLayers();
@@ -1184,7 +1432,7 @@ async function displaySolutionRun(runId, fit = true) {
   instance.rendered = rendered;
   state.lastRendered = rendered;
   state.previewGeojson = null;
-  state.hiddenRoutes = new Set();
+  resetRouteViewDefaults(rendered);
   previewLayers.clearLayers();
   drawRoutes(rendered, fit);
   refreshSolutionControls();
@@ -1550,8 +1798,8 @@ async function handleFinishedJob(job) {
         ? ` ${failed.length} failed: ${failed.map((entry) => `${entry.city} (${entry.error || "incomplete"})`).join(", ")}.`
         : ""));
   } else if (job.kind === "generate") {
-    state.hiddenRoutes = new Set();
     state.lastRendered = null;
+    resetRouteViewDefaults();
     clearRouteLayers();
     await loadInstances(result.base_name);
     activateTab("visualize");

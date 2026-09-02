@@ -921,6 +921,32 @@ details.poi-menu > summary {
 .sel-facts dt { color: var(--mut); }
 .sel-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 
+.appearance-options {
+  border-top: 1px solid var(--div);
+  padding-top: 7px;
+}
+.appearance-options > summary {
+  cursor: pointer;
+  color: var(--mut);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  user-select: none;
+}
+.appearance-options[open] > summary { margin-bottom: 8px; }
+.appearance-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.appearance-wide, .appearance-toggle { grid-column: 1 / -1; }
+.appearance-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mut);
+  cursor: pointer;
+  font-size: 12px;
+}
+.depot-star-marker { background: none; border: none; line-height: 0; }
+.arrow-marker { background: none; border: none; pointer-events: none; }
+
 .fading-rule {
   height: 1px;
   background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent);
@@ -928,9 +954,13 @@ details.poi-menu > summary {
 
 .legend { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
 .legend-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr);
   align-items: center;
-  gap: 8px;
+  gap: 3px;
+  border-radius: 6px;
+}
+.legend-focus, .legend-eye {
   cursor: pointer;
   border: none;
   background: transparent;
@@ -938,11 +968,14 @@ details.poi-menu > summary {
   font: inherit;
   font-size: 12px;
   padding: 4px;
-  border-radius: 6px;
   text-align: left;
 }
-.legend-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
-.legend-row.off { opacity: 0.35; }
+.legend-focus { display: flex; align-items: center; gap: 8px; min-width: 0; border-radius: 6px; }
+.legend-eye { display: inline-flex; align-items: center; justify-content: center; color: var(--mut); border-radius: 6px; }
+.legend-eye svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.legend-eye .eye-slash { stroke-width: 2.2; }
+.legend-row:hover, .legend-row.focused { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.legend-row.off .legend-focus { opacity: 0.35; }
 .legend-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .legend-row .lbl { font-weight: 500; }
 .legend-row .meta { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; }

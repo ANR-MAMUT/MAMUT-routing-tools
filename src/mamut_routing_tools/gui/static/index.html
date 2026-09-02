@@ -374,8 +374,30 @@
 
   <section id="instancePanel" class="tab-panel inspector-panel tab-panel-active">
     <dl class="sel-facts" id="selFacts"></dl>
+    <details id="route-appearance" class="appearance-options" hidden>
+      <summary>Appearance</summary>
+      <div class="appearance-grid">
+        <label class="field appearance-wide"><span>Route rendering</span>
+          <select id="appearance-render-mode">
+            <option value="straight_line">Straight lines</option>
+            <option value="cached_road">Cached road</option>
+          </select>
+        </label>
+        <label id="appearance-depot-field" class="field appearance-wide" hidden>
+          <span>Depot leg fading: <output id="appearance-depot-value" class="range-value">25%</output></span>
+          <input id="appearance-depot-opacity" type="range" min="0" max="1" step="0.05" value="0.25">
+        </label>
+        <label class="field appearance-wide">
+          <span>Other routes<span id="appearance-focus-hint"> (focus a route)</span>: <output id="appearance-other-value" class="range-value">20%</output></span>
+          <input id="appearance-other-opacity" type="range" min="0" max="0.8" step="0.05" value="0.2" disabled>
+        </label>
+        <label class="appearance-toggle"><input id="appearance-customers" type="checkbox"> Fade/hide customers with routes</label>
+        <label class="appearance-toggle"><input id="appearance-arrows" type="checkbox"> Direction arrows</label>
+        <label class="appearance-toggle"><input id="appearance-depot-star" type="checkbox"> Depot as star</label>
+      </div>
+    </details>
     <div class="fading-rule" style="margin:8px 0"></div>
-    <div class="kicker">Routes · click to toggle</div>
+    <div class="kicker">Routes · eye to show/hide · row to focus</div>
     <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
   </section>
 
