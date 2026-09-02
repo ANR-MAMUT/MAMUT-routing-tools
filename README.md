@@ -97,6 +97,8 @@ uv run mamut-tools gui status   # running? healthy? which URL and workspace?
 uv run mamut-tools gui stop     # terminate the background server
 ```
 
+The map offers the CARTO Positron and Dark Matter basemaps on top of OpenStreetMap tiles. CARTO basemaps need an API key, free within the CARTO fair-use tier (request one at https://carto.com/basemaps/apikey, and keep the CARTO and OpenStreetMap attribution visible, which the GUI does). Export it as `MAMUT_BASEMAP_API_KEY` before `mamut-tools gui start` (or `gui run`): the server inlines it into the page. Without it the map falls back to OpenStreetMap tiles only. Never commit the key.
+
 `gui status` reprints the tokened URL, which is the quickest way to recover it if you lose the browser tab. If you would rather watch the server logs live, `gui run` runs it in the foreground instead (development mode, stop with Ctrl-C).
 
 Generated instances remain under `<workspace>/instances/`. Generation controls include the historical POI amenity selection and random, centered, or excentered depot placement. Hybrid sampling exposes its target POI/parametric proportion; parametric sampling exposes the customer distribution, number of clusters, and clustering radius/decay distance. The GUI keeps its additional durable state separately:

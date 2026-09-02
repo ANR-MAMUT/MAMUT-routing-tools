@@ -58,6 +58,32 @@ def test_requests_without_token_or_wrong_host_are_rejected(client: TestClient) -
     assert client.get("/healthz").status_code == 200
 
 
+def test_gui_shell_inlines_the_basemap_api_key_only_when_configured(
+    tmp_path: Path, fixture_osm_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    (osmdata_dir(workspace)).mkdir(parents=True, exist_ok=True)
+    (osmdata_dir(workspace) / "Testville.osm").write_text(fixture_osm_path.read_text())
+    app = create_app(workspace, TOKEN)
+    headers = {"X-Mamut-Token": TOKEN}
+
+    monkeypatch.delenv("MAMUT_BASEMAP_API_KEY", raising=False)
+    with TestClient(app, base_url="http://localhost", headers=headers) as client:
+        assert 'window.__MAMUT_BASEMAP_API_KEY__="";' in client.get("/").text
+
+    monkeypatch.setenv("MAMUT_BASEMAP_API_KEY", "cb1_test-KEY_01")
+    with TestClient(app, base_url="http://localhost", headers=headers) as client:
+        assert 'window.__MAMUT_BASEMAP_API_KEY__="cb1_test-KEY_01";' in client.get("/").text
+        source = client.get("/static/workbench.js").text
+        assert "basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png?key=" in source
+        assert 'href="https://carto.com/attributions">CARTO</a>' in source
+
+    monkeypatch.setenv("MAMUT_BASEMAP_API_KEY", 'bad"key')
+    with TestClient(app, base_url="http://localhost", headers=headers) as client:
+        with pytest.raises(ValueError, match="MAMUT_BASEMAP_API_KEY"):
+            client.get("/")
+
+
 def test_cities_endpoint_lists_workspace_extracts(client: TestClient) -> None:
     payload = client.get("/api/workbench/generation/cities").json()
     assert payload["ok"] and payload["preview_available"]

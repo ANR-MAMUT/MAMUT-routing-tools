@@ -59,22 +59,35 @@ const el = (id) => document.getElementById(id);
 const status = (text) => { el("status").textContent = text; el("status").title = text; };
 
 /* ── Map ── */
+/* CARTO raster basemaps need the CARTO basemaps API key that the server inlines
+   from MAMUT_BASEMAP_API_KEY (https://carto.com/basemaps/apikey); without it they
+   draw a watermark, so the map then runs on OpenStreetMap only. CARTO's free tier
+   requires CARTO and OpenStreetMap to stay credited on the map. */
+const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const CARTO_ATTRIBUTION = `${OSM_ATTRIBUTION} &copy; <a href="https://carto.com/attributions">CARTO</a>`;
+const basemapApiKey = window.__MAMUT_BASEMAP_API_KEY__ || "";
+const cartoRasterLayer = (style, key) => L.tileLayer(
+  `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(key)}`,
+  { maxZoom: 20, subdomains: "abcd", attribution: CARTO_ATTRIBUTION },
+);
 const map = L.map("map", { zoomControl: true }).setView([46.5, 2.5], 6);
-const positron = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
-  maxZoom: 20, subdomains: "abcd", attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
-});
-const darkMatter = L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-  maxZoom: 20, subdomains: "abcd", attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
-});
+const positron = basemapApiKey ? cartoRasterLayer("light_all", basemapApiKey) : null;
+const darkMatter = basemapApiKey ? cartoRasterLayer("dark_all", basemapApiKey) : null;
 const openStreetMap = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19, attribution: "&copy; OpenStreetMap contributors",
+  maxZoom: 19, attribution: OSM_ATTRIBUTION,
 });
-let baseLayer = isDark() ? darkMatter : positron;
+if (!basemapApiKey) {
+  console.info("CARTO basemaps disabled: MAMUT_BASEMAP_API_KEY is not set, using OpenStreetMap tiles.");
+}
+const themedBase = () => (isDark() ? darkMatter : positron) || openStreetMap;
+let baseLayer = themedBase();
 baseLayer.addTo(map);
 
 L.control.scale({ imperial: false, position: "bottomleft" }).addTo(map);
 L.control.layers(
-  { "Dark Matter": darkMatter, "Positron": positron, "OpenStreetMap": openStreetMap },
+  basemapApiKey
+    ? { "Dark Matter": darkMatter, "Positron": positron, "OpenStreetMap": openStreetMap }
+    : { "OpenStreetMap": openStreetMap },
   {},
   { position: "topright" },
 ).addTo(map);
@@ -108,7 +121,7 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem("mamut-theme", theme); } catch (error) { /* private mode */ }
   savePreferences({ theme });
-  const nextBase = isDark() ? darkMatter : positron;
+  const nextBase = themedBase();
   if (!basemapPinned && nextBase !== baseLayer) {
     map.removeLayer(baseLayer);
     nextBase.addTo(map);

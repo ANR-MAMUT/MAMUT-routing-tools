@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import re
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -38,6 +40,19 @@ _ALLOWED_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 STATIC_DIR = Path(__file__).parent / "static"
 # Marker in index.html that the index route swaps for the stored preferences.
 _PREFS_PLACEHOLDER = "<!--MAMUT_PREFS-->"
+# CARTO basemaps API key (https://carto.com/basemaps/apikey), read from the
+# environment that `mamut-tools gui start` forwards to the server. It lands in
+# the page as a JS literal and in tile URLs, hence the narrow alphabet. Without
+# it the map falls back to OpenStreetMap tiles.
+_BASEMAP_API_KEY_ENV = "MAMUT_BASEMAP_API_KEY"
+_BASEMAP_API_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def basemap_api_key_from_env() -> str:
+    key = os.environ.get(_BASEMAP_API_KEY_ENV, "").strip()
+    if key and not _BASEMAP_API_KEY_PATTERN.fullmatch(key):
+        raise ValueError(f"{_BASEMAP_API_KEY_ENV} may only contain ASCII letters, digits, '_' and '-'")
+    return key
 
 
 class JobSubmission(BaseModel):
@@ -1051,7 +1066,10 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         # instead would flash the defaults on every load.
         html = page.read_text(encoding="utf-8").replace(
             _PREFS_PLACEHOLDER,
-            f"<script>window.__MAMUT_PREFS__={preferences.as_script_literal()};</script>",
+            "<script>"
+            f"window.__MAMUT_PREFS__={preferences.as_script_literal()};"
+            f"window.__MAMUT_BASEMAP_API_KEY__={json.dumps(basemap_api_key_from_env())};"
+            "</script>",
             1,
         )
         return HTMLResponse(html)
