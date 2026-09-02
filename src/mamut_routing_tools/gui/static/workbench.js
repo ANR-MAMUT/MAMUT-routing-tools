@@ -1974,6 +1974,32 @@ el("generate").addEventListener("click", async () => {
   } catch (error) { status(`Cannot queue generation: ${error.message}`); }
 });
 
+function syncVrpExportControls() {
+  const euclidean = el("solve-metric").value === "euclidean";
+  el("download-vrp-euc2d-field").hidden = !euclidean;
+  if (!euclidean) el("download-vrp-euc2d").checked = false;
+}
+
+el("solve-metric").addEventListener("change", syncVrpExportControls);
+syncVrpExportControls();
+
+el("download-vrp").addEventListener("click", async () => {
+  const instance = state.selected;
+  if (!instance) return;
+  const metric = el("solve-metric").value;
+  const edgeWeightType = el("download-vrp-euc2d").checked ? "EUC_2D" : "EXPLICIT";
+  const filename = `${instance.base_name}_${metric}.vrp`;
+  try {
+    status(`Exporting ${filename}…`);
+    const blob = await apiBlob(`/api/workbench/instances/${encodeURIComponent(instance.instance_id)}/export-vrp`, {
+      metric,
+      edge_weight_type: edgeWeightType,
+    });
+    saveBlob(blob, filename);
+    status(`Downloaded ${filename} (${edgeWeightType})`);
+  } catch (error) { status(`Export failed: ${error.message}`); }
+});
+
 el("solve").addEventListener("click", async () => {
   const instance = state.selected;
   if (!instance) return;

@@ -850,6 +850,26 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{base}.zip"'},
         )
 
+    @app.post("/api/workbench/instances/{instance_id}/export-vrp")
+    async def instance_export_vrp(instance_id: str, request: Request) -> Any:
+        """One classic CVRPLIB ``.vrp`` (or Solomon ``.txt``) of a generated
+        instance variant, rendered by mamut-routing-lib's exporter so the file
+        matches ``mamut-routing export vrp`` and the website download byte for byte."""
+        payload = await request.json()
+        try:
+            record = _workspace_instance(workspace, instance_id)
+        except KeyError:
+            return _payload_error(404, "Unknown instance")
+        try:
+            filename, text = await run_in_threadpool(_export_vrp_payload, record, payload, workspace)
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
+        return Response(
+            content=text,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.post("/api/workbench/generation/bulk")
     async def generation_bulk(request: Request) -> Any:
         payload = await request.json()
@@ -1370,6 +1390,28 @@ def _solution_or_reference(
                 return reference
         raise KeyError(run_id)
     return store.get(instance_id, run_id)
+
+
+def _export_vrp_payload(record: dict[str, Any], payload: dict[str, Any], workspace: Path) -> tuple[str, str]:
+    """(filename, text) of the classic export of one instance variant."""
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.cvrplib import EDGE_WEIGHT_TYPES, EXPORT_SUFFIXES, VrpExportOptions, instance_to_vrp_text
+
+    metric = str(payload.get("metric") or "fastest").lower()
+    edge_weight_type = str(payload.get("edge_weight_type") or "EXPLICIT").upper()
+    export_format = str(payload.get("format") or "vrp").lower()
+    if edge_weight_type not in EDGE_WEIGHT_TYPES:
+        raise ValueError(f"Unsupported edge_weight_type '{edge_weight_type}'")
+    if export_format not in EXPORT_SUFFIXES:
+        raise ValueError(f"Unsupported format '{export_format}'")
+    instance_path = _instance_variant_path(record, metric)
+    if not instance_path.is_file() or not _contained(instance_path, instances_dir(workspace, create=False)):
+        raise ValueError(f"Instance file for the '{metric}' variant is missing")
+    instance = load_benchmark_instance(instance_path)
+    options = VrpExportOptions(edge_weight_type=edge_weight_type, format=export_format)  # type: ignore[arg-type]
+    text = instance_to_vrp_text(instance, instance_path=instance_path, options=options)
+    filename = f"{record['base_name']}_{metric}{EXPORT_SUFFIXES[export_format]}"
+    return filename, text
 
 
 def _instance_from_vrp_text(vrp_text: str) -> Any:

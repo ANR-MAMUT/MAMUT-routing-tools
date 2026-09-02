@@ -1,6 +1,6 @@
 [project]
 name = "mamut-routing-tools"
-version = "0.4.0"
+version = "0.5.0"
 description = "Local generation tool suite for MAMUT-routing: OSM acquisition, road-graph engine, route geometry, and CVRP / VRPTW / time-dependent (TDVRP, TDVRPTW) instance generation."
 readme = "README.md"
 authors = [
@@ -38,7 +38,7 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "mamut-routing-lib[pyvrp]>=0.10.0",
+    "mamut-routing-lib[pyvrp]>=0.11.0",
     "typer>=0.12",
     "pydantic>=2.7",
     "numpy>=1.26",

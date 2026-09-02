@@ -324,6 +324,8 @@ html, body {
 /* ── Forms ── */
 label.field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .field > span { font-size: 11px; color: var(--mut); }
+.field.checkbox-field { display: flex; flex-direction: row; align-items: center; gap: 6px; }
+.field.checkbox-field > input { width: auto; }
 
 select, input[type="text"], input[type="number"], input[type="search"] {
   width: 100%;

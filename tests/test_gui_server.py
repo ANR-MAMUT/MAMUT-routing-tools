@@ -371,6 +371,38 @@ def test_preview_generate_solve_render_round_trip(client: TestClient) -> None:
     )
     assert download.status_code == 200 and download.headers["content-type"] == "application/zip"
 
+    exported = client.post(
+        f"/api/workbench/instances/{single['instance_id']}/export-vrp", json={"metric": "fastest"}
+    )
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-type"].startswith("text/plain")
+    assert exported.headers["content-disposition"] == f'attachment; filename="{single["base_name"]}_fastest.vrp"'
+    lines = exported.text.splitlines()
+    assert lines[0] == f"NAME : {single['base_name']}_fastest"
+    assert "EDGE_WEIGHT_TYPE : EXPLICIT" in lines and "EDGE_WEIGHT_SECTION" in lines
+    assert lines[-1] == "EOF" and "DEPOT_SECTION" in lines
+    from mamut_routing_tools.generation.writers import parse_cvrp_vrp
+
+    parsed_path = Path(folder) / "exported_check.vrp"
+    parsed_path.write_text(exported.text, encoding="utf-8")
+    parsed = parse_cvrp_vrp(parsed_path)
+    assert parsed.depot_node_index == 1 and parsed.dimension == len(meta["nodes"])
+
+    euclidean = client.post(
+        f"/api/workbench/instances/{single['instance_id']}/export-vrp",
+        json={"metric": "euclidean", "edge_weight_type": "EUC_2D"},
+    )
+    assert euclidean.status_code == 200, euclidean.text
+    assert "EDGE_WEIGHT_TYPE : EUC_2D" in euclidean.text and "EDGE_WEIGHT_SECTION" not in euclidean.text
+
+    refused = client.post(
+        f"/api/workbench/instances/{single['instance_id']}/export-vrp",
+        json={"metric": "fastest", "edge_weight_type": "EUC_2D"},
+    )
+    assert refused.status_code == 400 and "euclidean" in refused.json()["error"]
+    assert client.post(f"/api/workbench/instances/{single['instance_id']}/export-vrp", json={"metric": "nope"}).status_code == 400
+    assert client.post("/api/workbench/instances/unknown/export-vrp", json={"metric": "fastest"}).status_code == 404
+
 
 def test_td_build_derives_tdvrp_and_tdvrptw_twins(client: TestClient) -> None:
     generated = client.post(
@@ -991,3 +1023,10 @@ def test_cancelling_a_running_solve_stops_it_without_recording_a_run(client: Tes
     assert time.monotonic() - started < 30, "cancellation waited out the 120 s budget"
     after = client.get(f"/api/instances/{instance_id}/solutions").json()["runs"]
     assert len(after) == before, "a cancelled solve must not persist a truncated run"
+
+
+def test_gui_shell_exposes_the_classic_vrp_export_controls(client: TestClient) -> None:
+    html = _frontend_source(client)
+    assert 'id="download-vrp"' in html
+    assert 'id="download-vrp-euc2d"' in html
+    assert "/export-vrp" in html
