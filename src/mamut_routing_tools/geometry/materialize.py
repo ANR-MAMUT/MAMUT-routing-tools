@@ -12,18 +12,53 @@ vertex (nearest road node within 100 m must itself be a vertex), routes with
 the group metric, accepts a segment only when its endpoints land within
 250 m of the instance node coordinates, tries the reversed edge before
 giving up, and falls back to a straight line between the node coordinates.
+
+One addition over the Julia semantics: an instance node with no road node in
+its 100 m box (or whose nearest node is not a vertex) is projected onto the
+nearest straight edge of a node-level candidate graph and routed from that
+virtual point (:class:`EdgeAnchor`). Mamut2026 ``corner`` depots are often
+synthetic crop nodes of the generation-time extract; when the website
+re-fetches the city with other bounds, that node no longer exists and the
+depot sits mid-segment on a road, which used to turn every depot leg into a
+straight line. Nodes that resolve to a vertex keep the exact former path.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from mamut_routing_tools.geo import ENU, lla_from_enu
 from mamut_routing_tools.roadgraph.build import RoadGraph, road_graph_candidates
-from mamut_routing_tools.roadgraph.router import route_lonlat
+from mamut_routing_tools.roadgraph.router import route_lonlat, route_vertices
 
 ENDPOINT_TOLERANCE_METERS = 250.0
+#: How far off the nearest road an unsnappable node may sit and still be
+#: anchored to that road. Well under the 100 m node box: a node this close to
+#: a road but farther than that from every road node is on a long straight
+#: segment, which is exactly the case the anchor exists for.
+ANCHOR_MAX_DISTANCE_METERS = 50.0
+
+
+@dataclass(frozen=True)
+class EdgeAnchor:
+    """An instance node resolved to a point ON a directed graph edge rather
+    than to a vertex: ``fraction`` along ``edge_index`` (0 = tail, 1 = head),
+    ``lonlat`` the projected point the polyline starts or ends at."""
+
+    edge_index: int
+    fraction: float
+    lonlat: list[float]
+
+
+#: A candidate graph with its two node resolutions: instance node -> vertex,
+#: and, for the nodes that map to no vertex, instance node -> edge anchor.
+#: A bare ``(graph, vertex_map)`` pair is still accepted (no anchors).
+Candidate = (
+    tuple[RoadGraph, dict[int, int]] | tuple[RoadGraph, dict[int, int], dict[int, EdgeAnchor]]
+)
 
 
 def node_edge_cache_key(from_node: int, to_node: int) -> str:
@@ -116,19 +151,155 @@ def _graph_vertex_map(graph: RoadGraph, node_coordinates: dict[int, list[float]]
     return mapping
 
 
+def _graph_edge_anchor_map(
+    graph: RoadGraph,
+    node_coordinates: dict[int, list[float]],
+    vertex_map: dict[int, int],
+) -> dict[int, EdgeAnchor]:
+    """Edge anchors for the instance nodes ``vertex_map`` left unresolved.
+
+    Empty on intersection-level graphs, whose edges have no straight geometry
+    to project onto; the cascade always also probes a node-level graph."""
+    anchors: dict[int, EdgeAnchor] = {}
+    if graph.only_intersections:
+        return anchors
+    for node_id, point in node_coordinates.items():
+        if node_id in vertex_map or not _is_lonlat_point(point):
+            continue
+        projection = graph.nearest_edge_projection(point[1], point[0], ANCHOR_MAX_DISTANCE_METERS)
+        if projection is None:
+            continue
+        edge_index, fraction, _distance = projection
+        tail = graph.node_enu[graph.edges[edge_index][0]]
+        head = graph.node_enu[graph.edges[edge_index][1]]
+        east = tail[0] + fraction * (head[0] - tail[0])
+        north = tail[1] + fraction * (head[1] - tail[1])
+        lla = lla_from_enu(ENU(east, north, 0.0), graph.ref_lla)
+        anchors[node_id] = EdgeAnchor(edge_index, fraction, [lla.lon, lla.lat])
+    return anchors
+
+
+def graph_node_maps(
+    graph: RoadGraph, node_coordinates: dict[int, list[float]]
+) -> tuple[dict[int, int], dict[int, EdgeAnchor]]:
+    """Both node resolutions of one candidate graph: vertices first, edge
+    anchors only for what the vertex rule could not place."""
+    vertex_map = _graph_vertex_map(graph, node_coordinates)
+    return vertex_map, _graph_edge_anchor_map(graph, node_coordinates, vertex_map)
+
+
+def _metric_weight(graph: RoadGraph, metric: str) -> Callable[[int], float]:
+    if metric == "fastest":
+        return graph.time_weight
+    if metric == "shortest":
+        return lambda edge_index: graph.edge_weight[edge_index]
+    raise ValueError(f"Unsupported road metric '{metric}'")
+
+
+def _reverse_edge_index(graph: RoadGraph, edge_index: int) -> int | None:
+    """The cheapest edge running head -> tail of ``edge_index``, if any."""
+    tail, head = graph.edges[edge_index]
+    tail_vertex, head_vertex = graph.vertex_of[tail], graph.vertex_of[head]
+    if not graph.graph.has_edge(head_vertex, tail_vertex):
+        return None
+    return min(graph.graph.get_all_edge_data(head_vertex, tail_vertex), key=lambda index: graph.edge_weight[index])
+
+
+def _path_cost(graph: RoadGraph, vertices: list[int], weight: Callable[[int], float]) -> float:
+    return sum(
+        min(weight(index) for index in graph.graph.get_all_edge_data(vertices[i - 1], vertices[i]))
+        for i in range(1, len(vertices))
+    )
+
+
+def _departures(graph: RoadGraph, source: int | EdgeAnchor, weight: Callable[[int], float]) -> list[tuple[int, float, list[list[float]]]]:
+    """Ways to leave ``source`` onto a vertex: (vertex, cost so far, prefix)."""
+    if isinstance(source, int):
+        return [(source, 0.0, [])]
+    tail, head = graph.edges[source.edge_index]
+    options = [(graph.vertex_of[head], (1.0 - source.fraction) * weight(source.edge_index), [source.lonlat])]
+    reverse = _reverse_edge_index(graph, source.edge_index)
+    if reverse is not None:
+        options.append((graph.vertex_of[tail], source.fraction * weight(reverse), [source.lonlat]))
+    return options
+
+
+def _arrivals(graph: RoadGraph, target: int | EdgeAnchor, weight: Callable[[int], float]) -> list[tuple[int, float, list[list[float]]]]:
+    """Ways to reach ``target`` from a vertex: (vertex, remaining cost, suffix)."""
+    if isinstance(target, int):
+        return [(target, 0.0, [])]
+    tail, head = graph.edges[target.edge_index]
+    options = [(graph.vertex_of[tail], target.fraction * weight(target.edge_index), [target.lonlat])]
+    reverse = _reverse_edge_index(graph, target.edge_index)
+    if reverse is not None:
+        options.append((graph.vertex_of[head], (1.0 - target.fraction) * weight(reverse), [target.lonlat]))
+    return options
+
+
+def _same_edge_segment(
+    graph: RoadGraph, source: EdgeAnchor, target: EdgeAnchor, weight: Callable[[int], float]
+) -> tuple[float, list[list[float]]] | None:
+    """Both anchors on one road segment, travelled directly along it."""
+    if target.edge_index == source.edge_index:
+        target_fraction = target.fraction
+    elif _reverse_edge_index(graph, target.edge_index) == source.edge_index:
+        target_fraction = 1.0 - target.fraction
+    else:
+        return None
+    if target_fraction >= source.fraction:
+        cost = (target_fraction - source.fraction) * weight(source.edge_index)
+    else:
+        reverse = _reverse_edge_index(graph, source.edge_index)
+        if reverse is None:
+            return None
+        cost = (source.fraction - target_fraction) * weight(reverse)
+    return cost, [source.lonlat, target.lonlat]
+
+
+def _anchored_route_lonlat(
+    graph: RoadGraph,
+    source: int | EdgeAnchor,
+    target: int | EdgeAnchor,
+    metric: str,
+) -> list[list[float]] | None:
+    """Cheapest polyline between two resolutions, at least one an anchor:
+    every way of leaving the source edge times every way of reaching the
+    target edge, each completed by a vertex-to-vertex Dijkstra."""
+    weight = _metric_weight(graph, metric)
+    best: tuple[float, list[list[float]]] | None = None
+    if isinstance(source, EdgeAnchor) and isinstance(target, EdgeAnchor):
+        best = _same_edge_segment(graph, source, target, weight)
+    for departure_vertex, departure_cost, prefix in _departures(graph, source, weight):
+        for arrival_vertex, arrival_cost, suffix in _arrivals(graph, target, weight):
+            vertices = route_vertices(graph, departure_vertex, arrival_vertex, metric)
+            if vertices is None:
+                continue
+            cost = departure_cost + _path_cost(graph, vertices, weight) + arrival_cost
+            if best is None or cost < best[0]:
+                best = (cost, [*prefix, *(graph.node_lonlat(graph.node_of[vertex]) for vertex in vertices), *suffix])
+    return None if best is None else best[1]
+
+
 def candidate_route_segment(
-    candidates: list[tuple[RoadGraph, dict[int, int]]],
+    candidates: list[Candidate],
     from_node: int,
     to_node: int,
     from_coordinates: list[float],
     to_coordinates: list[float],
     metric: str,
 ) -> list[list[float]] | None:
-    for graph, vertex_map in candidates:
-        if from_node not in vertex_map or to_node not in vertex_map:
+    for candidate in candidates:
+        graph, vertex_map = candidate[0], candidate[1]
+        anchor_map: dict[int, EdgeAnchor] = candidate[2] if len(candidate) > 2 else {}
+        source = vertex_map.get(from_node, anchor_map.get(from_node))
+        target = vertex_map.get(to_node, anchor_map.get(to_node))
+        if source is None or target is None:
             continue
         try:
-            segment = route_lonlat(graph, vertex_map[from_node], vertex_map[to_node], metric)
+            if isinstance(source, int) and isinstance(target, int):
+                segment = route_lonlat(graph, source, target, metric)
+            else:
+                segment = _anchored_route_lonlat(graph, source, target, metric)
         except (ValueError, KeyError):
             segment = None
         if segment is None:
@@ -155,7 +326,7 @@ def materialize_group(repo_root: Path, group: dict[str, Any]) -> dict[str, Any]:
     )
     if not graphs:
         raise ValueError(f"No usable OSM road graph was available for {geo_path}")
-    candidates = [(graph, _graph_vertex_map(graph, node_coordinates)) for graph in graphs]
+    candidates: list[Candidate] = [(graph, *graph_node_maps(graph, node_coordinates)) for graph in graphs]
 
     required_edges: set[tuple[int, int]] = set()
     entry_edges: list[dict[str, Any]] = []

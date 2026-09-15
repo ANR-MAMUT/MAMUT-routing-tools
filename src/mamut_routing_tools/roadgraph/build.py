@@ -118,6 +118,7 @@ class RoadGraph:
     _kdtree: cKDTree | None = field(default=None, repr=False)
     _kdtree_nodes: list[int] = field(default_factory=list, repr=False)
     _vertex_kdtree: cKDTree | None = field(default=None, repr=False)
+    _segments: tuple[Any, Any, Any] | None = field(default=None, repr=False)
 
     @property
     def vertex_count(self) -> int:
@@ -248,6 +249,47 @@ class RoadGraph:
             else (int(index), float(distance))
             for distance, index in zip(distances, indices)
         ]
+
+    def nearest_edge_projection(
+        self, lat: float, lon: float, max_distance_m: float = 50.0
+    ) -> tuple[int, float, float] | None:
+        """Nearest EDGE to a point, as ``(edge_index, fraction, distance_m)``.
+
+        ``fraction`` is the position of the orthogonal projection along the
+        directed edge (0 at its tail, 1 at its head). Only node-level graphs
+        (``only_intersections=False``) qualify: their edges are the straight
+        segments between consecutive OSM nodes, whereas an intersection-level
+        edge stands for a whole polyline whose bends this graph no longer
+        knows. Returns ``None`` on an intersection-level graph or when no
+        edge passes within ``max_distance_m``.
+
+        This is the escape hatch for a point that is on a road but far from
+        every road node: a long straight segment, or a synthetic crop node of
+        another extract of the same city (the generation-time bounds cut the
+        road there; a re-fetched extract does not).
+        """
+        if self.only_intersections or not self.edges:
+            return None
+        self._ensure_segments()
+        assert self._segments is not None
+        tails, deltas, lengths_sq = self._segments
+        enu = enu_from_lla(LLA(lat, lon), self.ref_lla)
+        query = np.array([enu.east, enu.north])
+        fractions = np.clip(np.sum((query - tails) * deltas, axis=1) / lengths_sq, 0.0, 1.0)
+        offsets = tails + fractions[:, None] * deltas - query
+        distances = np.hypot(offsets[:, 0], offsets[:, 1])
+        best = int(np.argmin(distances))
+        if float(distances[best]) > max_distance_m:
+            return None
+        return best, float(fractions[best]), float(distances[best])
+
+    def _ensure_segments(self) -> None:
+        if self._segments is None:
+            tails = np.array([self.node_enu[u][:2] for u, _ in self.edges], dtype=float)
+            heads = np.array([self.node_enu[v][:2] for _, v in self.edges], dtype=float)
+            deltas = heads - tails
+            lengths_sq = np.maximum(np.sum(deltas * deltas, axis=1), 1e-12)
+            self._segments = (tails, deltas, lengths_sq)
 
     def _ensure_vertex_kdtree(self) -> None:
         if self._vertex_kdtree is None:

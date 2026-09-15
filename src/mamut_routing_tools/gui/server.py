@@ -1478,7 +1478,7 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
         try:
             osm_path = resolve_source_osm_path(workspace, meta, "meta")
             candidates = [
-                (graph, _graph_vertex_map_cached(graph, meta))
+                (graph, *_graph_node_maps_cached(graph, meta))
                 for graph in road_graph_candidates(
                     osm_path,
                     only_intersections=bool((meta.get("map_options") or {}).get("only_intersections", True)),
@@ -1567,13 +1567,13 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
     }
 
 
-_VERTEX_MAP_CACHE: dict[tuple[int, int], dict[int, int]] = {}
+_NODE_MAPS_CACHE: dict[tuple[int, int], tuple[dict[int, int], dict[int, Any]]] = {}
 
 
-def _graph_vertex_map_cached(graph: Any, meta: dict[str, Any]) -> dict[int, int]:
-    from mamut_routing_tools.geometry.materialize import _graph_vertex_map, node_coordinates_map
+def _graph_node_maps_cached(graph: Any, meta: dict[str, Any]) -> tuple[dict[int, int], dict[int, Any]]:
+    from mamut_routing_tools.geometry.materialize import graph_node_maps, node_coordinates_map
 
     key = (id(graph), id(meta))
-    if key not in _VERTEX_MAP_CACHE:
-        _VERTEX_MAP_CACHE[key] = _graph_vertex_map(graph, node_coordinates_map(meta))
-    return _VERTEX_MAP_CACHE[key]
+    if key not in _NODE_MAPS_CACHE:
+        _NODE_MAPS_CACHE[key] = graph_node_maps(graph, node_coordinates_map(meta))
+    return _NODE_MAPS_CACHE[key]
