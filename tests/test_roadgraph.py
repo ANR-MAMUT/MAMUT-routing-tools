@@ -93,3 +93,18 @@ def test_batched_nearest_nodes_matches_the_one_by_one_search(fixture_osm_path: P
     assert batched[0] == 1 and batched[2] is None and batched[3] is None
     # An empty batch is not an error, and never touches the tree.
     assert graph.nearest_nodes([]) == []
+
+
+def test_synthetic_crop_nodes_are_tracked_onto_the_graph(fixture_osm_path: Path) -> None:
+    osm_data = parse_osm(fixture_osm_path)
+    crop_to_bounds(osm_data)
+    synthetic = next(way for way in osm_data.ways if way.way_id == 12).nodes[1]
+    assert osm_data.synthetic_nodes == {synthetic}
+    clear_caches()
+    # The oneway spur is a dead end the SCC trim removes; untrimmed it stays,
+    # and its boundary node is a way endpoint, hence a vertex.
+    graph = load_road_graph(fixture_osm_path, trim_to_connected=False)
+    assert graph.synthetic_nodes == frozenset({synthetic})
+    assert graph.synthetic_vertices() == {graph.vertex_of[synthetic]}
+    trimmed = load_road_graph(fixture_osm_path, trim_to_connected=True)
+    assert trimmed.synthetic_nodes == frozenset()

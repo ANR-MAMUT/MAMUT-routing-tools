@@ -992,3 +992,75 @@ def test_generation_request_rejects_invalid_attachment_controls(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         GenerationRequest(city="Testville", osm_path=fixture_osm_path, **overrides).validate()
+
+
+def test_pick_depot_vertex_skips_excluded_vertices() -> None:
+    from mamut_routing_tools.generation.select import pick_depot_vertex
+
+    # Vertex 2 is the south-west-most point and the closest to the centroid's
+    # west side: the natural corner pick, and a synthetic crop node.
+    vertex_ll = [(45.000, 4.000), (45.000, 4.010), (44.990, 3.990), (45.010, 4.010)]
+    rng = random.Random(0)
+    assert pick_depot_vertex("corner", vertex_ll, rng) == 2
+    assert pick_depot_vertex("corner", vertex_ll, rng, exclude={2}) == 0
+    assert pick_depot_vertex("center", vertex_ll, rng, exclude={0, 1}) in (2, 3)
+    # Every vertex excluded: the guard is dropped, not the generation.
+    assert pick_depot_vertex("corner", vertex_ll, rng, exclude={0, 1, 2, 3}) == 2
+    # Random redraws past excluded vertices and never returns one.
+    picks = {pick_depot_vertex("random", vertex_ll, random.Random(seed), exclude={2}) for seed in range(50)}
+    assert 2 not in picks and picks == {0, 1, 3}
+    # Seeded draws that never hit an excluded vertex are unchanged.
+    assert pick_depot_vertex("random", vertex_ll, random.Random(7)) == pick_depot_vertex(
+        "random", vertex_ll, random.Random(7), exclude={99}
+    )
+
+
+CROP_DEPOT_OSM = """<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="test">
+  <bounds minlat="44.99" minlon="3.99" maxlat="45.01" maxlon="4.01"/>
+  <node id="1" lat="45.000" lon="4.000"/>
+  <node id="2" lat="45.000" lon="4.005"/>
+  <node id="3" lat="45.000" lon="4.008"/>
+  <node id="4" lat="45.005" lon="4.005"/>
+  <node id="5" lat="44.995" lon="4.005"/>
+  <node id="6" lat="44.980" lon="3.980"/>
+  <way id="10">
+    <nd ref="1"/><nd ref="2"/><nd ref="3"/>
+    <tag k="highway" v="residential"/>
+  </way>
+  <way id="11">
+    <nd ref="4"/><nd ref="2"/><nd ref="5"/>
+    <tag k="highway" v="primary"/>
+  </way>
+  <!-- Two-way road leaving the bounds to the south-west: the crop invents a
+       boundary node that survives the SCC trim and is the corner pick. -->
+  <way id="12">
+    <nd ref="1"/><nd ref="6"/>
+    <tag k="highway" v="secondary"/>
+  </way>
+</osm>
+"""
+
+
+def test_generated_depot_is_never_a_synthetic_crop_node(tmp_path: Path) -> None:
+    from mamut_routing_tools.generation.select import pick_depot_vertex, vertex_latlon
+    from mamut_routing_tools.roadgraph.build import clear_caches, load_road_graph
+
+    osm_path = tmp_path / "Cropville.osm"
+    osm_path.write_text(CROP_DEPOT_OSM, encoding="utf-8")
+    clear_caches()
+    graph = load_road_graph(osm_path)
+    synthetic = graph.synthetic_vertices()
+    assert len(synthetic) == 1
+    # Without the guard, corner mode lands exactly on the crop node.
+    assert pick_depot_vertex("corner", vertex_latlon(graph), random.Random(0)) in synthetic
+    for mode in ("corner", "center", "random"):
+        request = GenerationRequest(
+            city="Cropville",
+            osm_path=osm_path,
+            method="parametric_attach",
+            n_customers=2,
+            depot_mode=mode,
+            seed=3,
+        )
+        assert build_generation_selection(request).vertices[0] not in synthetic

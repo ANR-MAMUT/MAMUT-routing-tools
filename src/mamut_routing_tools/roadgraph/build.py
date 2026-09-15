@@ -115,6 +115,10 @@ class RoadGraph:
     #: was asked of the loader. ``None`` when built through ``build_road_graph``
     #: directly, which has no fallback chain to hide.
     loaded_with: tuple[bool, bool] | None = field(default=None)
+    #: OSM ids of the crop's synthetic boundary nodes that made it into the
+    #: graph (see ``OsmData.synthetic_nodes``). Way endpoints, hence vertices
+    #: in every graph flavour; never legitimate instance locations.
+    synthetic_nodes: frozenset[int] = field(default_factory=frozenset)
     _kdtree: cKDTree | None = field(default=None, repr=False)
     _kdtree_nodes: list[int] = field(default_factory=list, repr=False)
     _vertex_kdtree: cKDTree | None = field(default=None, repr=False)
@@ -127,6 +131,10 @@ class RoadGraph:
     @property
     def edge_count(self) -> int:
         return len(self.edges)
+
+    def synthetic_vertices(self) -> set[int]:
+        """Graph vertices that are synthetic crop nodes."""
+        return {self.vertex_of[osm_id] for osm_id in self.synthetic_nodes if osm_id in self.vertex_of}
 
     def node_lla(self, osm_id: int) -> LLA:
         east, north, up = self.node_enu[osm_id]
@@ -447,6 +455,7 @@ def build_road_graph(
         edge_class=classes,
         edge_weight=weights,
         graph=graph,
+        synthetic_nodes=frozenset(osm_data.synthetic_nodes & node_enu.keys()),
     )
 
 

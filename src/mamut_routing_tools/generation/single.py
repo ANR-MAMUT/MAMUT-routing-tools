@@ -440,7 +440,7 @@ def build_generation_selection(request: GenerationRequest) -> Selection:
     if request.method == "manual":
         return _build_manual_selection(request, graph, vertex_ll, categories, rng, n_seeds, poi_share)
 
-    depot_vertex = pick_depot_vertex(request.depot_mode, vertex_ll, rng)
+    depot_vertex = pick_depot_vertex(request.depot_mode, vertex_ll, rng, exclude=graph.synthetic_vertices())
     depot_lat, depot_lon = vertex_ll[depot_vertex]
 
     if request.method == "poi_categories":
@@ -617,7 +617,7 @@ def _build_manual_selection(
         depot_vertex, depot_snap, depot_meta = depot_resolved
         depot_lat, depot_lon = depot_meta.lat, depot_meta.lon
     else:
-        depot_vertex = pick_depot_vertex(request.depot_mode, vertex_ll, rng)
+        depot_vertex = pick_depot_vertex(request.depot_mode, vertex_ll, rng, exclude=graph.synthetic_vertices())
         depot_lat, depot_lon = vertex_ll[depot_vertex]
     # A pick that could not be resolved must not be reported as the depot: the
     # instance would claim a hand-placed depot it does not have.

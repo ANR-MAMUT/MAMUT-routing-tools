@@ -25,6 +25,10 @@ class OsmData:
     nodes: dict[int, tuple[float, float]]  # id -> (lat, lon)
     ways: list[OsmWay]
     bounds: tuple[float, float, float, float]  # (min_lat, min_lon, max_lat, max_lon)
+    #: Node ids ``crop_to_bounds`` invented where a way crosses the bounds.
+    #: They are not OSM nodes: another extract of the same city, cropped at
+    #: other bounds, does not have them (or has them under other ids).
+    synthetic_nodes: set[int] = field(default_factory=set)
 
 
 def ensure_bounds(osm_path: Path) -> None:
@@ -200,6 +204,7 @@ def crop_to_bounds(osm_data: OsmData) -> None:
         nonlocal next_id
         value = next_id
         next_id += 1
+        osm_data.synthetic_nodes.add(value)
         return value
 
     osm_data.ways = [

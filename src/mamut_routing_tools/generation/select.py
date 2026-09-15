@@ -30,20 +30,40 @@ def vertex_latlon(graph: RoadGraph) -> list[tuple[float, float]]:
     return out
 
 
-def pick_depot_vertex(mode: str, vertex_ll: list[tuple[float, float]], rng: random.Random) -> int:
+def pick_depot_vertex(
+    mode: str,
+    vertex_ll: list[tuple[float, float]],
+    rng: random.Random,
+    exclude: set[int] | frozenset[int] = frozenset(),
+) -> int:
+    """The depot vertex for ``mode``, never one of ``exclude``.
+
+    ``exclude`` is meant for the graph's synthetic crop nodes: ``corner``
+    takes the vertex nearest the south-west corner of the extract, which is
+    exactly where a road leaving the bounds gets its invented boundary node,
+    so 16 of the 100 Mamut2026 depots landed on a point that exists in no
+    other extract of their city. ``center`` is guarded the same way; ``random``
+    redraws only when it hits an excluded vertex, so seeded draws that never
+    touched one are unchanged. When every vertex is excluded the guard is
+    dropped rather than failing the generation.
+    """
     n = len(vertex_ll)
     if n < 1:
         raise ValueError("Cannot pick depot from empty vertex list")
+    candidates = [v for v in range(n) if v not in exclude] or list(range(n))
     if mode == "random":
-        return rng.randrange(n)
+        pick = rng.randrange(n)
+        while pick not in candidates:
+            pick = rng.randrange(n)
+        return pick
     if mode == "center":
         c_lat = sum(t[0] for t in vertex_ll) / n
         c_lon = sum(t[1] for t in vertex_ll) / n
-        return min(range(n), key=lambda v: haversine_m(vertex_ll[v][0], vertex_ll[v][1], c_lat, c_lon))
+        return min(candidates, key=lambda v: haversine_m(vertex_ll[v][0], vertex_ll[v][1], c_lat, c_lon))
     if mode == "corner":
         min_lat = min(t[0] for t in vertex_ll)
         min_lon = min(t[1] for t in vertex_ll)
-        return min(range(n), key=lambda v: haversine_m(vertex_ll[v][0], vertex_ll[v][1], min_lat, min_lon))
+        return min(candidates, key=lambda v: haversine_m(vertex_ll[v][0], vertex_ll[v][1], min_lat, min_lon))
     raise ValueError(f"Unsupported depot mode '{mode}'")
 
 
