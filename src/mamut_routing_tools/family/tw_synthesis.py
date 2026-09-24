@@ -78,14 +78,17 @@ def construct_anchor_routes(
     demands: list[int],
     capacity: int,
     service_times: list[int],
+    *,
+    horizon_start: float = HORIZON_START,
+    horizon_end: float = HORIZON_END,
 ) -> tuple[list[list[int]], list[float]]:
     """Build deterministic capacity-and-horizon-feasible TW anchor routes.
 
-    Every route starts at the depot at the horizon start. The next customer
-    is the nearest unserved customer that respects capacity and still permits
-    a direct return to the depot within the horizon. Ties break on customer
-    index. The returned visit times are the free-flow arrivals independently
-    simulated on those routes.
+    Every route starts at the depot (node 0) at the horizon start. The next
+    customer is the nearest unserved customer that respects capacity and still
+    permits a direct return to the depot within the horizon. Ties break on
+    customer index. The returned visit times are the free-flow arrivals
+    independently simulated on those routes.
     """
     num_nodes = len(fastest)
     if len(demands) != num_nodes or len(service_times) != num_nodes:
@@ -94,20 +97,20 @@ def construct_anchor_routes(
         raise ValueError("vehicle capacity must be positive")
 
     unserved = set(range(1, num_nodes))
-    arrivals = [HORIZON_START] * num_nodes
+    arrivals = [horizon_start] * num_nodes
     routes: list[list[int]] = []
     while unserved:
         route: list[int] = []
         current = 0
         load = 0
-        clock = HORIZON_START
+        clock = horizon_start
         while True:
             feasible: list[tuple[float, int, float]] = []
             for customer in unserved:
                 demand = demands[customer]
                 arrival = clock + fastest[current][customer]
                 completion = arrival + service_times[customer]
-                if load + demand <= capacity and completion + fastest[customer][0] <= HORIZON_END:
+                if load + demand <= capacity and completion + fastest[customer][0] <= horizon_end:
                     feasible.append((fastest[current][customer], customer, arrival))
             if not feasible:
                 break
@@ -127,6 +130,64 @@ def construct_anchor_routes(
     return routes, arrivals
 
 
+def construct_window_anchor_routes(
+    fastest: list[list[float]],
+    demands: list[int],
+    capacity: int,
+    service_times: list[int],
+    time_windows: list[tuple[int, int]],
+    *,
+    horizon_start: float = HORIZON_START,
+    horizon_end: float = HORIZON_END,
+) -> list[list[int]]:
+    """Deterministic anchor routes that respect given time windows (waiting allowed).
+
+    The window-aware counterpart of :func:`construct_anchor_routes`, for
+    windows that were not built around any route (the ``reachable_interval``
+    method): a route extends to the nearest unserved customer that fits the
+    capacity, can start service by its deadline (after waiting for its
+    earliest time) and can still return to the depot (node 0) by the horizon
+    end. Ties break on customer index. Raises ``ValueError`` when a customer
+    cannot even be served alone.
+    """
+    num_nodes = len(fastest)
+    if not (len(demands) == len(service_times) == len(time_windows) == num_nodes):
+        raise ValueError("fastest, demands, service_times and time_windows must have identical dimensions")
+    unserved = set(range(1, num_nodes))
+    routes: list[list[int]] = []
+    while unserved:
+        route: list[int] = []
+        current = 0
+        load = 0
+        clock = horizon_start
+        while True:
+            best: tuple[float, int, float] | None = None
+            for customer in unserved:
+                earliest, latest = time_windows[customer]
+                start = max(clock + fastest[current][customer], earliest)
+                if (
+                    load + demands[customer] <= capacity
+                    and start <= latest
+                    and start + service_times[customer] + fastest[customer][0] <= horizon_end
+                ):
+                    candidate = (fastest[current][customer], customer, start)
+                    if best is None or candidate[:2] < best[:2]:
+                        best = candidate
+            if best is None:
+                break
+            _, customer, start = best
+            route.append(customer)
+            unserved.remove(customer)
+            load += demands[customer]
+            clock = start + service_times[customer]
+            current = customer
+        if not route:
+            customer = min(unserved)
+            raise ValueError(f"customer {customer} cannot be served within its window and the horizon")
+        routes.append(route)
+    return routes
+
+
 def validate_static_anchor(
     routes: list[list[int]],
     fastest: list[list[float]],
@@ -134,6 +195,9 @@ def validate_static_anchor(
     capacity: int,
     service_times: list[int],
     time_windows: list[tuple[int, int]],
+    *,
+    horizon_start: float = HORIZON_START,
+    horizon_end: float = HORIZON_END,
 ) -> None:
     """Hard-check a static anchor certificate against its generated windows."""
     expected = set(range(1, len(fastest)))
@@ -144,7 +208,7 @@ def validate_static_anchor(
         load = sum(demands[customer] for customer in route)
         if load > capacity:
             raise AssertionError(f"anchor route load {load} exceeds capacity {capacity}")
-        clock = HORIZON_START
+        clock = horizon_start
         previous = 0
         for customer in route:
             arrival = clock + fastest[previous][customer]
@@ -156,7 +220,7 @@ def validate_static_anchor(
                 )
             clock += service_times[customer]
             previous = customer
-        if clock + fastest[previous][0] > HORIZON_END:
+        if clock + fastest[previous][0] > horizon_end:
             raise AssertionError("anchor route returns after the horizon end")
 
 

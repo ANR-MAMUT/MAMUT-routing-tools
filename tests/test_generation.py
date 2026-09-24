@@ -4,6 +4,7 @@ writer round-trips, and the fixture-city end-to-end pipeline."""
 from __future__ import annotations
 
 import json
+import math
 import random
 from pathlib import Path
 
@@ -117,9 +118,21 @@ def test_vrptw_fields_are_deterministic_and_feasible(tw_method: str) -> None:
     n = 12
     travel = [[0 if i == j else rng.randint(60, 1800) for j in range(n)] for i in range(n)]
     seed_parts = ("base", "place", 0, tw_method, HORIZON_START, HORIZON_END, "v1")
-    service_a, windows_a, params_a = generate_vrptw_fields(seed_parts, travel, HORIZON_START, HORIZON_END, tw_method)
-    service_b, windows_b, _params_b = generate_vrptw_fields(seed_parts, travel, HORIZON_START, HORIZON_END, tw_method)
+    demands = [0] + [1] * (n - 1)
+    fields = {"demands": demands, "capacity": 4}
+    service_a, windows_a, params_a = generate_vrptw_fields(
+        seed_parts, travel, HORIZON_START, HORIZON_END, tw_method, **fields
+    )
+    service_b, windows_b, _params_b = generate_vrptw_fields(
+        seed_parts, travel, HORIZON_START, HORIZON_END, tw_method, **fields
+    )
     assert service_a == service_b and windows_a == windows_b
+    # The persisted anchors cover every customer once and respect capacity; the
+    # derivation already validated them against the final windows.
+    anchors = params_a["anchor_routes"]
+    assert sorted(c for route in anchors for c in route) == list(range(1, n))
+    assert all(sum(demands[c] for c in route) <= 4 for route in anchors)
+    assert params_a["anchor_policy"].endswith("nearest-neighbour")
     assert windows_a[0] == (HORIZON_START, HORIZON_END)
     for i in range(1, n):
         e, latest = windows_a[i]
@@ -128,6 +141,32 @@ def test_vrptw_fields_are_deterministic_and_feasible(tw_method: str) -> None:
         assert e >= HORIZON_START + travel[0][i] or e == latest
         assert latest <= HORIZON_END - service_a[i] - travel[i][0] or e == latest
     assert params_a["tw_method"] == tw_method
+
+
+def test_route_centered_windows_stay_route_centered_at_large_n() -> None:
+    """Audit I1-tools-generation-03: one capacity-agnostic tour ran past the horizon
+    beyond about 80 customers, so most windows became the whole feasible interval."""
+    rng = random.Random(5)
+    n = 400
+    points = [(rng.uniform(0, 8000), rng.uniform(0, 8000)) for _ in range(n)]
+    travel = [[round(math.dist(a, b) / 10.0) for b in points] for a in points]
+    demands = [0] + [rng.randint(1, 10) for _ in range(n - 1)]
+    service, windows, params = generate_vrptw_fields(
+        ("big", "place", 0, "route_centered", HORIZON_START, HORIZON_END, "v1"),
+        travel,
+        HORIZON_START,
+        HORIZON_END,
+        "route_centered",
+        demands=demands,
+        capacity=60,
+    )
+    whole = sum(
+        1
+        for i in range(1, n)
+        if windows[i] == (HORIZON_START + travel[0][i], HORIZON_END - service[i] - travel[i][0])
+    )
+    assert whole < 0.05 * n
+    assert len(params["anchor_routes"]) > 1
 
 
 def test_stable_seed_is_deterministic_and_sensitive() -> None:
