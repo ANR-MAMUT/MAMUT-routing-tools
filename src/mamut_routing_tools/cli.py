@@ -242,9 +242,14 @@ def solve_cmd(
     solver: Annotated[str, typer.Option("--solver", help="pyvrp (CVRP/VRPTW) or kayros (TDVRPTW/TDVRP Duration, exact/anytime BPC-seeded).")] = "pyvrp",
     update_bks: Annotated[bool, typer.Option("--update-bks/--no-update-bks", help="Write a BKS file next to the instance when the solution improves it.")] = False,
 ) -> None:
-    """Solve an instance: PyVRP via mamut-routing-lib, or KAYROS for TD instances."""
-    import inspect
+    """Solve an instance: PyVRP via mamut-routing-lib, or KAYROS for TD instances.
 
+    For PyVRP, "cost" is the reference checker's cost of the routes (the
+    solver's own objective, on arc costs scaled to integers for float
+    matrices, is "solver_cost"); with --update-bks, "bks_update" reports the
+    store's action (created, replaced or kept_existing, with "tie" when the
+    stored BKS costs exactly the same) and the BKS path.
+    """
     if solver == "kayros":
         try:
             import kayros
@@ -280,36 +285,54 @@ def solve_cmd(
         typer.echo(f"Unknown solver '{solver}'; use pyvrp or kayros.", err=True)
         raise typer.Exit(code=1)
 
-    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.artifacts import (
+        get_instance_identifier,
+        hydrate_collection_instance,
+        load_benchmark_instance,
+    )
+    from mamut_routing_lib.checker import check_solution
     from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.models import BenchmarkSolution
     from mamut_routing_lib.solvers import pyvrp as lib_pyvrp
 
     instance = load_benchmark_instance(instance_path)
     objective_function = ObjectiveFunction(objective)
     kwargs: dict = {"time_limit_s": time_limit, "seed": seed, "objective_function": objective_function}
-    # Released lib versions predate collection dispatch; pass instance_path
-    # only when the installed wrapper accepts it.
-    if "instance_path" in inspect.signature(lib_pyvrp.solve_instance).parameters:
-        kwargs["instance_path"] = instance_path
     if update_bks:
-        result, bks_update = lib_pyvrp.solve_and_update_bks(instance, instance_path=instance_path, authors="mamut-routing-tools user", **{k: v for k, v in kwargs.items() if k != "instance_path"})
+        result, bks_update = lib_pyvrp.solve_and_update_bks(
+            instance, instance_path=instance_path, authors="mamut-routing-tools user", **kwargs
+        )
     else:
-        result, bks_update = lib_pyvrp.solve_instance(instance, **kwargs), None
+        result, bks_update = lib_pyvrp.solve_instance(instance, instance_path=instance_path, **kwargs), None
+    checked = None
+    if result.routes:
+        checked = check_solution(
+            hydrate_collection_instance(instance, instance_path),
+            BenchmarkSolution(instance_name=get_instance_identifier(instance), routes=result.routes, cost=None),
+        )
     payload = {
-        "ok": result.solver_is_feasible,
+        "ok": bool(result.solver_is_feasible and checked is not None and checked.is_valid()),
         "method": result.method,
         "objective_function": result.objective_function,
-        "cost": result.solver_cost,
+        "cost": checked.routing_cost if checked is not None and checked.is_valid() else None,
+        "solver_cost": result.solver_cost,
+        "validation": checked.status.value if checked is not None else "no-solution",
         "routes": result.routes,
         "n_routes": result.route_count,
         "wall_time": round(result.wall_time, 2),
         "metadata": result.metadata,
     }
-    if bks_update is not None:
-        payload["bks_update"] = {
-            "improved": bool(getattr(bks_update, "improved", False)),
-            "path": str(getattr(bks_update, "bks_path", "")),
-        }
+    if update_bks:
+        payload["bks_update"] = (
+            {
+                "action": bks_update.action,
+                "tie": bks_update.tie,
+                "path": str(bks_update.path),
+                "candidate_cost": bks_update.candidate_cost,
+            }
+            if bks_update is not None
+            else {"action": "skipped", "reason": "no feasible, checker-valid solution"}
+        )
     typer.echo(json.dumps(payload, indent=1))
 
 
