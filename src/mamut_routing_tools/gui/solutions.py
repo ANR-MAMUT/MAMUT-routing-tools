@@ -1,4 +1,13 @@
-"""Persistent, checker-validated solution runs and comparisons."""
+"""Persistent, checker-validated solution runs and comparisons.
+
+A run is tied to the instance file it was validated on: schema 2 records
+``instance_sha256`` (the file's sha256 when the solve or import started). A
+run whose instance file no longer has that hash -- the base was regenerated
+or replaced -- is *stale*: it is listed with ``stale: true`` and refused by
+compare and render, instead of showing an old verdict and cost on new
+customers. Schema 1 runs have no hash; they are re-validated against the
+current file once per file content and the verdict is cached in the record.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +26,26 @@ from mamut_routing_tools.workspace import solutions_dir
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+#: sha256 of instance files keyed by (path, size, mtime_ns): listings hash
+#: every run's instance, and an n=1000 instance file is megabytes.
+_FILE_SHA256_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def file_sha256(path: str | Path) -> str | None:
+    """sha256 of a file's bytes (cached on size and mtime); ``None`` if it does not exist."""
+    target = Path(path)
+    try:
+        stat = target.stat()
+    except FileNotFoundError:
+        return None
+    key = (str(target.resolve()), stat.st_size, stat.st_mtime_ns)
+    cached = _FILE_SHA256_CACHE.get(key)
+    if cached is None:
+        cached = hashlib.sha256(target.read_bytes()).hexdigest()
+        _FILE_SHA256_CACHE[key] = cached
+    return cached
 
 
 def instance_id_for(folder: Path, base_name: str) -> str:
@@ -195,14 +224,18 @@ class SolutionStore:
         metadata: dict[str, Any] | None = None,
         job_id: str | None = None,
         source: str = "solver",
+        instance_sha256: str | None = None,
     ) -> dict[str, Any]:
+        """Persist a run. ``instance_sha256`` should be hashed *before* solving or
+        importing, so a concurrent regeneration marks the run stale at once."""
         run_id = uuid.uuid4().hex
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": run_id,
             "instance_id": instance_id,
             "instance_name": instance_name,
             "instance_path": str(instance_path),
+            "instance_sha256": instance_sha256 or file_sha256(instance_path),
             "created_at": _now(),
             "source": source,
             "solver": solver,
@@ -219,7 +252,7 @@ class SolutionStore:
             "job_id": job_id,
         }
         _atomic_json(self._instance_dir(instance_id) / f"{run_id}.json", record)
-        return record
+        return {**record, "stale": False, "stale_reason": None}
 
     def get(self, instance_id: str, run_id: str) -> dict[str, Any]:
         if len(run_id) != 32 or any(character not in string.hexdigits for character in run_id):
@@ -227,17 +260,67 @@ class SolutionStore:
         path = self._instance_dir(instance_id) / f"{run_id}.json"
         if not path.is_file():
             raise KeyError(run_id)
-        return json.loads(path.read_text(encoding="utf-8"))
+        return self._annotated(json.loads(path.read_text(encoding="utf-8")), path)
 
     def list(self, instance_id: str) -> list[dict[str, Any]]:
+        """Every run of the instance, newest first, each with ``stale`` / ``stale_reason``."""
         records: list[dict[str, Any]] = []
         for path in self._instance_dir(instance_id).glob("*.json"):
             try:
-                records.append(json.loads(path.read_text(encoding="utf-8")))
+                record = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
+            records.append(self._annotated(record, path))
         records.sort(key=lambda value: str(value.get("created_at") or ""), reverse=True)
         return records
+
+    def current(self, instance_id: str) -> list[dict[str, Any]]:
+        """The runs still valid for the instance on disk."""
+        return [record for record in self.list(instance_id) if not record["stale"]]
+
+    def _annotated(self, record: dict[str, Any], path: Path) -> dict[str, Any]:
+        stale, reason = self.run_staleness(record, path)
+        return {**record, "stale": stale, "stale_reason": reason}
+
+    def run_staleness(self, record: dict[str, Any], path: Path | None = None) -> tuple[bool, str | None]:
+        """Whether ``record`` still describes the instance file on disk, and why not."""
+        instance_path = Path(str(record.get("instance_path") or ""))
+        current = file_sha256(instance_path) if str(instance_path) else None
+        if current is None:
+            return True, "the instance file no longer exists"
+        recorded = record.get("instance_sha256")
+        if recorded:
+            if recorded != current:
+                return True, "the instance was regenerated after this run"
+            return False, None
+        # Schema 1: no hash. Re-validate once per instance content, cache the verdict.
+        cached = record.get("legacy_check") or {}
+        if cached.get("instance_sha256") == current:
+            return bool(cached.get("stale")), cached.get("reason")
+        stale, reason = _recheck_legacy_run(record, instance_path)
+        record["legacy_check"] = {"instance_sha256": current, "stale": stale, "reason": reason, "checked_at": _now()}
+        target = path or self._instance_dir(str(record.get("instance_id"))) / f"{record.get('run_id')}.json"
+        if target.is_file():
+            _atomic_json(target, {key: value for key, value in record.items() if key not in ("stale", "stale_reason")})
+        return stale, reason
+
+
+def _recheck_legacy_run(record: dict[str, Any], instance_path: Path) -> tuple[bool, str | None]:
+    """A hash-less (schema 1) run is current iff the checker still gives its verdict and cost."""
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+
+    try:
+        instance = load_benchmark_instance(instance_path)
+        routes = [[int(node) for node in route] for route in record.get("routes") or []]
+        report = validate_solution(instance, routes, instance_path=instance_path)
+    except Exception as error:  # noqa: BLE001 - any failure means the run cannot be trusted
+        return True, f"the run no longer fits the instance ({error})"
+    was_valid = bool((record.get("validation") or {}).get("valid"))
+    if bool(report.get("valid")) != was_valid:
+        return True, "the checker's verdict changed: the instance was regenerated after this run"
+    if was_valid and record.get("cost") is not None and report.get("routing_cost") != record.get("cost"):
+        return True, "the checker's cost changed: the instance was regenerated after this run"
+    return False, None
 
 
 def _route_edges(routes: list[list[int]], depot: int) -> set[tuple[int, int]]:

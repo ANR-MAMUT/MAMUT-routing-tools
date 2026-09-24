@@ -58,6 +58,18 @@ def write_cvrplib(
     matrix: list[list[int]],
     capacity: int,
 ) -> None:
+    Path(path).write_text(cvrplib_text(name, comment, coords, demands, matrix, capacity), encoding="utf-8")
+
+
+def cvrplib_text(
+    name: str,
+    comment: str,
+    coords: list[tuple[float, float]],
+    demands: list[int],
+    matrix: list[list[int]],
+    capacity: int,
+) -> str:
+    """The CVRPLIB ``.vrp`` text :func:`write_cvrplib` writes."""
     lines = [
         f"NAME : {name}",
         "TYPE : CVRP",
@@ -74,7 +86,7 @@ def write_cvrplib(
     lines.append("DEMAND_SECTION")
     lines.extend(f"{i + 1} {demand}" for i, demand in enumerate(demands))
     lines.append("DEPOT_SECTION\n1\n-1\nEOF")
-    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
 
 
 def write_instance_metadata(

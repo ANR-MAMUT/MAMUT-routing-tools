@@ -86,8 +86,20 @@ def generate_single_cmd(
     tw_method: Annotated[str, typer.Option("--tw-method", help="route_centered or reachable_interval.")] = "route_centered",
     osm_path: Annotated[Optional[Path], typer.Option("--osm-path", help="Explicit OSM extract path.")] = None,
     output_dir: Annotated[Optional[Path], typer.Option("--output-dir", help="Workspace directory (default: the resolved workspace).")] = None,
+    replace_existing: Annotated[
+        bool,
+        typer.Option(
+            "--replace/--no-replace",
+            help="When an instance of the same name but different content exists: replace it, deleting "
+            "its derived twins and BKS (--replace), or keep it and write <name>-2 (default).",
+        ),
+    ] = False,
 ) -> None:
-    """Generate one instance (3 metric .vrp files + meta + manifest + .vrp.json)."""
+    """Generate one instance (3 metric .vrp files + meta + manifest + .vrp.json).
+
+    The result's "action" is created, unchanged (identical content already there,
+    nothing written), renamed or replaced.
+    """
     from mamut_routing_tools.generation.single import GenerationRequest, generate_single_instance
     from mamut_routing_tools.generation.vrptw import derive_vrptw_from_cvrp
     from mamut_routing_tools.generation.writers import slugify
@@ -105,7 +117,9 @@ def generate_single_cmd(
         depot_mode=depot_mode,
         customer_mode=customer_mode,
     )
-    result = generate_single_instance(request, instances_dir(workspace))
+    result = generate_single_instance(
+        request, instances_dir(workspace), on_existing="replace" if replace_existing else "rename"
+    )
     if vrptw:
         result["vrptw"] = derive_vrptw_from_cvrp(
             result["folder"],

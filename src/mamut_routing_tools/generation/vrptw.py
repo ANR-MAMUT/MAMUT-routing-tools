@@ -13,6 +13,7 @@ customers and left most windows equal to the whole feasible interval.
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 from datetime import datetime
 from pathlib import Path
@@ -317,6 +318,21 @@ def write_cvrptw_vrp(
     service_times: list[int],
     time_windows: list[tuple[int, int]],
 ) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        cvrptw_text(parsed, instance_name, comment, service_times, time_windows), encoding="utf-8"
+    )
+
+
+def cvrptw_text(
+    parsed: ParsedCvrpInstance,
+    instance_name: str,
+    comment: str,
+    service_times: list[int],
+    time_windows: list[tuple[int, int]],
+) -> str:
+    """The CVRPTW ``.vrp`` text :func:`write_cvrptw_vrp` writes."""
     lines = [f"NAME : {instance_name}", "TYPE : CVRPTW"]
     if comment:
         lines.append(f"COMMENT : {comment}")
@@ -339,9 +355,7 @@ def write_cvrptw_vrp(
     lines.append("SERVICE_TIME_SECTION")
     lines.extend(f"{i + 1} {service}" for i, service in enumerate(service_times))
     lines.extend(["DEPOT_SECTION", str(parsed.depot_node_index), "-1", "EOF"])
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
 
 
 def derive_vrptw_from_cvrp(
@@ -381,14 +395,33 @@ def derive_vrptw_from_cvrp(
 
     vrptw_name = f"{base}_fastest_vrptw"
     vrptw_filename = f"{base}_fastest.cvrptw.vrp"
-    write_cvrptw_vrp(
-        folder / vrptw_filename,
+    text = cvrptw_text(
         parsed,
         vrptw_name,
         f"VRPTW derived from {base}_fastest ({tw_method})",
         service_times,
         time_windows,
     )
+    manifest_path = folder / f"{base}_vrptw_manifest.json"
+    twin_path = folder / vrptw_filename
+    if twin_path.is_file() and manifest_path.is_file():
+        # Deterministic: an identical derivation is left untouched, so its
+        # files (and the fingerprints derive-td records) do not churn.
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except ValueError:
+            previous = {}
+        if twin_path.read_text(encoding="utf-8") == text and previous.get("derivation") == json.loads(
+            json.dumps(stochastic_params)
+        ):
+            return {
+                "ok": True,
+                "action": "unchanged",
+                "vrptw_file": vrptw_filename,
+                "manifest": manifest_path.name,
+                "derivation": stochastic_params,
+            }
+    twin_path.write_text(text, encoding="utf-8")
     manifest = {
         "generated_at": datetime.now().isoformat(),
         "base_name": base,
@@ -396,9 +429,10 @@ def derive_vrptw_from_cvrp(
         "vrptw_file": vrptw_filename,
         "derivation": stochastic_params,
     }
-    write_json(folder / f"{base}_vrptw_manifest.json", manifest)
+    write_json(manifest_path, manifest)
     return {
         "ok": True,
+        "action": "derived",
         "vrptw_file": vrptw_filename,
         "manifest": f"{base}_vrptw_manifest.json",
         "derivation": stochastic_params,

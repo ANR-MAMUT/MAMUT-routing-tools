@@ -23,12 +23,14 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from mamut_routing_tools.generation.artifacts import belongs_to_base
 from mamut_routing_tools.gui.jobs import JobContext, JobManager
 from mamut_routing_tools.gui.preferences import PreferenceStore
 from mamut_routing_tools.gui.solutions import (
     SolutionImportError,
     SolutionStore,
     compare_solution_records,
+    file_sha256,
     instance_id_for,
     normalize_imported_routes,
     parse_solution_text,
@@ -436,6 +438,18 @@ def _fetch_osm_payload(payload: dict[str, Any], workspace: Path, context: JobCon
     return result
 
 
+def _stale_message(run: dict[str, Any]) -> str:
+    return (
+        f"Run {run.get('run_id')} is stale: {run.get('stale_reason') or 'the instance changed'}. "
+        "Solve or import it again on the current instance."
+    )
+
+
+def _on_existing(payload: dict[str, Any]) -> str:
+    """The GUI's "Replace existing" choice: replace a same-named instance, or keep it and rename."""
+    return "replace" if payload.get("overwrite") else "rename"
+
+
 def _generate_single_payload(
     payload: dict[str, Any], workspace: Path, context: JobContext | None = None
 ) -> dict[str, Any]:
@@ -446,7 +460,9 @@ def _generate_single_payload(
         context.progress("Selecting customers and materializing matrices")
         context.check_cancelled()
     generation_request = _request_to_generation(payload, workspace)
-    result = generate_single_instance(generation_request, instances_dir(workspace))
+    result = generate_single_instance(
+        generation_request, instances_dir(workspace), on_existing=_on_existing(payload)
+    )
     if payload.get("deriveVrptw"):
         if context is not None:
             context.progress("Deriving VRPTW twin")
@@ -553,6 +569,7 @@ def _generate_bulk_payload(
             output_root=instances_dir(workspace),
             base_seed=int(payload.get("seed") or 0),
             context=context,
+            on_existing=_on_existing(payload),
         )
         for item in result.get("results", []):
             item["instance_id"] = instance_id_for(Path(item["folder"]), item["base_name"])
@@ -584,6 +601,7 @@ def _generate_bulk_payload(
         problem_type="vrptw" if payload.get("deriveVrptw") else "cvrp",
         tw_method=str(payload.get("twMethod") or "route_centered").lower(),
         context=context,
+        on_existing=_on_existing(payload),
     )
     for item in result.get("results", []):
         item["instance_id"] = instance_id_for(Path(item["folder"]), item["base_name"])
@@ -735,7 +753,8 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         only: the VRPTW twin derivation manifests mark their base instead."""
         records = _workspace_instances(workspace)
         for record in records:
-            record["solution_count"] = len(solutions.list(str(record["instance_id"])))
+            # Runs of an earlier version of the instance (regenerated) do not count.
+            record["solution_count"] = len(solutions.current(str(record["instance_id"])))
         return {"ok": True, "instances": records}
 
     @app.get("/api/workbench/osmdata/audit")
@@ -832,7 +851,8 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(folder.iterdir()):
-                if any(path.name.startswith(base) for base in bases):
+                # Exact ownership: "...-k2" must not ship "...-k25" or "...-k2-2".
+                if path.is_file() and any(belongs_to_base(path.name, base) for base in bases):
                     archive.write(path, path.name)
         return buffer.getvalue()
 
@@ -882,11 +902,13 @@ def create_app(workspace: Path, token: str) -> FastAPI:
     async def generation_bulk_download(request: Request) -> Any:
         payload = await request.json()
         bases = [str(name) for name in (payload.get("base_names") or payload.get("baseNames") or [])]
+        if not bases:
+            return _payload_error(400, "Select at least one generated instance to download")
         root = instances_dir(workspace, create=False)
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(root.rglob("*")):
-                if path.is_file() and (not bases or any(path.name.startswith(base) for base in bases)):
+                if path.is_file() and any(belongs_to_base(path.name, base) for base in bases):
                     archive.write(path, path.relative_to(root).as_posix())
         return Response(
             content=buffer.getvalue(),
@@ -993,6 +1015,9 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             record = _workspace_instance(workspace, instance_id)
             candidate = _solution_or_reference(solutions, record, instance_id, request.candidate_run_id)
             reference = _solution_or_reference(solutions, record, instance_id, request.reference_run_id)
+            stale = next((run for run in (candidate, reference) if run.get("stale")), None)
+            if stale is not None:
+                return _payload_error(409, _stale_message(stale))
             instance_path = Path(str(candidate.get("instance_path") or reference.get("instance_path") or ""))
             from mamut_routing_lib.artifacts import load_benchmark_instance
             from mamut_routing_lib.solvers.pyvrp import hydrate_collection_instance
@@ -1011,6 +1036,8 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         try:
             record = _workspace_instance(workspace, instance_id)
             solution = _solution_or_reference(solutions, record, instance_id, run_id)
+            if solution.get("stale"):
+                return _payload_error(409, _stale_message(solution))
             folder = Path(record["folder"])
             meta_path = folder / str(record["files"]["meta"])
             if not meta_path.is_file() or not _contained(meta_path, folder):
@@ -1121,6 +1148,7 @@ def _import_solution_payload(
 
     metric = str(payload.get("metric") or "fastest").lower()
     instance_path = _instance_variant_path(record, metric)
+    instance_sha256 = file_sha256(instance_path)
     objective = ObjectiveFunction(str(payload.get("objective_function") or "MonoCost"))
     instance = load_benchmark_instance(instance_path)
 
@@ -1161,6 +1189,7 @@ def _import_solution_payload(
         validation=validation,
         metadata={"metric": metric, "imported_from": filename or "pasted", "label": label},
         source="imported",
+        instance_sha256=instance_sha256,
     )
     return {
         "ok": True,
@@ -1305,6 +1334,8 @@ def _solve_workspace_payload(
     record = _workspace_instance(workspace, instance_id)
     metric = str(payload.get("metric") or "fastest").lower()
     instance_path = _instance_variant_path(record, metric)
+    # Hashed before the search: a regeneration during it leaves the run stale.
+    instance_sha256 = file_sha256(instance_path)
     monitor = None
     if context is not None:
         context.progress(f"Solving {record['base_name']} ({metric})")
@@ -1331,6 +1362,7 @@ def _solve_workspace_payload(
         validation=result["validation"],
         metadata={**(result.get("metadata") or {}), "metric": metric},
         job_id=context.job_id if context is not None else None,
+        instance_sha256=instance_sha256,
     )
     return {**result, "instance_id": instance_id, "metric": metric, "solution": solution}
 

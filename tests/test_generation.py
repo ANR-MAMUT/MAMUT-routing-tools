@@ -1103,3 +1103,28 @@ def test_generated_depot_is_never_a_synthetic_crop_node(tmp_path: Path) -> None:
             seed=3,
         )
         assert build_generation_selection(request).vertices[0] not in synthetic
+
+
+def test_artifact_ownership_is_exact() -> None:
+    from mamut_routing_tools.generation.artifacts import belongs_to_base
+
+    base = "lorient_poi-n101-k2"
+    owned = [
+        f"{base}_fastest.vrp",
+        f"{base}_meta.json",
+        f"{base}_fastest.cvrptw.vrp",
+        f"{base}_shortest.bks.MonoCost.json",
+        f"{base}.road.json.gz",
+        f"{base}.traffic-bpr-heavy.json.gz",
+        f"{base}-wave-light.vrp.json",
+        f"{base}-bpr-moderate.tdvrp.vrp.json",
+    ]
+    siblings = [
+        "lorient_poi-n101-k25_fastest.vrp",
+        f"{base}-2_fastest.vrp",
+        f"{base}-s7_meta.json",
+        f"{base}-2-bpr-heavy.vrp.json",
+        f"{base}.road.json.gz.partial",
+    ]
+    assert all(belongs_to_base(name, base) for name in owned)
+    assert not any(belongs_to_base(name, base) for name in siblings)
