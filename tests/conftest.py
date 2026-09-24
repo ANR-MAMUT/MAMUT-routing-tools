@@ -93,3 +93,56 @@ def fixture_osm_path(tmp_path: Path) -> Path:
     path = tmp_path / "Testville.osm"
     path.write_text(FIXTURE_OSM, encoding="utf-8")
     return path
+
+
+def grid_osm_text(rows: int, cols: int, *, spacing_deg: float = 0.0015) -> str:
+    """A ``rows`` x ``cols`` grid city of two-way residential streets.
+
+    Every block edge is its own way, so every intersection is a graph vertex
+    (nothing is contracted) and the city is strongly connected. At the default
+    spacing a block is about 120 m by 165 m. Used by the family / derive-td
+    tests that need a city larger than ``FIXTURE_OSM`` without an OSM download.
+    """
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<osm version="0.6" generator="test">',
+        (
+            f'  <bounds minlat="44.999" minlon="3.999" maxlat="{45.0 + spacing_deg * rows:.6f}" '
+            f'maxlon="{4.0 + spacing_deg * cols:.6f}"/>'
+        ),
+    ]
+
+    def node_id(row: int, col: int) -> int:
+        return 1 + row * cols + col
+
+    for row in range(rows):
+        for col in range(cols):
+            lines.append(
+                f'  <node id="{node_id(row, col)}" lat="{45.0 + spacing_deg * row:.6f}" '
+                f'lon="{4.0 + spacing_deg * col:.6f}"/>'
+            )
+    way = 100_000
+    for row in range(rows):
+        for col in range(cols):
+            for d_row, d_col in ((0, 1), (1, 0)):
+                if row + d_row < rows and col + d_col < cols:
+                    way += 1
+                    lines.append(
+                        f'  <way id="{way}"><nd ref="{node_id(row, col)}"/>'
+                        f'<nd ref="{node_id(row + d_row, col + d_col)}"/>'
+                        '<tag k="highway" v="residential"/></way>'
+                    )
+    lines.append("</osm>")
+    return "\n".join(lines) + "\n"
+
+
+@pytest.fixture()
+def grid_osm_path(tmp_path: Path):
+    """Factory: ``grid_osm_path(rows, cols, name="Gridville")`` writes a grid city and returns its path."""
+
+    def make(rows: int, cols: int, name: str = "Gridville") -> Path:
+        path = tmp_path / f"{name}.osm"
+        path.write_text(grid_osm_text(rows, cols), encoding="utf-8")
+        return path
+
+    return make
