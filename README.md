@@ -17,6 +17,23 @@ Beta. All benchmark generation now lives here: the website's former Julia backen
 - `mamut-tools solve`: PyVRP solving of generated and benchmark instances via mamut-routing-lib; with the `kayros` extra (`pip install 'mamut-routing-tools[kayros]'`), [KAYROS](https://pypi.org/project/kayros/) solves the time-dependent instances (Duration objective, anytime with exact certification tooling).
 - `mamut-tools convert`: converters for external benchmark distributions (`blauth2024`). The inverse direction, exporting any `.vrp.json` to the classic CVRPLIB `.vrp` (or Solomon `.txt`) for solvers that do not read the lib contract, lives in mamut-routing-lib as `mamut-routing export vrp`; the workbench GUI exposes it as "Download .vrp".
 - `mamut-tools gui`: a CLI-owned local workbench GUI (loopback server with token security) for fetching cities, previewing, generating, solving, and rendering road-following routes on a map. Long operations run as persistent jobs with real state/logs; solver runs are checker-validated, retained across restarts, and comparable by objective, fleet, loads, route edges, and customer grouping.
+### Regenerating, deriving and saved runs (0.6.0)
+
+- **No silent overwrite.** An instance name encodes city, method, size and the minimum fleet `k`, so another seed,
+  demand type or depot often gives the same name. `generate single` (and the GUI, and bulk generation) compare the
+  new instance with the one on disk by content: identical content is left untouched (`"action": "unchanged"`),
+  different content is written as `<name>-2`, `-3`... (`renamed`), or with `--replace` (the GUI's "Replace
+  existing") replaces it after deleting everything derived from it: VRPTW and TD twins, BKS (`replaced`).
+- **Saved runs follow their instance.** A solver or imported run records the sha256 of the instance file it was
+  validated on; after a replace the run is listed as stale, no longer counted, and refused by compare and render.
+- **Feasible anchors.** `derive-vrptw` centres `route_centered` windows on capacity-and-horizon-feasible routes and
+  stores them (`anchor_routes`); `derive-td` certifies the windows along them (splitting a route that no longer
+  returns by the horizon under traffic), so n = 200 and beyond derive. Failures raise `TDDerivationError`
+  (`derive-td` exits 1) and nothing is written: the twins and sidecars are staged and verified first. The twins
+  record the sha256 of their inputs; a re-run after the base changed re-derives them instead of keeping them.
+- **Family builds are all or nothing.** `family.build_td` stages the VRPTW file, overlays and twins, verifies them,
+  then publishes; an existing `atf_sha256` is reused only when it pins exactly the same road graph and overlay.
+
 The traffic models (`bpr` commuter simulation, `wave` rush-hour dip) and the road-graph time-dependent travel model live in `mamut_routing_tools.td`; the family build engine (base publish, VRPTW derivation, TD-twin materialization) lives in `mamut_routing_tools.family`.
 
 ## Install
@@ -67,7 +84,7 @@ To find out which build you are actually running, use `--version` (or `-V`):
 
 ```bash
 uv run mamut-tools --version
-# mamut-tools 0.5.0 (/path/to/MAMUT-routing-tools/src/mamut_routing_tools)
+# mamut-tools 0.6.0 (/path/to/MAMUT-routing-tools/src/mamut_routing_tools)
 ```
 
 It prints the version alongside the package location, which tells you whether you are on a PyPI install or an editable source checkout.
