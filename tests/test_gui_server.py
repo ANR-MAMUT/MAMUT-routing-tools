@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -1030,3 +1032,116 @@ def test_gui_shell_exposes_the_classic_vrp_export_controls(client: TestClient) -
     assert 'id="download-vrp"' in html
     assert 'id="download-vrp-euc2d"' in html
     assert "/export-vrp" in html
+
+
+def _generate(client: TestClient, **overrides) -> dict:
+    body = {"city": "Testville", "nCustomers": 4, "seed": 7, "method": "parametric_attach", "depotMode": "center"}
+    body.update(overrides)
+    generated = client.post("/api/workbench/generation/single", json=body).json()
+    assert generated["ok"], generated
+    return generated
+
+
+def _solve(client: TestClient, instance_id: str) -> str:
+    submitted = client.post(
+        "/api/jobs",
+        json={
+            "kind": "solve",
+            "payload": {"instance_id": instance_id, "metric": "fastest", "objective_function": "MonoCost", "time_limit": 1},
+        },
+    ).json()
+    job = _wait_for_job(client, submitted["job"]["job_id"])
+    assert job["status"] == "completed", job.get("error")
+    return job["result"]["solution"]["run_id"]
+
+
+def _solution_count(client: TestClient, instance_id: str) -> int:
+    listing = client.get("/api/workbench/instances").json()["instances"]
+    return next(entry for entry in listing if entry["instance_id"] == instance_id)["solution_count"]
+
+
+def test_regeneration_never_reattaches_old_runs(client: TestClient) -> None:
+    """Audit L-tools-gui-01: another seed / depot with the same k overwrote the base in place,
+    and the old run showed as valid with its old cost on the new customers."""
+    first = _generate(client)
+    assert first["action"] == "created"
+    run_id = _solve(client, first["instance_id"])
+    fastest = Path(first["folder"]) / first["files"]["fastest"]
+    original = fastest.read_bytes()
+
+    again = _generate(client)
+    assert again["action"] == "unchanged" and again["base_name"] == first["base_name"]
+    assert fastest.read_bytes() == original and _solution_count(client, first["instance_id"]) == 1
+
+    other = _generate(client, seed=1, depotMode="corner")
+    assert other["action"] == "renamed" and other["base_name"] == f"{first['base_name']}-2"
+    assert fastest.read_bytes() == original
+    assert _solution_count(client, first["instance_id"]) == 1
+
+    # "Replace existing": the same configuration now takes the original name.
+    replaced = _generate(client, seed=1, depotMode="corner", overwrite=True)
+    assert replaced["action"] == "replaced" and replaced["base_name"] == first["base_name"]
+    assert fastest.read_bytes() != original
+    runs = client.get(f"/api/instances/{first['instance_id']}/solutions").json()["runs"]
+    assert [run["stale"] for run in runs] == [True]
+    assert _solution_count(client, first["instance_id"]) == 0
+    rendered = client.post(f"/api/instances/{first['instance_id']}/solutions/{run_id}/render")
+    assert rendered.status_code == 409
+
+
+def test_replacing_an_instance_marks_its_runs_stale(client: TestClient) -> None:
+    first = _generate(client)
+    run_id = _solve(client, first["instance_id"])
+    # Regenerate the same name with other content: rewrite the fastest variant as
+    # a replace would, then check the run is flagged, uncounted and refused.
+    instance_file = Path(first["folder"]) / first["files"]["vrp_json"]["fastest"]
+    payload = json.loads(instance_file.read_text(encoding="utf-8"))
+    payload["demands"] = [0] + [demand + 1 for demand in payload["demands"][1:]]
+    instance_file.write_text(json.dumps(payload), encoding="utf-8")
+    runs = client.get(f"/api/instances/{first['instance_id']}/solutions").json()["runs"]
+    assert runs[0]["stale"] is True and "regenerated" in runs[0]["stale_reason"]
+    assert _solution_count(client, first["instance_id"]) == 0
+    assert client.post(f"/api/instances/{first['instance_id']}/solutions/{run_id}/render").status_code == 409
+    compared = client.post(
+        f"/api/instances/{first['instance_id']}/solutions/compare",
+        json={"candidate_run_id": run_id, "reference_run_id": run_id},
+    )
+    assert compared.status_code == 409
+
+
+def test_downloads_ship_exactly_the_requested_bases(client: TestClient) -> None:
+    """Audit L-tools-gui-03: a prefix match zipped sibling bases (k2 took k25 and k2-2)."""
+    first = _generate(client)
+    folder = Path(first["folder"])
+    base = first["base_name"]
+    for sibling in (f"{base}5", f"{base}-2"):
+        (folder / f"{sibling}_meta.json").write_text("{}", encoding="utf-8")
+    response = client.post(
+        "/api/workbench/generation/single-download", json={"folder": str(folder), "base_name": base}
+    )
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        names = archive.namelist()
+    assert names and all(name.startswith(f"{base}_") for name in names)
+    assert client.post("/api/workbench/generation/bulk-download", json={"base_names": []}).status_code == 400
+
+
+def test_legacy_runs_are_rechecked_once_and_cached(client: TestClient) -> None:
+    first = _generate(client)
+    run_id = _solve(client, first["instance_id"])
+    workspace = Path(client.get("/healthz").json()["workspace"])
+    run_file = next(workspace.rglob(f"{run_id}.json"))
+    record = json.loads(run_file.read_text(encoding="utf-8"))
+    record.pop("instance_sha256")
+    record["schema_version"] = 1
+    run_file.write_text(json.dumps(record), encoding="utf-8")
+
+    runs = client.get(f"/api/instances/{first['instance_id']}/solutions").json()["runs"]
+    assert runs[0]["stale"] is False
+    assert json.loads(run_file.read_text(encoding="utf-8"))["legacy_check"]["stale"] is False
+
+    instance_file = Path(first["folder"]) / first["files"]["vrp_json"]["fastest"]
+    payload = json.loads(instance_file.read_text(encoding="utf-8"))
+    payload["vehicle_capacity"] = 1  # the saved routes no longer fit
+    instance_file.write_text(json.dumps(payload), encoding="utf-8")
+    runs = client.get(f"/api/instances/{first['instance_id']}/solutions").json()["runs"]
+    assert runs[0]["stale"] is True

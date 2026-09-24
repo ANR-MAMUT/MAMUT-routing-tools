@@ -3,6 +3,7 @@ the port of the workbench's build_generation_selection + generate_single_instanc
 
 from __future__ import annotations
 
+import json
 import math
 import random
 from dataclasses import dataclass, field
@@ -32,12 +33,18 @@ from mamut_routing_tools.generation.select import (
     select_customers_poi,
     vertex_latlon,
 )
+from mamut_routing_tools.generation.artifacts import (
+    claim_lock,
+    content_sha256_of_texts,
+    instance_content_sha256,
+    purge_instance_artifacts,
+)
 from mamut_routing_tools.generation.writers import (
     build_vrp_json_payload,
+    cvrplib_text,
     instance_path_plan,
     parse_cvrp_vrp,
     slugify,
-    write_cvrplib,
     write_instance_metadata,
     write_json,
 )
@@ -834,7 +841,9 @@ def generate_single_instance(
     *,
     name_suffix: str = "",
     reserved_names: set[str] | None = None,
+    on_existing: str = "replace",
 ) -> dict[str, Any]:
+    """Select, then :func:`materialize_instance` (see it for ``on_existing``)."""
     selection = build_generation_selection(request)
     n_got = len(selection.vertices) - 1
     # Manual mode is sized by the picks themselves, so a requested n never applies.
@@ -850,7 +859,46 @@ def generate_single_instance(
         rng=random.Random(request.seed),
         name_suffix=name_suffix,
         reserved_names=reserved_names,
+        on_existing=on_existing,
     )
+
+
+ON_EXISTING_POLICIES = ("rename", "replace")
+
+
+def _claim_base(
+    folder: Path,
+    base: str,
+    content_sha256: str,
+    on_existing: str,
+    reserved_names: set[str] | None,
+) -> tuple[str, str]:
+    """The base name to write and the action: ``created``, ``unchanged``, ``renamed`` or ``replaced``.
+
+    Same content under the name: ``unchanged`` (nothing is written). Different
+    content: ``replace`` purges the old instance and every artifact derived
+    from it; ``rename`` takes the first ``<base>-2``, ``<base>-3``... that is
+    free or already holds this content.
+    """
+    existing = instance_content_sha256(folder, base)
+    if existing is None:
+        return base, "created"
+    if existing == content_sha256:
+        return base, "unchanged"
+    if on_existing == "replace":
+        purge_instance_artifacts(folder, base)
+        return base, "replaced"
+    counter = 2
+    while True:
+        candidate = f"{base}-{counter}"
+        held = instance_content_sha256(folder, candidate)
+        if held == content_sha256:
+            return candidate, "unchanged"
+        if held is None and (reserved_names is None or str(folder / candidate) not in reserved_names):
+            if reserved_names is not None:
+                reserved_names.add(str(folder / candidate))
+            return candidate, "renamed"
+        counter += 1
 
 
 def materialize_instance(
@@ -863,6 +911,7 @@ def materialize_instance(
     precomputed: dict[str, Any] | None = None,
     name_suffix: str = "",
     reserved_names: set[str] | None = None,
+    on_existing: str = "replace",
 ) -> dict[str, Any]:
     """Write the 3-metric .vrp set, _meta.json, _manifest.json and .vrp.json
     files for a selection; ``precomputed`` lets the bulk driver pass sliced
@@ -873,8 +922,19 @@ def materialize_instance(
     in this run. The final name is only known here -- it encodes ``route_count``,
     which follows from the drawn demands rather than from any request field -- so
     this is the only place that can guarantee two instances of one run never land
-    on the same files. Names claimed by *earlier* runs are untouched, keeping
-    regeneration of the same configuration idempotent."""
+    on the same files.
+
+    An instance of an *earlier* run under the same name is compared by content
+    (:func:`~mamut_routing_tools.generation.artifacts.instance_content_sha256`):
+    identical content is ``unchanged`` and nothing is written (regeneration of
+    one configuration stays idempotent); different content -- another seed,
+    demand type or depot giving the same ``k`` -- is ``renamed`` to
+    ``<base>-2``... or, with ``on_existing="replace"`` (the library default),
+    ``replaced`` after purging the old instance and everything derived from it
+    (VRPTW and TD twins, BKS). The result's ``action`` says which; the manifest
+    records ``content_sha256``."""
+    if on_existing not in ON_EXISTING_POLICIES:
+        raise ValueError(f"on_existing must be one of {ON_EXISTING_POLICIES}, got {on_existing!r}")
     graph = selection.graph
     params = selection.params
     vertices = selection.vertices
@@ -916,6 +976,67 @@ def materialize_instance(
         base = _claim_unique_name(folder, base, reserved_names)
     folder.mkdir(parents=True, exist_ok=True)
 
+    ref_str = f"LLA({ref.lat}, {ref.lon}, {ref.alt})"
+    matrices = {"shortest": d_short, "fastest": d_fast, "euclidean": d_eucl}
+    comments = {
+        "shortest": f"Shortest distances; ENU ref: {ref_str}",
+        "fastest": f"Fastest distances; ENU ref: {ref_str}",
+        "euclidean": f"Euclidean distances; ENU ref: {ref_str}",
+    }
+
+    def texts_for(name: str) -> dict[str, str]:
+        return {
+            metric: cvrplib_text(f"{name}_{metric}", comments[metric], coords, demands, matrices[metric], capacity)
+            for metric in ("shortest", "fastest", "euclidean")
+        }
+
+    content_sha256 = content_sha256_of_texts(texts_for(base))
+    with claim_lock(folder):
+        base, action = _claim_base(folder, base, content_sha256, on_existing, reserved_names)
+        return _write_instance(
+            selection,
+            folder,
+            base,
+            action=action,
+            texts=texts_for(base),
+            content_sha256=content_sha256,
+            demands=demands,
+            capacity=capacity,
+            sum_demands=sum_demands,
+            coords=coords,
+            geom_short=geom_short,
+            geom_fast=geom_fast,
+            route_count=route_count,
+            fleet=fleet,
+            demand_type=demand_type,
+            avg_route_size=avg_route_size,
+        )
+
+
+def _write_instance(
+    selection: Selection,
+    folder: Path,
+    base: str,
+    *,
+    action: str,
+    texts: dict[str, str],
+    content_sha256: str,
+    demands: list[int],
+    capacity: int,
+    sum_demands: int,
+    coords: list[tuple[float, float]],
+    geom_short: Any,
+    geom_fast: Any,
+    route_count: int,
+    fleet: Any,
+    demand_type: int,
+    avg_route_size: int,
+) -> dict[str, Any]:
+    graph = selection.graph
+    params = selection.params
+    vertices = selection.vertices
+    ref = graph.ref_lla
+    n_customers = len(vertices) - 1
     files = {
         "shortest": f"{base}_shortest.vrp",
         "fastest": f"{base}_fastest.vrp",
@@ -923,10 +1044,36 @@ def materialize_instance(
         "meta": f"{base}_meta.json",
     }
     manifest_name = f"{base}_manifest.json"
-    ref_str = f"LLA({ref.lat}, {ref.lon}, {ref.alt})"
-    write_cvrplib(folder / files["shortest"], f"{base}_shortest", f"Shortest distances; ENU ref: {ref_str}", coords, demands, d_short, capacity)
-    write_cvrplib(folder / files["fastest"], f"{base}_fastest", f"Fastest distances; ENU ref: {ref_str}", coords, demands, d_fast, capacity)
-    write_cvrplib(folder / files["euclidean"], f"{base}_euclidean", f"Euclidean distances; ENU ref: {ref_str}", coords, demands, d_eucl, capacity)
+    poi_count = sum(1 for tag in selection.source_tags[1:] if is_poi_source_tag(tag))
+    composition = params.get("composition")
+    summary = {
+        "customers": n_customers,
+        "composition": composition,
+        "capacity": capacity,
+        "total_demand": sum_demands,
+        "method": str(params["method"]),
+        "demand_type": demand_type,
+        "avg_route_size": avg_route_size,
+        "route_count": route_count,
+        "route_count_proven": fleet.proven,
+        "route_count_method": fleet.method,
+        "poi_customers": poi_count,
+        "parametric_customers": n_customers - poi_count,
+    }
+    if action == "unchanged":
+        manifest = json.loads((folder / manifest_name).read_text(encoding="utf-8"))
+        return {
+            "ok": True,
+            "action": action,
+            "base_name": base,
+            "folder": str(folder),
+            "files": manifest["files"],
+            "manifest": manifest_name,
+            "notice": composition_notice(composition),
+            "summary": summary,
+        }
+    for metric in ("shortest", "fastest", "euclidean"):
+        (folder / files[metric]).write_text(texts[metric], encoding="utf-8")
 
     generation_params = dict(params)
     generation_params["demand_type"] = demand_type
@@ -1005,13 +1152,14 @@ def materialize_instance(
         "route_count_method": fleet.method,
         "capacity": capacity,
         "total_demand": sum_demands,
+        "content_sha256": content_sha256,
     }
     write_json(folder / manifest_name, manifest)
 
-    poi_count = sum(1 for tag in selection.source_tags[1:] if is_poi_source_tag(tag))
-    composition = params.get("composition")
     return {
         "ok": True,
+        # created / renamed / replaced (unchanged returned above, unwritten).
+        "action": action,
         "base_name": base,
         "folder": str(folder),
         "files": manifest["files"],
@@ -1019,18 +1167,5 @@ def materialize_instance(
         # Not None only when the selection could not be served as asked; the
         # caller shows it so a parametric top-up never passes unnoticed.
         "notice": composition_notice(composition),
-        "summary": {
-            "customers": n_customers,
-            "composition": composition,
-            "capacity": capacity,
-            "total_demand": sum_demands,
-            "method": str(params["method"]),
-            "demand_type": demand_type,
-            "avg_route_size": avg_route_size,
-            "route_count": route_count,
-            "route_count_proven": fleet.proven,
-            "route_count_method": fleet.method,
-            "poi_customers": poi_count,
-            "parametric_customers": n_customers - poi_count,
-        },
+        "summary": summary,
     }

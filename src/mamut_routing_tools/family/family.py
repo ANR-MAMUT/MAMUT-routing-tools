@@ -65,6 +65,7 @@ from mamut_routing_lib.sidecars import (
 )
 from mamut_routing_lib.td import (
     InstanceRoadGraph,
+    PWLFError,
     TrafficOverlay,
     build_adjacency,
     compute_atf_sha256,
@@ -1103,6 +1104,26 @@ def _align_overlay(
     )
 
 
+class AnchorAuditError(AssertionError):
+    """The anchor solution cannot be certified under a traffic overlay.
+
+    Raised by the TW audit when an anchor route misses a window, returns after
+    the horizon, or leaves an arrival-time function's domain (the lib's
+    ``PWLFError``). An ``AssertionError`` subclass, as the audit's failures
+    always were, so existing handlers keep working.
+    """
+
+
+def _evaluate_anchor_arc(arc: Any, clock: float, route: list[int], sub: str) -> float:
+    try:
+        return arc.evaluate(clock)
+    except PWLFError as error:
+        raise AnchorAuditError(
+            f"anchor route {route} leaves the arrival-time domain under {sub} "
+            f"(the route runs past the horizon): {error}"
+        ) from error
+
+
 def _audit_and_lift(
     time_windows: list[tuple[int, int]],
     service_times: list[int],
@@ -1116,6 +1137,7 @@ def _audit_and_lift(
     traffic overlay. Earliest bounds are never reduced. Deadlines receive the
     smallest shared integer lift containing every resulting service start.
     The same routes are then rechecked globally, including their depot return.
+    Failures raise :class:`AnchorAuditError`.
     """
     lifted = [tuple(window) for window in time_windows]
     repairs: dict[str, Any] = {}
@@ -1126,7 +1148,7 @@ def _audit_and_lift(
             clock = 0.0
             previous = 0
             for customer in route:
-                arrival = arcs[(previous, customer)].evaluate(clock)
+                arrival = _evaluate_anchor_arc(arcs[(previous, customer)], clock, route, sub)
                 clock = max(arrival, float(lifted[customer][0]))
                 needed = math.ceil(clock)
                 if needed > needed_deadlines[customer]:
@@ -1134,9 +1156,9 @@ def _audit_and_lift(
                     binding[customer] = sub
                 clock += service_times[customer]
                 previous = customer
-            returned = arcs[(previous, 0)].evaluate(clock)
+            returned = _evaluate_anchor_arc(arcs[(previous, 0)], clock, route, sub)
             if returned > horizon_end:
-                raise AssertionError(
+                raise AnchorAuditError(
                     f"anchor route {route} returns at {returned} after the horizon under {sub}"
                 )
 
@@ -1151,24 +1173,77 @@ def _audit_and_lift(
             }
             lifted[customer] = (earliest, needed)
         if lifted[customer][0] >= lifted[customer][1]:
-            raise AssertionError(f"customer {customer} has a zero-width time window")
+            raise AnchorAuditError(f"customer {customer} has a zero-width time window")
 
     for sub, arcs in anchor_arcs_by_sub.items():
         for route in anchor_routes:
             clock = 0.0
             previous = 0
             for customer in route:
-                arrival = arcs[(previous, customer)].evaluate(clock)
+                arrival = _evaluate_anchor_arc(arcs[(previous, customer)], clock, route, sub)
                 clock = max(arrival, float(lifted[customer][0]))
                 if clock > lifted[customer][1]:
-                    raise AssertionError(
+                    raise AnchorAuditError(
                         f"anchor misses customer {customer} under {sub}: {clock} > {lifted[customer][1]}"
                     )
                 clock += service_times[customer]
                 previous = customer
-            if arcs[(previous, 0)].evaluate(clock) > horizon_end:
-                raise AssertionError(f"anchor route returns after the horizon under {sub}")
+            if _evaluate_anchor_arc(arcs[(previous, 0)], clock, route, sub) > horizon_end:
+                raise AnchorAuditError(f"anchor route returns after the horizon under {sub}")
     return lifted, repairs
+
+
+def _pre_lift_windows(vrptw_payload: dict[str, Any]) -> list[tuple[int, int]]:
+    """The VRPTW candidate's windows before any ``build_td`` deadline lift.
+
+    ``build_td`` finalizes the VRPTW file in place, so a re-run reads lifted
+    windows. Its ``metadata.tw_repair.repairs`` records every lift
+    (``deadline_before`` -> ``deadline_after``); undoing them lets the audit
+    reproduce the same repairs instead of finding nothing left to lift and
+    erasing the record.
+    """
+    windows = [tuple(int(v) for v in window) for window in vrptw_payload["time_windows"]]
+    repairs = ((vrptw_payload.get("metadata") or {}).get("tw_repair") or {}).get("repairs") or {}
+    for key, entry in repairs.items():
+        if "deadline_before" not in entry:
+            continue
+        customer = int(key)
+        earliest, latest = windows[customer]
+        if latest != int(entry["deadline_after"]):
+            raise ValueError(
+                f"tw_repair of customer {customer} records a deadline of {entry['deadline_after']} "
+                f"but the stored window ends at {latest}: re-run derive-vrptw"
+            )
+        windows[customer] = (earliest, int(entry["deadline_before"]))
+    return windows
+
+
+def _reusable_atf_pin(
+    existing: dict[str, Any] | None,
+    *,
+    road_sha: str,
+    overlay_sha: str,
+    road: InstanceRoadGraph,
+) -> str | None:
+    """An existing twin's ``atf_sha256`` if it provably pins the ATFs of this graph and overlay.
+
+    Materialization is a deterministic function of the road graph, the traffic
+    overlay and the sampling parameters, so the pin carries over exactly when
+    all four match; anything else (a regenerated overlay, a rebuilt graph) has
+    to be materialized and hashed again.
+    """
+    if existing is None:
+        return None
+    td = existing.get("td") or {}
+    if (
+        (td.get("graph") or {}).get("sha256") == road_sha
+        and (td.get("traffic") or {}).get("sha256") == overlay_sha
+        and td.get("sample_step") == road.sample_step
+        and td.get("simplify_tolerance") == road.simplify_tolerance
+        and td.get("atf_sha256")
+    ):
+        return str(td["atf_sha256"])
+    return None
 
 
 def build_td(
@@ -1190,7 +1265,25 @@ def build_td(
     #: ``naming.base_instance_name``.
     route_count: int | None = None,
 ) -> BuiltTDBase | None:
-    """Publish the TD layer of a base: 6 overlays, TW lift, 12 slim twins."""
+    """Publish the TD layer of a base: 6 overlays, TW lift, 12 slim twins.
+
+    All or nothing: preconditions are checked before anything is written, every
+    new file (the finalized VRPTW instance, the rebuilt overlays, the twins) is
+    written into a :class:`~mamut_routing_tools.staging.StagedTree`, and with
+    ``verify`` one TDVRPTW twin per overlay is loaded from the staging tree with
+    full sha256 checks before the files replace the live ones. A failure leaves
+    the collection as it was.
+
+    ``reuse_traffic`` (implied by ``tdvrptw_only``) keeps the published
+    overlays and the TDVRP twins' metadata; both must exist. An existing
+    ``atf_sha256`` is reused only when it pins exactly this road graph and
+    overlay (:func:`_reusable_atf_pin`), otherwise the ATFs are materialized
+    and hashed. The windows are audited from their pre-lift values
+    (:func:`_pre_lift_windows`), so re-running the build reproduces the
+    ``tw_repair`` record rather than erasing it.
+    """
+    from mamut_routing_tools.staging import StagedTree
+
     reuse_traffic = reuse_traffic or tdvrptw_only
     started = time.perf_counter()
     root = Path(collection_root)
@@ -1210,17 +1303,35 @@ def build_td(
         for model in TD_MODELS
         for intensity in TD_INTENSITIES
     ]
-    missing = [combo for combo in combos if combo not in speeds_by_combo] if not reuse_traffic else []
+    subs = [subinstance_name(model, intensity) for model, intensity in combos]
+    overlay_paths = {
+        subinstance_name(model, intensity): side_dir / f"{base}.traffic-{subinstance_name(model, intensity)}.json.gz"
+        for model, intensity in combos
+    }
+    missing = [
+        combo
+        for combo in combos
+        if combo not in speeds_by_combo
+        and not (reuse_traffic and overlay_paths[subinstance_name(*combo)].exists())
+    ]
     if missing:
         raise ValueError(f"missing traffic speeds for {base}: {missing}")
 
-    subs = [subinstance_name(model, intensity) for model, intensity in combos]
     twin_paths = {
         (pt, sub): td_instance_dir(root, pt, city, num_customers, base, sub)
         / f"{td_instance_name(base, *sub.split('-', 1))}.vrp.json"
         for pt in ("TDVRP", "TDVRPTW")
         for sub in subs
     }
+    if reuse_traffic:
+        # The twins' metadata (traffic provenance) is carried over from the
+        # published TDVRP twins, so they must all be there.
+        absent = [sub for sub in subs if not twin_paths[("TDVRP", sub)].exists()]
+        if absent:
+            raise ValueError(
+                f"reuse_traffic / tdvrptw_only need the published TDVRP twins of {base}, "
+                f"whose metadata they reuse; missing: {absent}"
+            )
     target_problem_types = ("TDVRPTW",) if tdvrptw_only else ("TDVRP", "TDVRPTW")
     if not force and all(
         twin_paths[(problem_type, sub)].exists()
@@ -1243,7 +1354,7 @@ def build_td(
 
     vrptw_payload = _json.loads(vrptw_path.read_text())
     service_times = [int(v) for v in vrptw_payload["service_times"]]
-    time_windows = [tuple(int(v) for v in window) for window in vrptw_payload["time_windows"]]
+    time_windows = _pre_lift_windows(vrptw_payload)
     anchor_routes = [
         [int(customer) for customer in route]
         for route in vrptw_payload.get("metadata", {}).get("tw_anchor", {}).get("routes", [])
@@ -1263,18 +1374,17 @@ def build_td(
     atf_sha: dict[str, str] = {}
     anchor_arcs_by_sub: dict[str, dict[tuple[int, int], Any]] = {}
     overlay_refs: dict[str, dict[str, str]] = {}
+    rebuilt_overlays: dict[str, TrafficOverlay] = {}
     existing_tdvrp_payloads: dict[str, dict[str, Any]] = {}
     for model, intensity in combos:
         sub = subinstance_name(model, intensity)
         overlay_file = f"{base}.traffic-{sub}.json.gz"
-        overlay_path = side_dir / overlay_file
+        overlay_path = overlay_paths[sub]
         if reuse_traffic and overlay_path.exists():
             overlay = load_traffic_overlay(overlay_path)
         else:
-            if (model, intensity) not in speeds_by_combo:
-                raise ValueError(f"missing traffic speeds for {base}: {(model, intensity)}")
             overlay = _align_overlay(road, graph, speeds_by_combo[(model, intensity)], family)
-            save_traffic_overlay(overlay, overlay_path)
+            rebuilt_overlays[sub] = overlay
         overlay_sha[sub] = compute_traffic_overlay_sha256(overlay)
         overlay_refs[sub] = {
             "path": sidecar_relpath(city, num_customers, base, overlay_file),
@@ -1310,14 +1420,21 @@ def build_td(
             instance, road, overlay, anchor_arc_keys
         )
         existing_tdvrp_path = twin_paths[("TDVRP", sub)]
-        if existing_tdvrp_path.exists():
-            existing_tdvrp = _json.loads(existing_tdvrp_path.read_text())
+        existing_tdvrp = (
+            _json.loads(existing_tdvrp_path.read_text()) if existing_tdvrp_path.exists() else None
+        )
+        if existing_tdvrp is not None:
             existing_tdvrp_payloads[sub] = existing_tdvrp
-            atf_sha[sub] = str(existing_tdvrp["td"]["atf_sha256"])
-        else:
+        pin = (
+            _reusable_atf_pin(existing_tdvrp, road_sha=road_sha, overlay_sha=overlay_sha[sub], road=road)
+            if reuse_traffic
+            else None
+        )
+        if pin is None:
             atfs = materialize_instance_atfs_roadgraph(instance, road, overlay)
-            atf_sha[sub] = compute_atf_sha256(atfs)
+            pin = compute_atf_sha256(atfs)
             del atfs
+        atf_sha[sub] = pin
         missing_anchor_arcs = anchor_arc_keys - anchor_arcs_by_sub[sub].keys()
         if missing_anchor_arcs:
             raise AssertionError(f"missing anchor arcs under {sub}: {sorted(missing_anchor_arcs)}")
@@ -1333,7 +1450,6 @@ def build_td(
     vrptw_payload["time_windows"] = [list(window) for window in lifted]
     vrptw_metadata = dict(vrptw_payload["metadata"])
     lift_entries = [e for e in repairs.values() if "deadline_after" in e]
-    cut_entries = [e for e in repairs.values() if "earliest_after" in e]
     vrptw_metadata["tw_repair"] = {
         "policy": "global-anchor-minimal-shared-deadline-lift",
         "overlays_audited": subs,
@@ -1349,11 +1465,11 @@ def build_td(
     if generated_at:
         vrptw_metadata["generated_at"] = generated_at
     vrptw_payload["metadata"] = vrptw_metadata
-    save_json_to_file(vrptw_payload, vrptw_path)
 
-    # Emit the 12 slim TD twins.
+    # The 12 slim TD twins.
     reference_lla = vrptw_payload.get("reference_lla")
     geo_ref = vrptw_metadata.get("sidecars", {}).get("geo")
+    twin_payloads: dict[tuple[str, str], dict[str, Any]] = {}
     for model, intensity in combos:
         sub = subinstance_name(model, intensity)
         name = td_instance_name(base, model, intensity)
@@ -1418,8 +1534,6 @@ def build_td(
                 "simplify_tolerance": road.simplify_tolerance,
             },
         }
-        tdvrp_payload = dict(common)
-        tdvrp_payload["metadata"] = {**td_metadata, "problem_type": "TDVRP"}
         tdvrptw_payload = dict(common)
         tdvrptw_payload["time_windows"] = [list(window) for window in lifted]
         tdvrptw_payload["metadata"] = {
@@ -1427,16 +1541,32 @@ def build_td(
             "problem_type": "TDVRPTW",
             "tw_repair": vrptw_metadata["tw_repair"],
         }
-        payloads = (("TDVRPTW", tdvrptw_payload),) if tdvrptw_only else (
-            ("TDVRP", tdvrp_payload),
-            ("TDVRPTW", tdvrptw_payload),
-        )
-        for pt, payload in payloads:
-            target = twin_paths[(pt, sub)]
-            target.parent.mkdir(parents=True, exist_ok=True)
-            save_json_to_file(payload, target)
-            if verify:
-                load_td_instance(target, verify_sha256=True)
+        twin_payloads[("TDVRPTW", sub)] = tdvrptw_payload
+        if not tdvrptw_only:
+            tdvrp_payload = dict(common)
+            tdvrp_payload["metadata"] = {**td_metadata, "problem_type": "TDVRP"}
+            twin_payloads[("TDVRP", sub)] = tdvrp_payload
+
+    # Stage everything, verify from the staging tree, then publish at once.
+    with StagedTree(root, f"build-td-{base}") as staged:
+        save_json_to_file(vrptw_payload, staged.stage(vrptw_path))
+        for sub in subs:
+            if sub in rebuilt_overlays:
+                save_traffic_overlay(rebuilt_overlays[sub], staged.stage(overlay_paths[sub]))
+            else:
+                staged.link_live(overlay_paths[sub])
+        staged.link_live(road_path)
+        staged.link_live(root / COLLECTION_MARKER_FILENAME)
+        for key, payload in twin_payloads.items():
+            save_json_to_file(payload, staged.stage(twin_paths[key]))
+        if verify:
+            for sub in subs:
+                load_td_instance(
+                    staged.path(twin_paths[("TDVRPTW", sub)]),
+                    verify_sha256=True,
+                    collection_root=staged.root,
+                )
+        staged.commit()
 
     return BuiltTDBase(
         base=base,

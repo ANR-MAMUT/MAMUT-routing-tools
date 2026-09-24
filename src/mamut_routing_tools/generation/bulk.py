@@ -150,6 +150,7 @@ def generate_bulk_instances(
     problem_type: str = "cvrp",
     tw_method: str = "route_centered",
     context: ProgressContext | None = None,
+    on_existing: str = "rename",
 ) -> dict[str, Any]:
     """Cartesian bulk generation over cities x sizes x demand types x route sizes."""
     if not cities:
@@ -177,6 +178,7 @@ def generate_bulk_instances(
         output_root=output_root,
         base_seed=base_request.seed,
         context=context,
+        on_existing=on_existing,
     )
 
 
@@ -186,8 +188,15 @@ def generate_bulk_from_rows(
     output_root: str | Path,
     base_seed: int = 0,
     context: ProgressContext | None = None,
+    on_existing: str = "rename",
 ) -> dict[str, Any]:
-    """Generate an explicit list of instances, reusing a pool per selection group."""
+    """Generate an explicit list of instances, reusing a pool per selection group.
+
+    ``on_existing`` applies to instances of earlier runs under the same name
+    (see ``single.materialize_instance``): ``rename`` (default) keeps them and
+    writes ``<base>-2``..., ``replace`` purges them; identical content is left
+    as it is either way.
+    """
     if not rows:
         raise ValueError("Bulk generation requires at least one instance row")
     for row in rows:
@@ -272,6 +281,7 @@ def generate_bulk_from_rows(
                     output_root,
                     name_suffix=f"-s{seed}" if _name_key(row.request) in ambiguous else "",
                     reserved_names=reserved_names,
+                    on_existing=on_existing,
                 )
                 if row.problem_type == "vrptw":
                     _derive_twin(result, row, seed)
@@ -459,6 +469,7 @@ def generate_bulk_from_rows(
                 precomputed=precomputed,
                 name_suffix=f"-s{inst_seed}" if _name_key(row.request) in ambiguous else "",
                 reserved_names=reserved_names,
+                on_existing=on_existing,
             )
             if row.problem_type == "vrptw":
                 _derive_twin(result, row, inst_seed)

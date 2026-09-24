@@ -1,17 +1,37 @@
 """VRPTW derivation from generated CVRP instances (port of the workbench
-route_centered / reachable_interval time-window synthesis)."""
+route_centered / reachable_interval time-window synthesis).
+
+Both methods persist capacity-, horizon- (and window-) feasible *anchor
+routes* in the derivation manifest; ``derive-td`` certifies the windows
+along them under traffic. ``route_centered`` centres each window on the
+customer's free-flow visit time along those routes (the family's
+``construct_anchor_routes``); before 0.6.0 it used a single capacity-agnostic
+nearest-neighbour tour, which ran past the horizon beyond about 80
+customers and left most windows equal to the whole feasible interval.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from mamut_routing_tools.family.tw_synthesis import (
+    construct_anchor_routes,
+    construct_window_anchor_routes,
+    validate_static_anchor,
+)
 from mamut_routing_tools.generation.writers import ParsedCvrpInstance, parse_cvrp_vrp, write_json
 
 TW_METHODS = ("route_centered", "reachable_interval")
+#: ``derivation.anchor_policy`` values: how the persisted anchor routes were built.
+ANCHOR_POLICIES = {
+    "route_centered": "capacity-horizon-nearest-neighbour",
+    "reachable_interval": "capacity-window-horizon-nearest-neighbour",
+}
 DEFAULT_TW_METHOD = "route_centered"
 HORIZON_START = 0
 HORIZON_END = 86400
@@ -127,14 +147,25 @@ def generate_tw_route_centered(
     horizon_start: int,
     horizon_end: int,
     *,
+    demands: list[int],
+    capacity: int,
     depot: int = 0,
     width_ratio_mean: float = 0.2,
     width_ratio_std: float = 0.08,
-) -> tuple[list[tuple[int, int]], list[int], float]:
+) -> tuple[list[tuple[int, int]], list[list[int]], float]:
+    """Windows centred on free-flow visits along capacity-and-horizon-feasible anchor routes.
+
+    Returns ``(time_windows, anchor_routes, width_ratio_mean)``. The rng draws
+    (one width per customer, in index order) are unchanged, so a seed still
+    gives the same widths; only the centres moved to the feasible routes.
+    """
+    if depot != 0:
+        raise ValueError(f"route_centered windows need the depot at node 0, got {depot}")
     n = len(travel_times)
     horizon = float(horizon_end - horizon_start)
-    route = nearest_neighbour_route(travel_times, depot=depot)
-    arrivals = simulate_arrival_times(route, travel_times, service_times, horizon_start=horizon_start)
+    anchor_routes, arrivals = construct_anchor_routes(
+        travel_times, demands, capacity, service_times, horizon_start=horizon_start, horizon_end=horizon_end
+    )
 
     time_windows: list[tuple[int, int]] = [(0, 0)] * n
     time_windows[depot] = (horizon_start, horizon_end)
@@ -149,7 +180,7 @@ def generate_tw_route_centered(
         time_windows[i] = repair_time_window(
             e, latest, travel_times[depot][i], travel_times[i][depot], service_times[i], horizon_start, horizon_end
         )
-    return time_windows, route, width_ratio_mean
+    return time_windows, anchor_routes, width_ratio_mean
 
 
 def generate_tw_reachable_interval(
@@ -201,6 +232,8 @@ def generate_vrptw_fields(
     horizon_end: int,
     tw_method: str,
     *,
+    demands: list[int],
+    capacity: int,
     depot: int = 0,
 ) -> tuple[list[int], list[tuple[int, int]], dict[str, Any]]:
     rng = random.Random(stable_seed(*seed_parts))
@@ -212,14 +245,21 @@ def generate_vrptw_fields(
         raise ValueError(f"Unsupported TW method '{tw_method}'. Use one of: {', '.join(TW_METHODS)}.")
 
     if method == "route_centered":
-        time_windows, anchor_route, width_ratio_mean = generate_tw_route_centered(
-            rng, travel_times, service_times, horizon_start, horizon_end, depot=depot
+        time_windows, anchor_routes, width_ratio_mean = generate_tw_route_centered(
+            rng,
+            travel_times,
+            service_times,
+            horizon_start,
+            horizon_end,
+            demands=demands,
+            capacity=capacity,
+            depot=depot,
         )
     else:
         time_windows, width_ratio_mean = generate_tw_reachable_interval(
             rng, travel_times, service_times, horizon_start, horizon_end, depot=depot
         )
-        anchor_route = None
+        anchor_routes = None
 
     repaired_count = 0
     for i in range(n):
@@ -233,6 +273,27 @@ def generate_vrptw_fields(
             repaired_count += 1
         time_windows[i] = (e_out, l_out)
 
+    if anchor_routes is None:
+        anchor_routes = construct_window_anchor_routes(
+            travel_times,
+            demands,
+            capacity,
+            service_times,
+            time_windows,
+            horizon_start=horizon_start,
+            horizon_end=horizon_end,
+        )
+    validate_static_anchor(
+        anchor_routes,
+        travel_times,
+        demands,
+        capacity,
+        service_times,
+        time_windows,
+        horizon_start=horizon_start,
+        horizon_end=horizon_end,
+    )
+
     stochastic_params: dict[str, Any] = {
         "tw_method": method,
         "horizon_start": horizon_start,
@@ -240,10 +301,11 @@ def generate_vrptw_fields(
         "mean_service_time_horizon_ratio": mean_service_ratio,
         "time_window_ratio": width_ratio_mean,
         "tw_repaired_count": repaired_count,
-        # The capacity-agnostic nearest-neighbour anchor route the windows are
-        # centred on (route_centered only), persisted so a downstream TD
-        # derivation can lift the windows under traffic without recomputing it.
-        "anchor_route": anchor_route,
+        # Feasible anchor routes (capacity, horizon and the final windows),
+        # persisted so a downstream TD derivation lifts the windows along
+        # them under traffic without recomputing them.
+        "anchor_policy": ANCHOR_POLICIES[method],
+        "anchor_routes": anchor_routes,
     }
     return service_times, time_windows, stochastic_params
 
@@ -256,6 +318,21 @@ def write_cvrptw_vrp(
     service_times: list[int],
     time_windows: list[tuple[int, int]],
 ) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        cvrptw_text(parsed, instance_name, comment, service_times, time_windows), encoding="utf-8"
+    )
+
+
+def cvrptw_text(
+    parsed: ParsedCvrpInstance,
+    instance_name: str,
+    comment: str,
+    service_times: list[int],
+    time_windows: list[tuple[int, int]],
+) -> str:
+    """The CVRPTW ``.vrp`` text :func:`write_cvrptw_vrp` writes."""
     lines = [f"NAME : {instance_name}", "TYPE : CVRPTW"]
     if comment:
         lines.append(f"COMMENT : {comment}")
@@ -278,9 +355,7 @@ def write_cvrptw_vrp(
     lines.append("SERVICE_TIME_SECTION")
     lines.extend(f"{i + 1} {service}" for i, service in enumerate(service_times))
     lines.extend(["DEPOT_SECTION", str(parsed.depot_node_index), "-1", "EOF"])
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
 
 
 def derive_vrptw_from_cvrp(
@@ -308,19 +383,45 @@ def derive_vrptw_from_cvrp(
 
     seed_parts = (base, place_slug, source_seed, tw_method, horizon_start, horizon_end, "vrptw_workbench_v1")
     service_times, time_windows, stochastic_params = generate_vrptw_fields(
-        seed_parts, parsed.arc_costs, horizon_start, horizon_end, tw_method, depot=depot_index
+        seed_parts,
+        parsed.arc_costs,
+        horizon_start,
+        horizon_end,
+        tw_method,
+        demands=[int(value) for value in parsed.demands],
+        capacity=int(parsed.capacity),
+        depot=depot_index,
     )
 
     vrptw_name = f"{base}_fastest_vrptw"
     vrptw_filename = f"{base}_fastest.cvrptw.vrp"
-    write_cvrptw_vrp(
-        folder / vrptw_filename,
+    text = cvrptw_text(
         parsed,
         vrptw_name,
         f"VRPTW derived from {base}_fastest ({tw_method})",
         service_times,
         time_windows,
     )
+    manifest_path = folder / f"{base}_vrptw_manifest.json"
+    twin_path = folder / vrptw_filename
+    if twin_path.is_file() and manifest_path.is_file():
+        # Deterministic: an identical derivation is left untouched, so its
+        # files (and the fingerprints derive-td records) do not churn.
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except ValueError:
+            previous = {}
+        if twin_path.read_text(encoding="utf-8") == text and previous.get("derivation") == json.loads(
+            json.dumps(stochastic_params)
+        ):
+            return {
+                "ok": True,
+                "action": "unchanged",
+                "vrptw_file": vrptw_filename,
+                "manifest": manifest_path.name,
+                "derivation": stochastic_params,
+            }
+    twin_path.write_text(text, encoding="utf-8")
     manifest = {
         "generated_at": datetime.now().isoformat(),
         "base_name": base,
@@ -328,9 +429,10 @@ def derive_vrptw_from_cvrp(
         "vrptw_file": vrptw_filename,
         "derivation": stochastic_params,
     }
-    write_json(folder / f"{base}_vrptw_manifest.json", manifest)
+    write_json(manifest_path, manifest)
     return {
         "ok": True,
+        "action": "derived",
         "vrptw_file": vrptw_filename,
         "manifest": f"{base}_vrptw_manifest.json",
         "derivation": stochastic_params,

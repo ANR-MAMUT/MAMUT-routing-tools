@@ -612,6 +612,7 @@ function requestBody() {
     demandType: Number(el("demand").value),
     avgRouteSize: Number(el("ars").value),
     deriveVrptw: el("problem").value === "vrptw",
+    overwrite: el("overwrite").checked,
   };
 }
 
@@ -1336,8 +1337,15 @@ async function displayInstanceOnly(fit = true) {
 }
 
 /* ── Persistent solutions ── */
+/* Runs of an earlier version of the instance (it was regenerated or replaced)
+   are "stale": the server flags them and refuses to render or compare them, so
+   they stay out of both selectors and are only counted. */
 function allSolutionRecords() {
-  return [...state.solutionRuns, ...state.solutionReferences];
+  return [...state.solutionRuns.filter((run) => !run.stale), ...state.solutionReferences];
+}
+
+function staleRunCount() {
+  return state.solutionRuns.filter((run) => run.stale).length;
 }
 
 /* The metric a run was produced on. Every instance ships shortest/fastest/
@@ -1371,11 +1379,15 @@ function refreshSolutionControls() {
   const comparisonSelect = el("comparison-run");
   runSelect.innerHTML = "";
   runSelect.append(new Option("Instance only · customer locations", ""));
+  const stale = staleRunCount();
+  const staleNote = stale
+    ? ` ${stale} stale run${stale === 1 ? "" : "s"} of an earlier version of this instance (regenerated since) hidden.`
+    : "";
   if (!runs.length) {
     comparisonSelect.innerHTML = '<option value="">Select a reference run</option>';
     el("compare").disabled = true;
     el("solution-validation").className = "validation-line";
-    el("solution-validation").textContent = "No saved solutions yet; instance data is stored locally.";
+    el("solution-validation").textContent = `No saved solutions yet; instance data is stored locally.${staleNote}`;
     return;
   }
   runs.forEach((run) => runSelect.append(new Option(solutionLabel(run), run.run_id)));
@@ -1394,7 +1406,8 @@ function refreshSolutionControls() {
   el("compare").disabled = !selected || comparisonSelect.options.length <= 1;
   if (!selected) {
     el("solution-validation").className = "validation-line";
-    el("solution-validation").textContent = `${state.solutionRuns.length} saved solution run(s) available locally.`;
+    el("solution-validation").textContent =
+      `${state.solutionRuns.length - stale} saved solution run(s) available locally.${staleNote}`;
     return;
   }
   const validation = selected?.validation || {};
@@ -1450,7 +1463,7 @@ async function loadSolutionRuns(preferredRunId = null) {
   if (state.selected !== instance) return;
   state.solutionRuns = data.runs || [];
   state.solutionReferences = data.references || [];
-  instance.solution_count = state.solutionRuns.length;
+  instance.solution_count = state.solutionRuns.filter((run) => !run.stale).length;
   state.selectedRunId = preferredRunId;
   renderInstanceList();
   refreshSolutionControls();
@@ -1807,7 +1820,12 @@ async function handleFinishedJob(job) {
     const split = composition
       ? ` — ${composition.poi_customers} POI + ${composition.parametric_customers} parametric`
       : "";
-    status(`Generated ${result.base_name}: capacity ${result.summary?.capacity}, ~${result.summary?.route_count} routes${split}.`
+    const outcome = {
+      unchanged: `Already generated with identical content: ${result.base_name} (nothing written)`,
+      renamed: `Generated as ${result.base_name}: another configuration already used this name and was kept`,
+      replaced: `Replaced ${result.base_name}: its twins and BKS were deleted and its saved runs are now stale`,
+    }[result.action] || `Generated ${result.base_name}`;
+    status(`${outcome}: capacity ${result.summary?.capacity}, ~${result.summary?.route_count} routes${split}.`
       + (result.notice ? ` ${result.notice}` : "")
       + (result.vrptw_error ? ` VRPTW twin failed: ${result.vrptw_error}` : ""));
   } else if (job.kind === "bulk-generate") {
@@ -2376,6 +2394,7 @@ function bulkPayload() {
     // this needs no column of its own in an already wide table.
     poiAttachMode: el("poi-attach-mode").value,
     poiAttachRadiusM: Number(el("poi-attach-radius").value) || 50,
+    overwrite: el("overwrite").checked,
     instances: state.bulkRows.map((row) => ({
       problemType: row.problemType,
       city: row.city,
