@@ -376,18 +376,27 @@ def generate_derive_td_cmd(
     seed: Annotated[int, typer.Option("--seed")] = 42,
     force: Annotated[bool, typer.Option("--force/--no-force", help="Overwrite existing twins/sidecars.")] = False,
 ) -> None:
-    """Derive the TDVRP + TDVRPTW twins of a generated instance (traffic -> ATFs -> TW lift)."""
-    from mamut_routing_tools.generation.td import derive_td_from_vrptw
+    """Derive the TDVRP + TDVRPTW twins of a generated instance (traffic -> ATFs -> TW lift).
 
-    result = derive_td_from_vrptw(
-        folder,
-        base,
-        model=model,
-        intensity=intensity,
-        all_combos=all_combos,
-        seed=seed,
-        force=force,
-    )
+    Exits 1 with the reason when the twins cannot be certified (nothing is
+    written then). Existing twins are kept only if they were derived from the
+    current inputs with the same --seed; --force re-derives regardless.
+    """
+    from mamut_routing_tools.generation.td import TDDerivationError, derive_td_from_vrptw
+
+    try:
+        result = derive_td_from_vrptw(
+            folder,
+            base,
+            model=model,
+            intensity=intensity,
+            all_combos=all_combos,
+            seed=seed,
+            force=force,
+        )
+    except (TDDerivationError, FileNotFoundError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
     typer.echo(json.dumps(result, indent=1))
 
 

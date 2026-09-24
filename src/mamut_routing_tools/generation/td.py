@@ -11,12 +11,12 @@ Given a folder holding
 - ``<base>_meta.json``          (from ``generate single``),
 - ``<base>_fastest.cvrptw.vrp`` (from ``generate derive-vrptw``: the PROVIDED
   time windows + service times to reuse), and
-- ``<base>_vrptw_manifest.json`` (its nearest-neighbour anchor route),
+- ``<base>_vrptw_manifest.json`` (its feasible anchor routes),
 
 :func:`derive_td_from_vrptw` rebuilds the TD bridge for the instance's city,
 assembles the trimmed road-graph sidecar and one traffic overlay per
 ``model x intensity`` combination, lifts the provided deadlines just enough to
-certify the anchor route under every derived overlay (earliest bounds are never
+certify the anchor routes under every derived overlay (earliest bounds are never
 reduced), and writes the canonical ``road-graph`` v2 TD twins:
 
 - ``<base>-<model>-<intensity>.vrp.json``        (TDVRPTW: lifted windows),
@@ -29,20 +29,37 @@ verify_sha256=True)``. A ``mamut-collection.json`` marker is dropped in the
 folder so the collection-root-relative sidecar refs resolve with no extra
 arguments (the road-graph td model always resolves its sidecars against a
 collection root).
+
+Anchors (0.6.0): the capacity-, horizon- and window-feasible routes
+``derive-vrptw`` persists (``derivation.anchor_routes``), or for older
+manifests routes rebuilt to respect the provided windows (a legacy single
+``anchor_route`` tour is ignored: beyond about 80 customers it cannot return
+by the horizon, and it lifted ``reachable_interval`` deadlines by hours).
+Under traffic a route that can no longer return by the horizon is split at
+its longest returning prefix. All files are written through a
+:class:`~mamut_routing_tools.staging.StagedTree` and verified before they
+replace anything; failures raise :class:`TDDerivationError`. The twins record
+``metadata.derived_from`` (the input files' sha256 and the traffic seed), so a
+re-run after the base was regenerated re-derives instead of keeping stale
+twins.
 """
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
 from mamut_routing_lib.json_utils import save_json_to_file
+from mamut_routing_lib.sidecars import COLLECTION_MARKER_FILENAME
 from mamut_routing_lib.td import (
+    PWLFError,
+    RoadGraphFormatError,
     compute_atf_sha256,
     compute_road_graph_sha256,
     compute_traffic_overlay_sha256,
+    load_td_instance,
     materialize_instance_atfs_roadgraph,
-    materialize_selected_atfs_roadgraph,
     save_instance_road_graph,
     save_traffic_overlay,
     td_instance_from_payload,
@@ -57,6 +74,7 @@ from mamut_routing_tools.family.family import (
     TD_HORIZON,
     TD_INTENSITIES,
     TD_MODELS,
+    AnchorAuditError,
     _align_overlay,
     _audit_and_lift,
     _full_city_road_graph,
@@ -65,15 +83,25 @@ from mamut_routing_tools.family.family import (
     simplify_tolerance_for,
 )
 from mamut_routing_tools.family.naming import subinstance_name, td_instance_name
-from mamut_routing_tools.generation.vrptw import nearest_neighbour_route
+from mamut_routing_tools.family.tw_synthesis import (
+    construct_window_anchor_routes,
+    validate_static_anchor,
+)
 from mamut_routing_tools.generation.writers import slugify
+from mamut_routing_tools.staging import StagedTree
 from mamut_routing_tools.td.traffic import build_bridge
 
 GENERATOR_NAME = "mamut-routing-tools"
 
 
 class TDDerivationError(ValueError):
-    """Raised when the inputs of a standalone TD derivation are inconsistent."""
+    """Raised when a standalone TD derivation cannot produce certified twins.
+
+    Inconsistent inputs, and (since 0.6.0) anchor routes that cannot be
+    certified under traffic: the audit's :class:`AnchorAuditError`, the lib's
+    ``PWLFError`` / ``RoadGraphFormatError`` are wrapped so the CLI and the
+    GUI report one error instead of a traceback.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -201,22 +229,112 @@ def _resolve_osm_path(source_osm_file: str) -> Path:
     )
 
 
-def _anchor_customers(manifest: dict[str, Any], fastest_matrix: list[list[int]]) -> tuple[list[int], str]:
-    """The anchor route as a customer sequence (depot stripped) plus its source.
+def _anchor_routes(manifest: dict[str, Any], cvrptw: dict[str, Any]) -> tuple[list[list[int]], str]:
+    """Feasible anchor routes (customer sequences) and where they come from.
 
-    Uses the persisted ``derivation.anchor_route`` when present (the
-    route-centered nearest-neighbour route the windows were centred on),
-    otherwise regenerates it deterministically on the fastest matrix (the
-    ``reachable_interval`` case persists no route)."""
-    route = (manifest.get("derivation") or {}).get("anchor_route")
-    source = "manifest"
-    if not route:
-        route = nearest_neighbour_route(fastest_matrix)
-        source = "regenerated"
-    route = [int(node) for node in route]
-    if route and route[0] == 0:
-        route = route[1:]
-    return route, source
+    ``manifest``: the ``derivation.anchor_routes`` persisted by derive-vrptw,
+    checked against the provided windows (coverage, capacity, windows and
+    horizon at free flow). ``window-feasible``: rebuilt for older manifests,
+    whose single ``anchor_route`` tour is ignored.
+    """
+    matrix = cvrptw["matrix"]
+    windows = [tuple(window) for window in cvrptw["time_windows"]]
+    routes = (manifest.get("derivation") or {}).get("anchor_routes")
+    if routes:
+        routes = [[int(customer) for customer in route] for route in routes]
+        try:
+            validate_static_anchor(
+                routes, matrix, cvrptw["demands"], cvrptw["capacity"], cvrptw["service_times"], windows
+            )
+        except AssertionError as error:
+            raise TDDerivationError(
+                f"the manifest's anchor routes do not fit the provided windows ({error}): re-run derive-vrptw"
+            ) from error
+        return routes, "manifest"
+    try:
+        routes = construct_window_anchor_routes(
+            matrix, cvrptw["demands"], cvrptw["capacity"], cvrptw["service_times"], windows
+        )
+    except ValueError as error:
+        raise TDDerivationError(f"no window-feasible anchor routes: {error}") from error
+    return routes, "window-feasible"
+
+
+def _returning_prefix(
+    route: list[int],
+    time_windows: list[tuple[int, int]],
+    service_times: list[int],
+    arcs_by_sub: dict[str, dict[tuple[int, int], Any]],
+    horizon_end: float,
+) -> int:
+    """Length of the longest prefix of ``route`` that returns to the depot by the horizon under every overlay."""
+    best = len(route)
+    for arcs in arcs_by_sub.values():
+        clock = 0.0
+        previous = 0
+        served = 0
+        for customer in route:
+            try:
+                start = max(arcs[(previous, customer)].evaluate(clock), float(time_windows[customer][0]))
+                back = arcs[(customer, 0)].evaluate(start + service_times[customer])
+            except PWLFError:
+                break
+            if back > horizon_end:
+                break
+            clock = start + service_times[customer]
+            previous = customer
+            served += 1
+        best = min(best, served)
+    return best
+
+
+def _split_for_traffic(
+    routes: list[list[int]],
+    time_windows: list[tuple[int, int]],
+    service_times: list[int],
+    arcs_by_sub: dict[str, dict[tuple[int, int], Any]],
+    horizon_end: float,
+) -> list[list[int]]:
+    """Split each anchor route at its longest prefix that still returns by the horizon under traffic.
+
+    The remainder starts a new route from the depot (and is split again if
+    needed). A customer that cannot return by the horizon even alone raises
+    :class:`TDDerivationError`.
+    """
+    split: list[list[int]] = []
+    for route in routes:
+        remaining = list(route)
+        while remaining:
+            keep = _returning_prefix(remaining, time_windows, service_times, arcs_by_sub, horizon_end)
+            if keep == 0:
+                raise TDDerivationError(
+                    f"customer {remaining[0]} cannot be served and return to the depot by the horizon "
+                    "under the derived traffic"
+                )
+            split.append(remaining[:keep])
+            remaining = remaining[keep:]
+    return split
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _derived_from(meta_path: Path, cvrptw_path: Path, manifest_path: Path, seed: int) -> dict[str, Any]:
+    """Fingerprint of a derivation's inputs, recorded in every twin."""
+    return {
+        "meta_sha256": _file_sha256(meta_path),
+        "cvrptw_sha256": _file_sha256(cvrptw_path),
+        "vrptw_manifest_sha256": _file_sha256(manifest_path),
+        "traffic_seed": seed,
+    }
+
+
+def _twin_fingerprint(path: Path) -> dict[str, Any] | None:
+    try:
+        return (_load_json(path).get("metadata") or {}).get("derived_from")
+    except (OSError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -240,14 +358,44 @@ def derive_td_from_vrptw(
     all_combos: bool = False,
     seed: int = 42,
     force: bool = False,
+    verify: bool = True,
 ) -> dict[str, Any]:
     """Derive the TDVRP + TDVRPTW twins of a generated instance in place.
 
     Reuses the PROVIDED VRPTW windows (lifting deadlines to time-dependent
     feasibility, never regenerating them) and produces canonical road-graph
     v2 twins that self-verify through ``load_td_instance(path,
-    verify_sha256=True)``.
+    verify_sha256=True)``. Existing twins are kept only when they were
+    derived from the current inputs with the same traffic seed.
     """
+    try:
+        return _derive_td_from_vrptw(
+            folder,
+            base,
+            model=model,
+            intensity=intensity,
+            all_combos=all_combos,
+            seed=seed,
+            force=force,
+            verify=verify,
+        )
+    except (AnchorAuditError, PWLFError, RoadGraphFormatError) as error:
+        raise TDDerivationError(f"{base}: the anchor routes cannot be certified under traffic: {error}") from error
+    except AssertionError as error:
+        raise TDDerivationError(f"{base}: {error}") from error
+
+
+def _derive_td_from_vrptw(
+    folder: str | Path,
+    base: str,
+    *,
+    model: str,
+    intensity: str,
+    all_combos: bool,
+    seed: int,
+    force: bool,
+    verify: bool,
+) -> dict[str, Any]:
     if model not in TD_MODELS:
         raise TDDerivationError(f"unknown traffic model {model!r}; known: {TD_MODELS}")
     if intensity not in TD_INTENSITIES:
@@ -294,7 +442,8 @@ def derive_td_from_vrptw(
             "TDVRP": folder / f"{name}.tdvrp.vrp.json",
         }
     all_targets = [p for paths in twin_paths.values() for p in paths.values()]
-    if not force and all(p.exists() for p in all_targets):
+    derived_from = _derived_from(meta_path, cvrptw_path, manifest_path, seed)
+    if not force and all(p.exists() and _twin_fingerprint(p) == derived_from for p in all_targets):
         return {
             "ok": True,
             "base": base,
@@ -334,8 +483,7 @@ def derive_td_from_vrptw(
     bridge_nodes = bridge.nodes[base]
 
     # 2. Instance road graph: full city graph from the bridge, trimmed to the
-    #    union of pinned free-flow fastest paths, saved next to the instance.
-    ensure_collection_root(folder)  # collection marker: sidecar refs resolve here
+    #    union of pinned free-flow fastest paths (written with the twins).
     full = _full_city_road_graph(
         bridge_graph,
         bridge_nodes,
@@ -347,16 +495,17 @@ def derive_td_from_vrptw(
     )
     road, _ = _trim_road_graph(full)
     road_file = f"{base}.road.json.gz"
-    save_instance_road_graph(road, folder / road_file)
     road_sha = compute_road_graph_sha256(road)
 
-    # 3. Per-combo overlays + ATF materialization. Anchor arcs certify the TW
-    #    lift; the full ATF set pins atf_sha256.
-    anchor_custs, anchor_source = _anchor_customers(manifest, cvrptw["matrix"])
-    anchor_arc_keys = {
+    # 3. Per-combo overlays + ATF materialization. The full ATF set pins
+    #    atf_sha256; the anchor arcs and every depot arc (routes may be split
+    #    under traffic) are kept to certify the TW lift.
+    anchor_routes, anchor_source = _anchor_routes(manifest, cvrptw)
+    kept_arc_keys = {
         (previous, customer)
-        for previous, customer in zip([0, *anchor_custs], [*anchor_custs, 0])
-    }
+        for route in anchor_routes
+        for previous, customer in zip([0, *route], [*route, 0])
+    } | {(0, c) for c in range(1, num_customers + 1)} | {(c, 0) for c in range(1, num_customers + 1)}
     provided_time_windows = [tuple(w) for w in cvrptw["time_windows"]]
     service_times = [int(s) for s in cvrptw["service_times"]]
     coordinates = [[float(node["enu_x"]), float(node["enu_y"])] for node in nodes_meta]
@@ -368,12 +517,13 @@ def derive_td_from_vrptw(
     atf_sha: dict[str, str] = {}
     traffic_info: dict[str, dict[str, Any]] = {}
     anchor_arcs_by_sub: dict[str, dict[tuple[int, int], Any]] = {}
+    overlays: dict[str, Any] = {}
     for m, i in combos:
         sub = subinstance_name(m, i)
         speeds = bridge.speeds[(m, i)]
         overlay = _align_overlay(road, bridge_graph, speeds)
         overlay_file = f"{base}.traffic-{sub}.json.gz"
-        save_traffic_overlay(overlay, folder / overlay_file)
+        overlays[sub] = overlay
         overlay_sha[sub] = compute_traffic_overlay_sha256(overlay)
         overlay_refs[sub] = {"path": overlay_file, "sha256": overlay_sha[sub]}
         traffic_info[sub] = {
@@ -406,22 +556,24 @@ def derive_td_from_vrptw(
             "metadata": {},
         }
         instance = td_instance_from_payload(probe_payload)
-        anchor_arcs_by_sub[sub] = materialize_selected_atfs_roadgraph(
-            instance, road, overlay, anchor_arc_keys
-        )
-        missing = anchor_arc_keys - anchor_arcs_by_sub[sub].keys()
-        if missing:
-            raise TDDerivationError(f"missing anchor arcs under {sub}: {sorted(missing)}")
         atfs = materialize_instance_atfs_roadgraph(instance, road, overlay)
         atf_sha[sub] = compute_atf_sha256(atfs)
+        missing = kept_arc_keys - atfs.arcs.keys()
+        if missing:
+            raise TDDerivationError(f"missing anchor arcs under {sub}: {sorted(missing)}")
+        anchor_arcs_by_sub[sub] = {key: atfs.arcs[key] for key in kept_arc_keys}
         del atfs
 
-    # 4. Shared deadline lift certifying the anchor route under every derived
-    #    overlay. Earliest bounds are never reduced; zero-width windows raise.
+    # 4. Shared deadline lift certifying the anchor routes under every derived
+    #    overlay, after splitting any route that no longer returns by the
+    #    horizon. Earliest bounds are never reduced; zero-width windows raise.
+    certified_routes = _split_for_traffic(
+        anchor_routes, provided_time_windows, service_times, anchor_arcs_by_sub, TD_HORIZON[1]
+    )
     lifted, repairs = _audit_and_lift(
         provided_time_windows,
         service_times,
-        [anchor_custs],
+        certified_routes,
         anchor_arcs_by_sub,
         TD_HORIZON[1],
     )
@@ -443,12 +595,15 @@ def derive_td_from_vrptw(
             (e["deadline_after"] - e["deadline_before"] for e in lift_entries), default=0
         ),
         "anchor_route_source": anchor_source,
+        "anchor_routes": len(anchor_routes),
+        "anchor_routes_after_traffic_split": len(certified_routes),
         "repairs": repairs,
     }
 
     # 5. Emit the twins (TDVRP without windows, TDVRPTW with the lifted set).
     generated_at = meta.get("generated_at") or manifest.get("generated_at", "")
     combos_out: list[dict[str, Any]] = []
+    twin_payloads: dict[tuple[str, str], tuple[dict[str, Any], dict[str, Any]]] = {}
     for m, i in combos:
         sub = subinstance_name(m, i)
         name = td_instance_name(base, m, i)
@@ -460,6 +615,7 @@ def derive_td_from_vrptw(
             "base_instance_name": base,
             "subinstance": sub,
             "generator": _generator("derive-td", {"city": city_slug, "method": method_tag}),
+            "derived_from": derived_from,
             "traffic": traffic_info[sub],
             "notes": (
                 "Time dependence derives from the city's OSM road network: the shared "
@@ -467,7 +623,7 @@ def derive_td_from_vrptw(
                 "subinstance's traffic overlay carries per-edge hourly speeds; arrival-time "
                 "functions are materialized deterministically on load and pinned by "
                 "td.atf_sha256. Windows reuse the derive-vrptw set, lifted to time-dependent "
-                "feasibility along the anchor route."
+                "feasibility along the anchor routes."
             ),
         }
         common = {
@@ -501,8 +657,7 @@ def derive_td_from_vrptw(
             "problem_type": "TDVRPTW",
             "tw_repair": tw_repair,
         }
-        save_json_to_file(tdvrp_payload, twin_paths[(m, i)]["TDVRP"])
-        save_json_to_file(tdvrptw_payload, twin_paths[(m, i)]["TDVRPTW"])
+        twin_payloads[(m, i)] = (tdvrp_payload, tdvrptw_payload)
         combos_out.append(
             {
                 "model": m,
@@ -516,6 +671,26 @@ def derive_td_from_vrptw(
             }
         )
 
+    # 6. Stage the sidecars and twins, verify them in the staging tree, publish.
+    with StagedTree(folder, f"derive-td-{base}") as staged:
+        marker = folder / COLLECTION_MARKER_FILENAME
+        if marker.is_file():
+            staged.link_live(marker)
+        else:
+            staged.stage(marker)
+            ensure_collection_root(staged.root)  # sidecar refs resolve against the folder
+        save_instance_road_graph(road, staged.stage(folder / road_file))
+        for sub, overlay in overlays.items():
+            save_traffic_overlay(overlay, staged.stage(folder / overlay_refs[sub]["path"]))
+        for key, (tdvrp_payload, tdvrptw_payload) in twin_payloads.items():
+            save_json_to_file(tdvrp_payload, staged.stage(twin_paths[key]["TDVRP"]))
+            save_json_to_file(tdvrptw_payload, staged.stage(twin_paths[key]["TDVRPTW"]))
+            if verify:
+                load_td_instance(
+                    staged.path(twin_paths[key]["TDVRPTW"]), verify_sha256=True, collection_root=staged.root
+                )
+        staged.commit()
+
     return {
         "ok": True,
         "base": base,
@@ -526,6 +701,7 @@ def derive_td_from_vrptw(
         "road_sidecar": road_file,
         "road_sha256": road_sha,
         "anchor_route_source": anchor_source,
+        "anchor_routes": len(certified_routes),
         "lifted_customers": len(lift_entries),
         "max_lift_seconds": tw_repair["max_lift_seconds"],
         "combos": combos_out,
