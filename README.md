@@ -178,3 +178,7 @@ uv run mamut-tools geometry materialize-plan plan.json --repo-root path/to/MAMUT
 - `full` retains the broad `highway=*` and `amenity=*` behavior for compatibility.
 
 Successful tile responses are validated and cached under `<osm-dir>/.mamut-osm-tile-cache`. Repeating an interrupted request reuses those tiles; pass `--no-tile-cache` to disable reuse or `--tile-cache-dir` to choose another location.
+
+## Academic citation
+
+The authors, in citation order, are Adrien Pichon, Florian Rascoussier, Romain Billot, Lina Fahed, Alexandru-Liviu Olteanu, Marc Sevaux and Christine Solnon. The 2 lead authors are ordered alphabetically by surname, followed by the scientific supervisors in alphabetical order. Cite this project using [CITATION.cff](CITATION.cff), which includes all authors' ORCID identifiers.

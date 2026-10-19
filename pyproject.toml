@@ -4,8 +4,13 @@ version = "0.6.0"
 description = "Local generation tool suite for MAMUT-routing: OSM acquisition, road-graph engine, route geometry, and CVRP / VRPTW / time-dependent (TDVRP, TDVRPTW) instance generation."
 readme = "README.md"
 authors = [
-    { name = "Florian Rascoussier", email = "onyr.maintainer@gmail.com" },
     { name = "Adrien Pichon" },
+    { name = "Florian Rascoussier", email = "onyr.maintainer@gmail.com" },
+    { name = "Romain Billot" },
+    { name = "Lina Fahed" },
+    { name = "Alexandru-Liviu Olteanu" },
+    { name = "Marc Sevaux" },
+    { name = "Christine Solnon" },
 ]
 license = "MIT"
 license-files = ["LICENSE"]

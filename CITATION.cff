@@ -8,16 +8,36 @@ message: >-
   metadata from this file.
 type: software
 authors:
-  - given-names: Florian
-    family-names: Rascoussier
-    alias: Onyr
-    affiliation: IMT Atlantique; INSA Lyon
-    orcid: "https://orcid.org/0009-0005-3253-9814"
   - given-names: Adrien
     family-names: Pichon
     alias: Anzury
     affiliation: Université Bretagne Sud
     orcid: "https://orcid.org/0009-0005-8630-3962"
+  - given-names: Florian
+    family-names: Rascoussier
+    alias: Onyr
+    affiliation: IMT Atlantique; INSA Lyon
+    orcid: "https://orcid.org/0009-0005-3253-9814"
+  - given-names: Romain
+    family-names: Billot
+    affiliation: IMT Atlantique; Lab-STICC
+    orcid: "https://orcid.org/0000-0002-2614-3822"
+  - given-names: Lina
+    family-names: Fahed
+    affiliation: IMT Atlantique; Lab-STICC
+    orcid: "https://orcid.org/0000-0002-7207-0580"
+  - given-names: Alexandru-Liviu
+    family-names: Olteanu
+    affiliation: Université Bretagne Sud; Lab-STICC
+    orcid: "https://orcid.org/0000-0002-0715-2168"
+  - given-names: Marc
+    family-names: Sevaux
+    affiliation: Université Bretagne Sud; Lab-STICC
+    orcid: "https://orcid.org/0000-0003-3855-9072"
+  - given-names: Christine
+    family-names: Solnon
+    affiliation: INSA Lyon; Inria; CITI
+    orcid: "https://orcid.org/0000-0002-0919-496X"
 repository-code: "https://github.com/ANR-MAMUT/MAMUT-routing-tools"
 abstract: >-
   MAMUT-routing-tools is the local generation tool suite of the
