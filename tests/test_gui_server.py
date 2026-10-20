@@ -38,7 +38,7 @@ def _frontend_source(client: TestClient) -> str:
     all, not which file carries it, so they assert against the whole bundle.
     """
     parts = [client.get("/").text]
-    for asset in ("workbench.css", "workbench.js", "layout.js"):
+    for asset in ("workbench.css", "workbench.js", "layout.js", "mamut-map.js"):
         response = client.get(f"/static/{asset}")
         assert response.status_code == 200, f"missing frontend asset {asset}"
         parts.append(response.text)
@@ -76,9 +76,15 @@ def test_gui_shell_inlines_the_basemap_api_key_only_when_configured(
     monkeypatch.setenv("MAMUT_BASEMAP_API_KEY", "cb1_test-KEY_01")
     with TestClient(app, base_url="http://localhost", headers=headers) as client:
         assert 'window.__MAMUT_BASEMAP_API_KEY__="cb1_test-KEY_01";' in client.get("/").text
+        # CARTO vector styles through the shared MapLibre kit, every CARTO request
+        # keyed; no raster tile template survives (it would draw a watermark).
         source = client.get("/static/workbench.js").text
-        assert "basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png?key=" in source
-        assert 'href="https://carto.com/attributions">CARTO</a>' in source
+        kit = client.get("/static/mamut-map.js").text
+        assert "apiKey: basemapApiKey," in source
+        assert "transformRequest: (url) => withBasemapKey(url, apiKey)" in kit
+        assert "https://basemaps.cartocdn.com/gl/${styleName}/style.json?key=" in kit
+        assert 'href="https://carto.com/attributions">CARTO</a>' in kit
+        assert "{z}/{x}/{y}{r}.png" not in source + kit
 
     monkeypatch.setenv("MAMUT_BASEMAP_API_KEY", 'bad"key')
     with TestClient(app, base_url="http://localhost", headers=headers) as client:

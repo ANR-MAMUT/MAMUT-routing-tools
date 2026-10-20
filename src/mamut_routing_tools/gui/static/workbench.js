@@ -55,77 +55,143 @@ const markerColors = () => (isDark()
   ? { depot: "#ff7a6e", poi: "#45e8a5", parametric: "#9d8bff" }
   : { depot: "#e8503f", poi: "#0f9e68", parametric: "#5b43e8" });
 
-function starPoints(centerX, centerY, outerRadius, innerRatio = 0.42, spikes = 5) {
-  const innerRadius = outerRadius * innerRatio;
-  const points = [];
-  for (let index = 0; index < spikes * 2; index += 1) {
-    const radius = index % 2 === 0 ? outerRadius : innerRadius;
-    const angle = -Math.PI / 2 + (index * Math.PI) / spikes;
-    points.push(`${(centerX + radius * Math.cos(angle)).toFixed(2)},${(centerY + radius * Math.sin(angle)).toFixed(2)}`);
-  }
-  return points.join(" ");
-}
-
-function depotStarIcon(color) {
-  const size = 26;
-  const outline = isDark() ? "rgba(12, 14, 32, 0.85)" : "rgba(255, 255, 255, 0.9)";
-  return L.divIcon({
-    className: "depot-star-marker",
-    html: `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><polygon points="${starPoints(12, 12, 11)}" fill="${color}" fill-opacity="0.95" stroke="${outline}" stroke-width="1.4" stroke-linejoin="round" /></svg>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-  });
-}
-
 const el = (id) => document.getElementById(id);
 const status = (text) => { el("status").textContent = text; el("status").title = text; };
 
 /* ── Map ── */
-/* CARTO raster basemaps need the CARTO basemaps API key that the server inlines
-   from MAMUT_BASEMAP_API_KEY (https://carto.com/basemaps/apikey); without it they
-   draw a watermark, so the map then runs on OpenStreetMap only. CARTO's free tier
-   requires CARTO and OpenStreetMap to stay credited on the map. */
-const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-const CARTO_ATTRIBUTION = `${OSM_ATTRIBUTION} &copy; <a href="https://carto.com/attributions">CARTO</a>`;
+/* MapLibre GL through the shared kit in mamut-map.js (the public website draws with
+   the same file). CARTO vector basemaps need the CARTO basemaps API key that the
+   server inlines from MAMUT_BASEMAP_API_KEY (https://carto.com/basemaps/apikey);
+   without it the map runs on OpenStreetMap only. CARTO's free tier requires CARTO
+   and OpenStreetMap to stay credited on the map; mamut-map.js sets both. */
 const basemapApiKey = window.__MAMUT_BASEMAP_API_KEY__ || "";
-const cartoRasterLayer = (style, key) => L.tileLayer(
-  `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(key)}`,
-  { maxZoom: 20, subdomains: "abcd", attribution: CARTO_ATTRIBUTION },
-);
-const map = L.map("map", { zoomControl: true }).setView([46.5, 2.5], 6);
-const positron = basemapApiKey ? cartoRasterLayer("light_all", basemapApiKey) : null;
-const darkMatter = basemapApiKey ? cartoRasterLayer("dark_all", basemapApiKey) : null;
-const openStreetMap = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19, attribution: OSM_ATTRIBUTION,
+const mapController = window.MamutMap.createMap(el("map"), {
+  center: [2.5, 46.5],
+  zoom: 5,
+  apiKey: basemapApiKey,
+  dark: isDark(),
+  scale: true,
+  // Shift-click picks a POI as the depot; MapLibre's shift-drag box zoom would eat it.
+  boxZoom: false,
 });
-if (!basemapApiKey) {
-  console.info("CARTO basemaps disabled: MAMUT_BASEMAP_API_KEY is not set, using OpenStreetMap tiles.");
+const map = mapController?.map || null;
+if (!map) {
+  const notice = document.createElement("p");
+  notice.className = "map-unavailable";
+  notice.textContent = "The map needs WebGL, which this browser does not provide.";
+  el("map").appendChild(notice);
 }
-const themedBase = () => (isDark() ? darkMatter : positron) || openStreetMap;
-let baseLayer = themedBase();
-baseLayer.addTo(map);
-
-L.control.scale({ imperial: false, position: "bottomleft" }).addTo(map);
-L.control.layers(
-  basemapApiKey
-    ? { "Dark Matter": darkMatter, "Positron": positron, "OpenStreetMap": openStreetMap }
-    : { "OpenStreetMap": openStreetMap },
-  {},
-  { position: "topright" },
-).addTo(map);
 
 /* The basemap normally follows the theme. Once the user picks one explicitly that
    link is cut, otherwise flipping the theme would silently undo their choice. */
 let basemapPinned = false;
-map.on("baselayerchange", (event) => {
-  baseLayer = event.layer;
+mapController?.onUserBasemapChoice(() => {
   basemapPinned = true;
 });
 
-const previewLayers = L.layerGroup().addTo(map);
-const instanceNodeLayers = L.layerGroup().addTo(map);
-const poiPickLayers = L.layerGroup().addTo(map);
-let routeLayerGroups = [];
+const solutionLayers = map
+  ? window.MamutMap.createSolutionLayers(map, {
+    interaction: "hover",
+    nodeRadius: 5,
+    depotRadius: 7,
+    nodeStrokeWidth: 2,
+    depotStrokeWidth: 3,
+    nodeFillOpacity: 0.9,
+    describe: describeSolutionFeature,
+  })
+  : null;
+
+/* What the solution layers currently hold; geometry is pushed to the map only when
+   it changes, every view option is feature-state. */
+let solutionData = { key: null, routeLines: [], nodes: [], depot: null, routeMode: "straight_line", hasRoutes: false };
+
+/* The generation preview and the manual POI pool are this GUI's own layers. Their
+   ids start with "mamut-" so basemap swaps slide in underneath them. */
+const toolLayers = { ready: false, preview: null, poi: null };
+if (map) map.once("load", installToolLayers);
+
+function installToolLayers() {
+  const empty = { type: "FeatureCollection", features: [] };
+  map.addSource("mamut-preview", { type: "geojson", data: empty });
+  map.addLayer({
+    id: "mamut-preview-circle",
+    type: "circle",
+    source: "mamut-preview",
+    paint: {
+      "circle-radius": ["case", ["==", ["get", "role"], "depot"], 7, 4],
+      "circle-color": ["to-color", ["get", "color"]],
+      "circle-opacity": 0.85,
+      "circle-stroke-width": ["case", ["==", ["get", "role"], "depot"], 2, 1],
+      "circle-stroke-color": ["to-color", ["get", "color"]],
+    },
+  });
+  map.addSource("mamut-poi", { type: "geojson", data: empty });
+  map.addLayer({
+    id: "mamut-poi-circle",
+    type: "circle",
+    source: "mamut-poi",
+    paint: {
+      "circle-radius": ["coalesce", ["feature-state", "r"], 3.5],
+      "circle-color": ["to-color", ["coalesce", ["feature-state", "c"], "#888888"]],
+      "circle-opacity": ["coalesce", ["feature-state", "fo"], 0.35],
+      "circle-stroke-width": ["coalesce", ["feature-state", "sw"], 1],
+      "circle-stroke-color": ["to-color", ["coalesce", ["feature-state", "c"], "#888888"]],
+    },
+  });
+  const tooltips = window.MamutMap.bindLayerTooltip(map, ["mamut-poi-circle", "mamut-preview-circle"], describeToolFeature);
+  map.on("click", "mamut-poi-circle", (event) => {
+    const feature = event.features?.[0];
+    const poi = feature ? state.poiPool[feature.id] : null;
+    if (!poi) return;
+    const key = poiKey(poi.properties);
+    // Shift-click promotes a POI to the depot instead of toggling it.
+    if (event.originalEvent && event.originalEvent.shiftKey) setManualDepot(key, poi);
+    else toggleManualPick(key, poi);
+    // The tooltip names the pick state; show the new one on the next pointer move.
+    tooltips.refresh();
+  });
+  toolLayers.ready = true;
+  setPreviewFeatures(toolLayers.preview);
+  if (toolLayers.poi) {
+    map.getSource("mamut-poi").setData(toolLayers.poi);
+    applyPoiStates();
+  }
+}
+
+/* Layer handles kept from the Leaflet version: the call sites only ever clear them. */
+const previewLayers = { clearLayers: () => setPreviewFeatures(null) };
+const instanceNodeLayers = {
+  clearLayers: () => {
+    solutionData = { ...solutionData, key: null, nodes: [], depot: null, hasRoutes: false };
+    pushSolution();
+  },
+};
+const poiPickLayers = { clearLayers: () => setPoiFeatures(null) };
+
+function textTooltip(text) {
+  const node = document.createElement("div");
+  node.className = "map-tooltip";
+  node.textContent = text;
+  return node;
+}
+
+function describeToolFeature(feature) {
+  if (feature.layer.id === "mamut-poi-circle") {
+    const poi = state.poiPool[feature.id];
+    if (!poi) return null;
+    const key = poiKey(poi.properties);
+    const suffix = state.manualDepotKey === key ? " · DEPOT" : state.manualPicks.has(key) ? " · picked" : "";
+    return textTooltip(`${poiLabel(poi.properties)}${suffix}`);
+  }
+  const previewFeature = state.previewGeojson?.features?.[feature.id];
+  return previewFeature ? textTooltip(nodeTooltip(previewFeature.properties)) : null;
+}
+
+/* The left and right panels, so a fit keeps the data clear of them. */
+function fitMapTo(bounds) {
+  if (!map) return;
+  window.MamutMap.fitToBounds(map, bounds, [document.querySelector(".panel-left"), document.querySelector(".panel-right")], { base: 40 });
+}
 
 /* ── Preferences ── */
 /* Durable across GUI restarts: localStorage is keyed by origin including the port, and
@@ -143,13 +209,12 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem("mamut-theme", theme); } catch (error) { /* private mode */ }
   savePreferences({ theme });
-  const nextBase = themedBase();
-  if (!basemapPinned && nextBase !== baseLayer) {
-    map.removeLayer(baseLayer);
-    nextBase.addTo(map);
-    baseLayer = nextBase;
+  if (mapController && !basemapPinned) {
+    const themed = window.MamutMap.themedBasemapId(isDark(), basemapApiKey);
+    if (themed !== mapController.basemaps.current) mapController.basemaps.set(themed);
   }
   redrawRoutes();
+  if (state.poiPool.length) applyPoiStates();
 }
 document.querySelectorAll("[data-theme-pick]").forEach((button) => {
   button.addEventListener("click", () => applyTheme(button.dataset.themePick));
@@ -249,9 +314,8 @@ const layout = window.MamutLayout.initLayout({
   stage: document.documentElement,
   storageKey: window.MamutLayout.STORAGE_KEY,
   defaults: (window.__MAMUT_PREFS__ || {}).layout,
-  /* Leaflet caches the container size; without this the map keeps the old width and
-     the tiles tear or grey out after a drag. */
-  onResize: () => map.invalidateSize({ animate: false }),
+  /* MapLibre caches the container size; resize after a drag so it never draws stale. */
+  onResize: () => map?.resize(),
   onPersist: (state) => savePreferences({ layout: state }),
 });
 
@@ -319,10 +383,6 @@ el("appearance-arrows").addEventListener("change", (event) => {
 el("appearance-depot-star").addEventListener("change", (event) => {
   state.routeView.depotStar = event.target.checked;
   redrawRoutes();
-});
-
-map.on("zoomend", () => {
-  if (state.lastRendered && !state.previewGeojson) redrawRoutes();
 });
 
 /* ── Activity strip ── */
@@ -665,33 +725,33 @@ async function loadCities() {
 
 /* ── Map drawing ── */
 function clearRouteLayers() {
-  routeLayerGroups.forEach((group) => map.removeLayer(group));
-  routeLayerGroups = [];
+  solutionData = { ...solutionData, key: null, routeLines: [], routeMode: "straight_line", hasRoutes: false };
+  pushSolution();
+}
+
+function setPreviewFeatures(features) {
+  toolLayers.preview = features;
+  if (!toolLayers.ready) return;
+  map.getSource("mamut-preview").setData({ type: "FeatureCollection", features: features || [] });
 }
 
 function drawPreview(geojson) {
   state.previewGeojson = geojson;
-  clearRouteLayers();
-  instanceNodeLayers.clearLayers();
-  previewLayers.clearLayers();
+  solutionData = { key: null, routeLines: [], nodes: [], depot: null, routeMode: "straight_line", hasRoutes: false };
+  pushSolution();
   const colors = markerColors();
-  const bounds = [];
-  geojson.features.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
-    bounds.push([lat, lon]);
+  const points = [];
+  // The colour is data here (not feature-state): a preview is small, and a theme
+  // change simply redraws it.
+  setPreviewFeatures(geojson.features.map((feature, index) => {
+    points.push(feature.geometry.coordinates);
     const tag = String(feature.properties.source_tag || "");
     const role = feature.properties.role === "depot"
       ? "depot"
       : (tag.startsWith("poi") ? "poi" : "parametric");
-    L.circleMarker([lat, lon], {
-      radius: role === "depot" ? 7 : 4,
-      color: colors[role],
-      fillColor: colors[role],
-      fillOpacity: 0.85,
-      weight: role === "depot" ? 2 : 1,
-    }).bindTooltip(nodeTooltip(feature.properties)).addTo(previewLayers);
-  });
-  if (bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
+    return { type: "Feature", id: index, properties: { role, color: colors[role] }, geometry: feature.geometry };
+  }));
+  if (points.length) fitMapTo(window.MamutMap.boundsOf(points));
 }
 
 /* What a merged amenity reads as: its name, or its category when unnamed, and
@@ -742,6 +802,12 @@ function clearPoiPool() {
   state.poiPoolCity = null;
 }
 
+function setPoiFeatures(collection) {
+  toolLayers.poi = collection;
+  if (!toolLayers.ready) return;
+  map.getSource("mamut-poi").setData(collection || { type: "FeatureCollection", features: [] });
+}
+
 async function loadPoiPool() {
   const city = el("city").value;
   if (!city) throw new Error("Select a city first.");
@@ -774,33 +840,39 @@ function poiKey(properties) {
   return `${properties.osm_type || "node"}/${properties.osm_id}`;
 }
 
-function renderPoiMarkers(fit = false) {
-  poiPickLayers.clearLayers();
+function poiStyle(key, colors) {
+  const picked = state.manualPicks.has(key);
+  const isDepot = state.manualDepotKey === key;
+  return {
+    r: isDepot ? 7 : picked ? 5.5 : 3.5,
+    c: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
+    fo: picked || isDepot ? 0.9 : 0.35,
+    sw: picked || isDepot ? 2 : 1,
+  };
+}
+
+/* Picks restyle the pool through feature-state: a click on one of 20 000 POIs no
+   longer rebuilds every marker. */
+function applyPoiStates() {
+  if (!toolLayers.ready || !toolLayers.poi) return;
   const colors = markerColors();
-  const bounds = [];
-  state.poiPool.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
-    const key = poiKey(feature.properties);
-    const picked = state.manualPicks.has(key);
-    const isDepot = state.manualDepotKey === key;
-    bounds.push([lat, lon]);
-    const marker = L.circleMarker([lat, lon], {
-      radius: isDepot ? 7 : picked ? 5.5 : 3.5,
-      color: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
-      fillColor: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
-      fillOpacity: picked || isDepot ? 0.9 : 0.35,
-      weight: picked || isDepot ? 2 : 1,
-    });
-    const suffix = isDepot ? " · DEPOT" : picked ? " · picked" : "";
-    marker.bindTooltip(`${poiLabel(feature.properties)}${suffix}`);
-    marker.on("click", (event) => {
-      // Shift-click promotes a POI to the depot instead of toggling it.
-      if (event.originalEvent && event.originalEvent.shiftKey) setManualDepot(key, feature);
-      else toggleManualPick(key, feature);
-    });
-    marker.addTo(poiPickLayers);
+  state.poiPool.forEach((feature, index) => {
+    map.setFeatureState({ source: "mamut-poi", id: index }, poiStyle(poiKey(feature.properties), colors));
   });
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [50, 50] });
+}
+
+function renderPoiMarkers(fit = false) {
+  if (toolLayers.poi?.pool !== state.poiPool) {
+    const collection = {
+      type: "FeatureCollection",
+      features: state.poiPool.map((feature, index) => ({ type: "Feature", id: index, properties: {}, geometry: feature.geometry })),
+    };
+    // Remembered so the source is only replaced when the pool itself changes.
+    Object.defineProperty(collection, "pool", { value: state.poiPool, enumerable: false });
+    setPoiFeatures(collection);
+  }
+  applyPoiStates();
+  if (fit && state.poiPool.length) fitMapTo(window.MamutMap.boundsOf(state.poiPool.map((feature) => feature.geometry.coordinates)));
   renderManualPicks();
 }
 
@@ -924,59 +996,92 @@ function customerMarkerOpacity(routeIndex) {
   return 1;
 }
 
-function drawInstanceNodes(routes = null, fit = false) {
-  instanceNodeLayers.clearLayers();
-  const mapData = state.selected?.mapData;
-  if (!mapData?.geojson?.features) return [];
+function instanceNodeData(routes) {
+  const features = state.selected?.mapData?.geojson?.features;
+  if (!features) return { nodes: [], depot: null };
   const assignments = new Map();
   (routes || []).forEach((route, routeIndex) => {
     route.forEach((modelNodeId) => assignments.set(Number(modelNodeId), routeIndex));
   });
-  const colors = markerColors();
-  const bounds = [];
-  mapData.geojson.features.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
+  const nodes = [];
+  let depot = null;
+  features.forEach((feature) => {
     const properties = feature.properties || {};
-    const isDepot = properties.role === "depot";
-    const routeIndex = assignments.get(Number(properties.model_node_id));
-    const opacity = isDepot ? 1 : customerMarkerOpacity(routeIndex);
-    if (opacity <= 0) return;
-    const color = isDepot
-      ? colors.depot
-      : (routeIndex == null
-        ? (String(properties.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric)
-        : routeColor(routeIndex));
-    const marker = isDepot && state.routeView.depotStar && Array.isArray(routes) && routes.length > 0
-      ? L.marker([lat, lon], { icon: depotStarIcon(color), interactive: true, keyboard: false })
-      : L.circleMarker([lat, lon], {
-        radius: isDepot ? 7 : 5,
-        color,
-        fillColor: color,
-        opacity,
-        fillOpacity: 0.9 * opacity,
-        weight: isDepot ? 3 : 2,
-      });
-    const label = isDepot ? "Depot" : `Customer ${properties.model_node_id}`;
-    const named = properties.poi_name ? ` · ${properties.poi_name}` : "";
-    // The amenities that collapsed onto this same road point, so a node holding
-    // several places does not read as one arbitrary winner.
-    const merged = properties.poi_merged || [];
-    const alsoHere = merged.length
-      ? ` · +${merged.length} here: ${merged.map(mergedPoiLabel).join(", ")}`
-      : "";
-    // Non-zero when the amenity was snapped to a routable point rather than
-    // sitting on one, so the node is not exactly where the place is.
-    const snapped = properties.snap_distance_m > 1
-      ? ` · snapped ${Math.round(properties.snap_distance_m)} m`
-      : "";
-    marker.bindTooltip(
-      `${label}${named} · demand ${properties.demand} · ${properties.source_tag}`
-      + `${snapped}${alsoHere}`);
-    marker.addTo(instanceNodeLayers);
-    bounds.push([lat, lon]);
+    const index = Number(properties.model_node_id);
+    const coord = feature.geometry.coordinates;
+    if (properties.role === "depot") {
+      depot = { index, coord, properties };
+    } else {
+      nodes.push({ index, coord, routeIndex: assignments.get(index), properties });
+    }
   });
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
-  return bounds;
+  return { nodes, depot };
+}
+
+function pushSolution() {
+  if (!solutionLayers) return;
+  solutionLayers.setData({ routeLines: solutionData.routeLines, nodes: solutionData.nodes, depot: solutionData.depot });
+  applySolutionView();
+}
+
+/* Every appearance option is feature-state on data the map already holds. */
+function applySolutionView() {
+  if (!solutionLayers) return;
+  const routes = state.selected?.solved?.routes || [];
+  const visibleRoutes = new Set();
+  routes.forEach((_, index) => {
+    if (!state.hiddenRoutes.has(index)) visibleRoutes.add(index);
+  });
+  const colors = markerColors();
+  solutionLayers.applyView({
+    visibleRoutes,
+    focusedRoute: state.focusedRoute,
+    fadedOpacity: state.routeView.fadedOpacity,
+    depotLegOpacity: state.routeView.depotLegOpacity,
+    routeMode: solutionData.routeMode,
+    roadOpacity: 0.9,
+    customerOpacity: customerMarkerOpacity,
+    arrowsEnabled: state.routeView.arrowsEnabled,
+    depotStar: state.routeView.depotStar && solutionData.hasRoutes,
+    palette: window.MamutNocturne.routeColors(),
+    depotColor: colors.depot,
+    unassignedColor: (node) => (String(node.properties?.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric),
+    dark: isDark(),
+  });
+}
+
+/* Tooltip text, built as a text node: OSM names are data, never markup. */
+function describeSolutionFeature(info) {
+  if (info.kind === "route") {
+    const routeLine = solutionData.routeLines[info.routeIndex];
+    const properties = routeLine?.properties || {};
+    return textTooltip(`R${properties.route_index ?? info.routeIndex + 1}: ${properties.stops ?? "?"} stops, load ${properties.load ?? "?"} (${solutionData.routeMode})`);
+  }
+  const node = info.kind === "depot" ? solutionData.depot : solutionData.nodes.find((candidate) => candidate.index === info.nodeIndex);
+  if (!node) return null;
+  const properties = node.properties || {};
+  const label = info.kind === "depot" ? "Depot" : `Customer ${properties.model_node_id}`;
+  const named = properties.poi_name ? ` · ${properties.poi_name}` : "";
+  // The amenities that collapsed onto this same road point, so a node holding
+  // several places does not read as one arbitrary winner.
+  const merged = properties.poi_merged || [];
+  const alsoHere = merged.length
+    ? ` · +${merged.length} here: ${merged.map(mergedPoiLabel).join(", ")}`
+    : "";
+  // Non-zero when the amenity was snapped to a routable point rather than
+  // sitting on one, so the node is not exactly where the place is.
+  const snapped = properties.snap_distance_m > 1
+    ? ` · snapped ${Math.round(properties.snap_distance_m)} m`
+    : "";
+  return textTooltip(`${label}${named} · demand ${properties.demand} · ${properties.source_tag}${snapped}${alsoHere}`);
+}
+
+function drawInstanceNodes(routes = null, fit = false) {
+  const { nodes, depot } = instanceNodeData(routes);
+  solutionData = { ...solutionData, key: null, nodes, depot, hasRoutes: Array.isArray(routes) && routes.length > 0 };
+  if (!routes) solutionData.routeLines = [];
+  pushSolution();
+  if (fit) fitMapTo(solutionLayers?.bounds());
 }
 
 function straightRouteLines(rendered) {
@@ -1003,6 +1108,16 @@ function straightRouteLines(rendered) {
   });
 }
 
+/* Per-arc segments of a server-rendered road route: arc k spans coordinates
+   arc_starts[k] .. arc_starts[k + 1] (sharing the joint point). A payload without
+   arc_starts (an older server) stays one merged segment, with no separable legs. */
+function roadSegments(feature) {
+  const coordinates = feature.geometry?.coordinates || [];
+  const starts = feature.properties?.arc_starts;
+  if (!Array.isArray(starts) || starts.length === 0) return [coordinates];
+  return starts.map((start, arc) => coordinates.slice(start, arc + 1 < starts.length ? starts[arc + 1] + 1 : coordinates.length));
+}
+
 function activeRouteGeometry(rendered) {
   if (state.routeView.renderMode === "cached_road" && cachedRoadRenderingAvailable(rendered)) {
     return {
@@ -1010,7 +1125,7 @@ function activeRouteGeometry(rendered) {
       routeLines: rendered.geojson.features.map((feature, routeIndex) => ({
         routeIndex,
         coordinates: feature.geometry?.coordinates || [],
-        segments: [feature.geometry?.coordinates || []],
+        segments: roadSegments(feature),
         properties: feature.properties || {},
       })),
     };
@@ -1018,87 +1133,22 @@ function activeRouteGeometry(rendered) {
   return { routeMode: "straight_line", routeLines: straightRouteLines(rendered) };
 }
 
-function calculateBearing(from, to) {
-  const lat1 = (from.lat * Math.PI) / 180;
-  const lat2 = (to.lat * Math.PI) / 180;
-  const dLon = ((to.lng - from.lng) * Math.PI) / 180;
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
-}
-
-function arrowSpacing() {
-  const zoom = map.getZoom();
-  if (zoom >= 16) return 150;
-  if (zoom >= 14) return 300;
-  if (zoom >= 12) return 600;
-  if (zoom >= 10) return 1200;
-  return 2500;
-}
-
-function addArrowsToPolyline(polyline, color, opacity, group) {
-  const latlngs = polyline.getLatLngs();
-  let distance = 0;
-  for (let index = 1; index < latlngs.length; index += 1) {
-    const from = latlngs[index - 1];
-    const to = latlngs[index];
-    const segmentDistance = map.distance(from, to);
-    if (segmentDistance < 3) continue;
-    distance += segmentDistance;
-    if (distance < arrowSpacing()) continue;
-    const overshoot = distance - arrowSpacing();
-    const ratio = Math.max(0, Math.min(1, (segmentDistance - overshoot) / segmentDistance));
-    const point = L.latLng(from.lat + (to.lat - from.lat) * ratio, from.lng + (to.lng - from.lng) * ratio);
-    const bearing = calculateBearing(from, to);
-    const icon = L.divIcon({
-      className: "arrow-marker",
-      html: `<div style="transform:rotate(${bearing - 90}deg);font-size:10px;line-height:10px;color:${color};font-weight:700;opacity:${Math.min(0.95, opacity).toFixed(3)}">▶</div>`,
-      iconSize: [10, 10],
-    });
-    L.marker(point, { icon, interactive: false, keyboard: false }).addTo(group);
-    distance = 0;
-  }
-}
-
 function drawRoutes(rendered, fit) {
-  clearRouteLayers();
   previewLayers.clearLayers();
-  const bounds = [];
-  const geometry = activeRouteGeometry(rendered);
-  const hasFocus = state.focusedRoute !== null && !state.hiddenRoutes.has(state.focusedRoute);
-  geometry.routeLines.forEach((routeLine, index) => {
-    const group = L.layerGroup();
-    const focused = hasFocus && state.focusedRoute === index;
-    const baseOpacity = hasFocus && !focused
-      ? state.routeView.fadedOpacity
-      : geometry.routeMode === "straight_line" ? 0.78 : 0.9;
-    routeLine.segments.forEach((segment, segmentIndex) => {
-      const line = segment
-        .filter((point) => Array.isArray(point) && point.length >= 2)
-        .map(([lon, lat]) => [Number(lat), Number(lon)]);
-      bounds.push(...line);
-      const isDepotLeg = geometry.routeMode === "straight_line"
-        && routeLine.segments.length > 1
-        && (segmentIndex === 0 || segmentIndex === routeLine.segments.length - 1);
-      const opacity = isDepotLeg ? Math.min(baseOpacity, state.routeView.depotLegOpacity) : baseOpacity;
-      if (line.length < 2 || opacity <= 0) return;
-      const properties = routeLine.properties;
-      const polyline = L.polyline(line, {
-        color: routeColor(index),
-        weight: focused ? 5 : 3,
-        opacity,
-        lineCap: "round",
-        lineJoin: "round",
-      })
-        .bindTooltip(`R${properties.route_index ?? index + 1}: ${properties.stops ?? "?"} stops, load ${properties.load ?? "?"} (${geometry.routeMode})`)
-        .addTo(group);
-      if (state.routeView.arrowsEnabled) addArrowsToPolyline(polyline, routeColor(index), opacity, group);
-    });
-    routeLayerGroups.push(group);
-    if (!state.hiddenRoutes.has(index)) group.addTo(map);
-  });
-  bounds.push(...drawInstanceNodes(state.selected?.solved?.routes || [], false));
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
+  const routes = state.selected?.solved?.routes || [];
+  // Geometry is rebuilt (and handed to MapLibre) only when the rendered solution,
+  // its instance or the render mode changes; sliders and focus reuse it.
+  const key = [rendered, state.selected?.mapData, routes, state.routeView.renderMode];
+  const same = Array.isArray(solutionData.key) && solutionData.key.every((value, index) => value === key[index]);
+  if (same) {
+    applySolutionView();
+  } else {
+    const geometry = activeRouteGeometry(rendered);
+    const { nodes, depot } = instanceNodeData(routes);
+    solutionData = { key, routeLines: geometry.routeLines, nodes, depot, routeMode: geometry.routeMode, hasRoutes: routes.length > 0 };
+    pushSolution();
+  }
+  if (fit) fitMapTo(solutionLayers?.bounds());
   syncAppearanceControls();
 }
 
@@ -2571,9 +2621,9 @@ el("bulk-download").addEventListener("click", async () => {
 
 el("clear").addEventListener("click", () => {
   previewLayers.clearLayers();
-  instanceNodeLayers.clearLayers();
   poiPickLayers.clearLayers();
-  clearRouteLayers();
+  solutionData = { key: null, routeLines: [], nodes: [], depot: null, routeMode: "straight_line", hasRoutes: false };
+  pushSolution();
   state.previewGeojson = null;
   state.lastRendered = null;
   if (state.selected) state.selected.rendered = null;
