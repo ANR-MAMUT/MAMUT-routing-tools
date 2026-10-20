@@ -1051,6 +1051,22 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         except Exception as error:  # noqa: BLE001
             return _payload_error(400, str(error))
 
+    @app.get("/api/instances/{instance_id}/solutions/{run_id}/timeline")
+    async def solution_run_timeline(instance_id: str, run_id: str) -> Any:
+        """Per-stop times of a run for the route animation, clocked by the
+        instance's free-flow ``fastest`` arc costs (seconds) whatever metric the
+        run was solved on: the only travel time the instance defines."""
+        try:
+            record = _workspace_instance(workspace, instance_id)
+            solution = _solution_or_reference(solutions, record, instance_id, run_id)
+            if solution.get("stale"):
+                return _payload_error(409, _stale_message(solution))
+            return await run_in_threadpool(_timeline_payload, record, solution)
+        except KeyError:
+            return _payload_error(404, "Unknown instance or solution run")
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
+
     @app.post("/api/instances/{instance_id}/solutions/import")
     async def import_solution_run(instance_id: str, request: Request) -> Any:
         """Store an externally produced solution, but only if the checker accepts it.
@@ -1410,6 +1426,25 @@ def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
     return references
 
 
+def _timeline_payload(record: dict[str, Any], solution: dict[str, Any]) -> dict[str, Any]:
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.solvers.pyvrp import hydrate_collection_instance
+
+    from mamut_routing_tools.timeline import build_static_timeline
+
+    instance_path = _instance_variant_path(record, "fastest")
+    instance = hydrate_collection_instance(load_benchmark_instance(instance_path), instance_path)
+    routes = [[int(stop) for stop in route] for route in solution["routes"]]
+    timeline = build_static_timeline(
+        routes,
+        instance.arc_costs,
+        depot=instance.depot,
+        time_windows=getattr(instance, "time_windows", None),
+        service_times=getattr(instance, "service_times", None),
+    )
+    return {"ok": True, "clock": "free_flow_fastest", "clock_metric": "fastest", **timeline}
+
+
 def _solution_or_reference(
     store: SolutionStore,
     record: dict[str, Any],
@@ -1527,6 +1562,10 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
     for route_index, route in enumerate(routes):
         sequence = [depot_id, *route, depot_id]
         coordinates: list[list[float]] = []
+        # Index of each arc's first coordinate in the merged line (arc k spans
+        # coordinates[arc_starts[k] : arc_starts[k + 1] + 1]), so the client can
+        # address single arcs -- depot legs, per-arc animation timing.
+        arc_starts: list[int] = []
         segment_modes: set[str] = set()
         for i in range(len(sequence) - 1):
             from_id, to_id = sequence[i], sequence[i + 1]
@@ -1555,8 +1594,10 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
                 if metric in ("shortest", "fastest"):
                     cache_miss_count += 1
             if coordinates:
+                arc_starts.append(len(coordinates) - 1)
                 coordinates.extend(segment[1:])
             else:
+                arc_starts.append(0)
                 coordinates.extend(segment)
         if segment_modes == {"cached_road"}:
             render_mode = "cached_road"
@@ -1578,6 +1619,7 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
                     "load": load,
                     "metric": metric,
                     "render_mode": render_mode,
+                    "arc_starts": arc_starts,
                 },
             }
         )

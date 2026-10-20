@@ -361,6 +361,13 @@ def test_preview_generate_solve_render_round_trip(client: TestClient) -> None:
         "/api/workbench/render-routes", json={"meta": meta, "routes": solved["routes"], "metric": "fastest"}
     ).json()
     assert rendered["ok"] and rendered["summary"]["render_mode"] in ("cached_road", "mixed")
+    # One arc start per arc, the first at 0, strictly increasing and inside the line:
+    # the client slices per-arc segments (depot legs, animation timing) from them.
+    for feature, route in zip(rendered["geojson"]["features"], solved["routes"]):
+        starts = feature["properties"]["arc_starts"]
+        assert len(starts) == len(route) + 1 and starts[0] == 0
+        assert all(later > earlier for earlier, later in zip(starts, starts[1:]))
+        assert starts[-1] < len(feature["geometry"]["coordinates"]) - 1
 
     rendered_euclidean = client.post(
         "/api/workbench/render-routes", json={"meta": meta, "routes": solved["routes"], "metric": "euclidean"}
@@ -495,6 +502,16 @@ def test_solve_jobs_persist_validated_runs_and_compare_them(client: TestClient) 
         params={"metric": "fastest"},
     ).json()
     assert rendered["ok"] and rendered["summary"]["route_count"] >= 1
+
+    # The animation timeline is clocked by the fastest arc costs, one entry per stop.
+    run = next(run for run in listing["runs"] if run["run_id"] == run_ids[1])
+    timeline = client.get(f"/api/instances/{instance_id}/solutions/{run_ids[1]}/timeline").json()
+    assert timeline["ok"] and timeline["clock"] == "free_flow_fastest" and timeline["time_unit"] == "s"
+    assert [[stop[0] for stop in route["stops"]] for route in timeline["routes"]] == run["routes"]
+    for route in timeline["routes"]:
+        times = [route["departure"]] + [value for stop in route["stops"] for value in stop[1:]] + [route["return_arrival"]]
+        assert times == sorted(times)
+    assert client.get(f"/api/instances/{instance_id}/solutions/nope/timeline").status_code == 404
 
     jobs = client.get("/api/jobs").json()["jobs"]
     assert len([job for job in jobs if job["kind"] == "solve" and job["status"] == "completed"]) == 2
@@ -1108,6 +1125,7 @@ def test_replacing_an_instance_marks_its_runs_stale(client: TestClient) -> None:
     assert runs[0]["stale"] is True and "regenerated" in runs[0]["stale_reason"]
     assert _solution_count(client, first["instance_id"]) == 0
     assert client.post(f"/api/instances/{first['instance_id']}/solutions/{run_id}/render").status_code == 409
+    assert client.get(f"/api/instances/{first['instance_id']}/solutions/{run_id}/timeline").status_code == 409
     compared = client.post(
         f"/api/instances/{first['instance_id']}/solutions/compare",
         json={"candidate_run_id": run_id, "reference_run_id": run_id},
