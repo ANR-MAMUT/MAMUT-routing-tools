@@ -105,6 +105,13 @@ const solutionLayers = map
    it changes, every view option is feature-state. */
 let solutionData = { key: null, routeLines: [], nodes: [], depot: null, routeMode: "straight_line", hasRoutes: false };
 
+/* Route animation (mamut-trips.js). deck.gl is fetched only when one is first
+   opened; animated paths are thinned to a vertex budget deck redraws at ~60 fps. */
+const DECK_SRC = "/static/vendor/deck.gl/dist.min.js";
+const TRIPS_VERTEX_BUDGET = 500000;
+let routeAnimation = null;
+let routeAnimationLoading = false;
+
 /* The generation preview and the manual POI pool are this GUI's own layers. Their
    ids start with "mamut-" so basemap swaps slide in underneath them. */
 const toolLayers = { ready: false, preview: null, poi: null };
@@ -1019,6 +1026,8 @@ function instanceNodeData(routes) {
 }
 
 function pushSolution() {
+  // New geometry: an open animation would keep showing the old routes.
+  closeRouteAnimation();
   if (!solutionLayers) return;
   solutionLayers.setData({ routeLines: solutionData.routeLines, nodes: solutionData.nodes, depot: solutionData.depot });
   applySolutionView();
@@ -1047,8 +1056,71 @@ function applySolutionView() {
     depotColor: colors.depot,
     unassignedColor: (node) => (String(node.properties?.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric),
     dark: isDark(),
+    dim: routeAnimation ? 0.35 : 1,
   });
+  routeAnimation?.setView({ palette: window.MamutNocturne.routeColors(), visibleRoutes, focusedRoute: state.focusedRoute });
+  syncAnimateButton();
 }
+
+function syncAnimateButton() {
+  const button = el("animate-routes");
+  button.hidden = !(map && state.selected?.solved && state.lastRendered && state.selectedRunId);
+  button.disabled = routeAnimationLoading;
+  button.textContent = routeAnimationLoading ? "Loading…" : routeAnimation ? "Stop animation" : "Animate";
+  button.setAttribute("aria-pressed", String(Boolean(routeAnimation)));
+}
+
+function closeRouteAnimation() {
+  const animation = routeAnimation;
+  routeAnimation = null;
+  animation?.close();
+}
+
+/* Times come from the run's /timeline: the checker's accounting on the instance's
+   free-flow fastest arc costs. */
+async function toggleRouteAnimation() {
+  if (routeAnimation) {
+    closeRouteAnimation();
+    applySolutionView();
+    return;
+  }
+  const instance = state.selected;
+  const runId = state.selectedRunId;
+  if (!map || !instance || !runId || routeAnimationLoading) return;
+  routeAnimationLoading = true;
+  syncAnimateButton();
+  const key = solutionData.key;
+  try {
+    const timeline = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/${encodeURIComponent(runId)}/timeline`);
+    if (state.selected !== instance || solutionData.key !== key) return;
+    const ranked = window.MamutMap.rankRouteLines(solutionData.routeLines, { minTolerance: 0.5 });
+    const routes = state.selected?.solved?.routes || [];
+    const visibleRoutes = new Set(routes.map((_, index) => index).filter((index) => !state.hiddenRoutes.has(index)));
+    const animation = await window.MamutTrips.openAnimation(map, el("tripsBar"), {
+      deckSrc: DECK_SRC,
+      routeLines: window.MamutMap.thinRouteLines(ranked, TRIPS_VERTEX_BUDGET).routeLines,
+      timeline,
+      palette: window.MamutNocturne.routeColors(),
+      visibleRoutes,
+      focusedRoute: state.focusedRoute,
+      onClose: () => {
+        routeAnimation = null;
+        applySolutionView();
+      },
+    });
+    if (animation && (state.selected !== instance || solutionData.key !== key)) {
+      animation.close();
+      return;
+    }
+    routeAnimation = animation;
+  } catch (error) {
+    status(`Route animation unavailable: ${error.message}`);
+  } finally {
+    routeAnimationLoading = false;
+    applySolutionView();
+  }
+}
+
 
 /* Tooltip text, built as a text node: OSM names are data, never markup. */
 function describeSolutionFeature(info) {
@@ -1101,6 +1173,7 @@ function straightRouteLines(rendered) {
     const properties = rendered?.geojson?.features?.[routeIndex]?.properties || {};
     return {
       routeIndex,
+      sequence,
       segments,
       coordinates: segments.flatMap((segment, segmentIndex) => segmentIndex === 0 ? segment : segment.slice(1)),
       properties: { ...properties, render_mode: "straight_line" },
@@ -1118,12 +1191,19 @@ function roadSegments(feature) {
   return starts.map((start, arc) => coordinates.slice(start, arc + 1 < starts.length ? starts[arc + 1] + 1 : coordinates.length));
 }
 
+function depotModelId() {
+  const features = state.selected?.mapData?.geojson?.features || [];
+  return Number(features.find((feature) => feature.properties?.role === "depot")?.properties?.model_node_id ?? 0);
+}
+
 function activeRouteGeometry(rendered) {
   if (state.routeView.renderMode === "cached_road" && cachedRoadRenderingAvailable(rendered)) {
     return {
       routeMode: rendered.summary.render_mode,
       routeLines: rendered.geojson.features.map((feature, routeIndex) => ({
         routeIndex,
+        // Model ids, as the timeline's stops name them.
+        sequence: [depotModelId(), ...(state.selected?.solved?.routes?.[routeIndex] || []).map(Number), depotModelId()],
         coordinates: feature.geometry?.coordinates || [],
         segments: roadSegments(feature),
         properties: feature.properties || {},
@@ -2617,6 +2697,10 @@ el("bulk-download").addEventListener("click", async () => {
     saveBlob(blob, "mamut-generated-instances.zip");
     status("Downloaded mamut-generated-instances.zip");
   } catch (error) { status(`Download failed: ${error.message}`); }
+});
+
+el("animate-routes").addEventListener("click", () => {
+  void toggleRouteAnimation();
 });
 
 el("clear").addEventListener("click", () => {

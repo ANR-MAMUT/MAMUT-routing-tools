@@ -398,7 +398,10 @@
       </div>
     </details>
     <div class="fading-rule" style="margin:8px 0"></div>
-    <div class="kicker">Routes · eye to show/hide · row to focus</div>
+    <div class="legend-head">
+      <div class="kicker">Routes · eye to show/hide · row to focus</div>
+      <button id="animate-routes" class="animate-btn" type="button" aria-pressed="false" hidden>Animate</button>
+    </div>
     <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
   </section>
 
@@ -618,11 +621,13 @@
     </div>
   </div>
 </section>
+<div id="tripsBar" class="trips-bar-host" hidden></div>
 <button id="clear" class="map-clear-btn" type="button">Clear map</button>
 
 <script src="/static/nocturne.js"></script>
 <script src="/static/vendor/maplibre-gl/maplibre-gl.js"></script>
 <script src="/static/mamut-map.js"></script>
+<script src="/static/mamut-trips.js"></script>
 <script src="/static/workbench.js"></script>
 </body>
 </html>

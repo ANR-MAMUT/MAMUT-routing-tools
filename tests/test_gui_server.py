@@ -38,7 +38,7 @@ def _frontend_source(client: TestClient) -> str:
     all, not which file carries it, so they assert against the whole bundle.
     """
     parts = [client.get("/").text]
-    for asset in ("workbench.css", "workbench.js", "layout.js", "mamut-map.js"):
+    for asset in ("workbench.css", "workbench.js", "layout.js", "mamut-map.js", "mamut-trips.js"):
         response = client.get(f"/static/{asset}")
         assert response.status_code == 200, f"missing frontend asset {asset}"
         parts.append(response.text)
@@ -152,6 +152,10 @@ def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client
     ):
         assert f'id="{control}"' in html
     assert 'value="cached_road"' in html and 'value="straight_line"' in html
+    # Route animation: the button, the playback bar host, deck.gl loaded on demand only.
+    assert 'id="animate-routes"' in html and 'id="tripsBar"' in html
+    assert '<script src="/static/vendor/deck.gl' not in html
+    assert 'const DECK_SRC = "/static/vendor/deck.gl/dist.min.js";' in html
 
 
 def test_gui_shell_groups_the_form_and_moves_jobs_out_of_the_panel(client: TestClient) -> None:
