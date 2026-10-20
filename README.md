@@ -115,7 +115,9 @@ uv run mamut-tools gui status   # running? healthy? which URL and workspace?
 uv run mamut-tools gui stop     # terminate the background server
 ```
 
-The map offers the CARTO Positron and Dark Matter basemaps on top of OpenStreetMap tiles. CARTO basemaps need an API key, free within the CARTO fair-use tier (request one at https://carto.com/basemaps/apikey, and keep the CARTO and OpenStreetMap attribution visible, which the GUI does). Export it as `MAMUT_BASEMAP_API_KEY` before `mamut-tools gui start` (or `gui run`): the server inlines it into the page. Without it the map falls back to OpenStreetMap tiles only. Never commit the key.
+The map (MapLibre GL) offers the CARTO Positron and Dark Matter vector basemaps on top of OpenStreetMap tiles. CARTO basemaps need an API key, free within the CARTO fair-use tier (request one at https://carto.com/basemaps/apikey, and keep the CARTO and OpenStreetMap attribution visible, which the GUI does). Export it as `MAMUT_BASEMAP_API_KEY` before `mamut-tools gui start` (or `gui run`): the server inlines it into the page. Without it the map falls back to OpenStreetMap tiles only. Never commit the key.
+
+With a run displayed, **Animate** (next to the route list) plays its vehicles on the map with deck.gl, which is loaded on demand. The times come from `GET /api/instances/{id}/solutions/{run}/timeline`: the checker's accounting on the instance's free-flow `fastest` arc costs. Inside an arc, a vehicle's position is interpolated by distance along the drawn road path.
 
 `gui status` reprints the tokened URL, which is the quickest way to recover it if you lose the browser tab. If you would rather watch the server logs live, `gui run` runs it in the foreground instead (development mode, stop with Ctrl-C).
 
