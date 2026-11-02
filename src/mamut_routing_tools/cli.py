@@ -56,6 +56,11 @@ app.add_typer(geometry_app, name="geometry")
 app.add_typer(osm_app, name="osm")
 app.add_typer(generate_app, name="generate")
 app.add_typer(convert_app, name="convert")
+bks_campaign_app = typer.Typer(
+    help="BKS campaigns: baseline, resumable multi-solver runs, single-writer harvest, reports (TOML spec).",
+    no_args_is_help=True,
+)
+app.add_typer(bks_campaign_app, name="bks-campaign")
 
 
 def _resolve_city_osm(city: str, osm_path: Path | None, workspace: Path) -> Path:
@@ -705,6 +710,148 @@ def convert_blauth2024_cmd(
             indent=1,
         )
     )
+
+
+
+
+# --------------------------------------------------------------------------- #
+# BKS campaigns
+# --------------------------------------------------------------------------- #
+
+_SPEC_ARG = typer.Argument(help="Campaign spec (TOML); see `mamut_routing_tools.bks_campaign.spec`.")
+_ONLY_OPT = typer.Option("--only", help="Regex on instance ids/names (smoke tests, partial runs).")
+
+
+def _load_campaign(spec_path: Path):  # type: ignore[no-untyped-def]
+    from mamut_routing_tools.bks_campaign import load_spec
+
+    try:
+        return load_spec(spec_path)
+    except (OSError, ValueError) as error:
+        typer.echo(f"Error: {spec_path}: {error}", err=True)
+        raise typer.Exit(code=2) from error
+
+
+@bks_campaign_app.command("plan")
+def bks_campaign_plan(
+    spec_path: Annotated[Path, _SPEC_ARG],
+    only: Annotated[Optional[str], _ONLY_OPT] = None,
+    retry_failed: Annotated[bool, typer.Option("--retry-failed", help="Count failed / timed-out runs as to do.")] = False,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Dry run: what `run` would do -- runs to do and done, core-hours, makespan, memory, refusals."""
+    from mamut_routing_tools.bks_campaign import build_plan
+
+    spec = _load_campaign(spec_path)
+    plan = build_plan(spec, only=only, retry_failed=retry_failed)
+    summary = plan.summary(spec.resources.workers)
+    summary["unsupported_examples"] = [list(item) for item in plan.unsupported[:10]]
+    if as_json:
+        typer.echo(json.dumps(summary, indent=1))
+        return
+    typer.echo(f"campaign {spec.campaign.name} -> {spec.out}")
+    typer.echo(f"to do {summary['todo']} ({', '.join(f'{k} {v}' for k, v in summary['per_kind'].items()) or 'nothing'}), done {summary['done']}")
+    typer.echo(f"core-hours {summary['core_hours']}, makespan >= {summary['makespan_lower_bound_h']} h on {spec.resources.workers} workers, worst-case memory {summary['worst_case_memory_gb']} GB")
+    for solver, reason in plan.unavailable.items():
+        typer.secho(f"unavailable: {solver}: {reason}", fg=typer.colors.YELLOW, err=True)
+    for instance_id, solver, reason in plan.unsupported[:10]:
+        typer.secho(f"unsupported: {instance_id} / {solver}: {reason}", fg=typer.colors.YELLOW, err=True)
+    if len(plan.unsupported) > 10:
+        typer.secho(f"... and {len(plan.unsupported) - 10} more unsupported pairs", fg=typer.colors.YELLOW, err=True)
+
+
+@bks_campaign_app.command("baseline")
+def bks_campaign_baseline(
+    spec_path: Annotated[Path, _SPEC_ARG],
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing baseline.")] = False,
+) -> None:
+    """Freeze the stored BKS of the selected instances (baseline.csv) before the campaign runs."""
+    from mamut_routing_tools.bks_campaign import write_baseline
+
+    spec = _load_campaign(spec_path)
+    try:
+        path = write_baseline(spec, force=force)
+    except FileExistsError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"baseline written: {path}")
+
+
+@bks_campaign_app.command("run")
+def bks_campaign_run(
+    spec_path: Annotated[Path, _SPEC_ARG],
+    only: Annotated[Optional[str], _ONLY_OPT] = None,
+    workers: Annotated[Optional[int], typer.Option("--workers", min=1, help="Override resources.workers.")] = None,
+    memory_gb: Annotated[Optional[float], typer.Option("--memory-gb", help="Override resources.memory_gb.")] = None,
+    retry_failed: Annotated[bool, typer.Option("--retry-failed", help="Re-run failed / timed-out runs.")] = False,
+    max_tasks: Annotated[Optional[int], typer.Option("--max-tasks", min=1, help="Stop after starting this many runs.")] = None,
+) -> None:
+    """Run the campaign's remaining runs (resumable). Workers never write BKS; `harvest` does.
+
+    First Ctrl-C: no new run starts and the running ones finish. Second: abort
+    (solvers are killed with their process groups). Interrupted runs leave no
+    record and are picked up by the next `run`.
+    """
+    from mamut_routing_tools.bks_campaign import build_plan, memory_budget_gb, read_baseline, run_tasks
+
+    spec = _load_campaign(spec_path)
+    plan = build_plan(spec, only=only, retry_failed=retry_failed)
+    for solver, reason in plan.unavailable.items():
+        typer.secho(f"unavailable: {solver}: {reason}", fg=typer.colors.YELLOW, err=True)
+    if not read_baseline(spec.out):
+        typer.secho("Warning: no baseline.csv yet -- run `bks-campaign baseline` first to measure gains.", fg=typer.colors.YELLOW, err=True)
+    resolved_workers = workers or spec.resources.workers
+    budget = memory_gb if memory_gb is not None else memory_budget_gb(spec.resources.memory_gb)
+    typer.echo(f"{len(plan.tasks)} run(s) to do, {len(plan.done)} done; {resolved_workers} workers, {budget:.1f} GB memory budget")
+    if not plan.tasks:
+        return
+    summary = run_tasks(
+        plan,
+        out=spec.out,
+        workers=resolved_workers,
+        memory_gb=budget,
+        progress=lambda line: typer.echo(line, err=True),
+        max_tasks=max_tasks,
+    )
+    typer.echo(json.dumps(summary, indent=1))
+    if summary["aborted"]:
+        raise typer.Exit(code=130)
+
+
+@bks_campaign_app.command("harvest")
+def bks_campaign_harvest(
+    spec_path: Annotated[Path, _SPEC_ARG],
+    offer_all: Annotated[bool, typer.Option("--offer-all", help="Offer every instance's best run, even below the baseline.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Report what the store would do without writing.")] = False,
+    workers: Annotated[int, typer.Option("--workers", min=1, help="Parallel instances (one process each).")] = 1,
+) -> None:
+    """Write improved BKS: each instance's best valid run, if it beats the baseline (the only writer)."""
+    from mamut_routing_tools.bks_campaign import harvest
+
+    spec = _load_campaign(spec_path)
+    results = harvest(spec, offer_all=offer_all, dry_run=dry_run, workers=workers)
+    counts: dict[str, int] = {}
+    for item in results:
+        counts[item["action"]] = counts.get(item["action"], 0) + 1
+    typer.echo(json.dumps({"counts": counts, "results": results}, indent=1, default=str))
+
+
+@bks_campaign_app.command("report")
+def bks_campaign_report(spec_path: Annotated[Path, _SPEC_ARG]) -> None:
+    """Write ledger.csv (one row per run) and cross-solver.csv (best per kind, gaps, seed spread)."""
+    from mamut_routing_tools.bks_campaign import write_reports
+
+    spec = _load_campaign(spec_path)
+    ledger, compare = write_reports(spec)
+    typer.echo(f"{ledger}\n{compare}")
+
+
+@bks_campaign_app.command("status")
+def bks_campaign_status(spec_path: Annotated[Path, _SPEC_ARG]) -> None:
+    """Runs archived so far, by status, and the last `run` summary."""
+    from mamut_routing_tools.bks_campaign import campaign_status
+
+    typer.echo(json.dumps(campaign_status(_load_campaign(spec_path)), indent=1))
 
 
 if __name__ == "__main__":  # pragma: no cover
