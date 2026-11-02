@@ -419,8 +419,13 @@
         <dt>Euclidean</dt><dd>Arc costs are straight-line distances, ignoring the road network.</dd>
         <dt>MonoCost</dt><dd>Minimise total routing cost.</dd>
         <dt>Hierarchical</dt><dd>Minimise the fleet size first, then the routing cost.</dd>
+        <dt>Solver</dt><dd>PyVRP runs in the workbench; external solvers (FILO2, HGS-CVRP, AILS-II, LKH-3, your own)
+          appear once configured in the solvers config (see <code>mamut-routing solvers list</code>). Every result is
+          checked by the reference checker before it is stored.</dd>
       </dl>
     </div>
+    <label class="field"><span>Solver</span><select id="solve-solver"><option value="pyvrp">PyVRP</option></select></label>
+    <div id="solve-solver-note" class="validation-line" hidden></div>
     <div class="grid-2">
       <label class="field"><span>Metric</span><select id="solve-metric"><option value="fastest">Fastest</option><option value="shortest">Shortest</option><option value="euclidean">Euclidean</option></select></label>
       <label class="field"><span>Objective</span><select id="solve-objective"><option value="MonoCost">MonoCost</option><option value="HierarchicalVehicleCost">Hierarchical vehicle cost</option></select></label>

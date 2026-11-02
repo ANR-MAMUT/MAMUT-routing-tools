@@ -271,6 +271,7 @@ function saveBlob(blob, filename) {
 const state = {
   instances: [],
   selected: null,
+  solvers: [],
   hiddenRoutes: new Set(),
   focusedRoute: null,
   routeView: {
@@ -728,6 +729,51 @@ async function loadCities() {
   status(data.cities.length
     ? `${data.cities.length} city extract(s) in the workspace.`
     : "No OSM extracts yet: fetch a city first.");
+}
+
+/* ── Solvers ── */
+function solverOptionNote(solver) {
+  if (!solver) return "";
+  if (!solver.available) return [solver.reason, solver.hint].filter(Boolean).join(" — ");
+  if (solver.supported === false) return (solver.reasons || []).join("; ");
+  return (solver.warnings || []).join("; ");
+}
+
+function syncSolverNote() {
+  const note = el("solve-solver-note");
+  const solver = (state.solvers || []).find((entry) => entry.name === el("solve-solver").value);
+  const text = solverOptionNote(solver);
+  note.hidden = !text;
+  note.textContent = text;
+}
+
+async function loadSolvers() {
+  const select = el("solve-solver");
+  const previous = select.value || "pyvrp";
+  const params = new URLSearchParams();
+  if (state.selected) {
+    params.set("instance_id", state.selected.instance_id);
+    params.set("metric", el("solve-metric").value);
+    params.set("objective_function", el("solve-objective").value);
+  }
+  const query = params.toString();
+  const data = await api(`/api/solvers${query ? `?${query}` : ""}`);
+  state.solvers = data.solvers;
+  select.innerHTML = "";
+  data.solvers.forEach((solver) => {
+    const option = document.createElement("option");
+    const unsupported = solver.supported === false;
+    option.value = solver.name;
+    option.textContent = `${solver.label}${solver.version ? ` ${solver.version}` : ""}`
+      + (!solver.available ? " — not installed" : unsupported ? " — not for this variant" : "");
+    option.disabled = !solver.available || unsupported;
+    option.title = solverOptionNote(solver);
+    select.append(option);
+  });
+  const options = [...select.options];
+  const keep = options.find((option) => option.value === previous && !option.disabled);
+  select.value = keep ? previous : (options.find((option) => !option.disabled)?.value || "pyvrp");
+  syncSolverNote();
 }
 
 /* ── Map drawing ── */
@@ -1357,7 +1403,7 @@ function renderSelected() {
     el("selObjLabel").textContent =
       `${metric} · ${instance.solved.objective_function || "MonoCost"} · ${runSourceLabel(instance.solved)}`;
     el("selCost").textContent = String(instance.solved.cost);
-    el("selMethod").textContent = instance.solved.method || "pyvrp";
+    el("selMethod").textContent = instance.solved.method || instance.solved.solver || "pyvrp";
   } else {
     el("selObjective").hidden = true;
   }
@@ -1434,6 +1480,7 @@ function selectInstance(index, preferredRunId = null) {
   el("import-panel").hidden = true;
   renderInstanceList();
   renderSelected();
+  loadSolvers().catch((error) => console.warn("Unable to list solvers", error));
   return loadSolutionRuns(preferredRunId).catch((error) => {
     status(`Cannot load saved solutions: ${error.message}`);
   });
@@ -1487,7 +1534,8 @@ function runMetric(run) {
 function runSourceLabel(run) {
   if (run.source === "bks") return "BKS";
   if (run.source === "imported") return `imported${run.solver && run.solver !== "external" ? ` · ${run.solver}` : ""}`;
-  return run.created_at ? new Date(run.created_at).toLocaleString() : "saved run";
+  const when = run.created_at ? new Date(run.created_at).toLocaleString() : "saved run";
+  return run.solver ? `${run.solver} · ${when}` : when;
 }
 
 function solvedVariantFile(instance) {
@@ -2002,7 +2050,7 @@ async function handleFinishedJob(job) {
     }
     if (!selectedByHandler) await loadSolutionRuns(preferredRunId);
     activateTab("visualize");
-    status(`Solved ${result.solution?.instance_name || "instance"}: cost ${result.cost}; checker ${result.validation?.status}.`);
+    status(`Solved ${result.solution?.instance_name || "instance"} with ${result.solver || "pyvrp"}: cost ${result.cost}; checker ${result.validation?.status}.`);
   }
 }
 
@@ -2129,6 +2177,9 @@ function syncVrpExportControls() {
 }
 
 el("solve-metric").addEventListener("change", syncVrpExportControls);
+el("solve-metric").addEventListener("change", () => loadSolvers().catch(() => {}));
+el("solve-objective").addEventListener("change", () => loadSolvers().catch(() => {}));
+el("solve-solver").addEventListener("change", syncSolverNote);
 syncVrpExportControls();
 
 el("download-vrp").addEventListener("click", async () => {
@@ -2153,14 +2204,16 @@ el("solve").addEventListener("click", async () => {
   if (!instance) return;
   try {
     const budget = Math.max(1, Number(el("solve-budget").value) || 30);
+    const solver = el("solve-solver").value || "pyvrp";
     const job = await submitJob("solve", {
       instance_id: instance.instance_id,
       metric: el("solve-metric").value,
       objective_function: el("solve-objective").value,
       seed: Number(el("solve-seed").value) || 0,
       time_limit: budget,
+      solver,
     });
-    status(`Solve queued as job ${job.job_id.slice(0, 8)} (${budget} s budget).`);
+    status(`Solve queued as job ${job.job_id.slice(0, 8)} (${solver}, ${budget} s budget).`);
   } catch (error) { status(`Cannot queue solve: ${error.message}`); }
 });
 
@@ -2786,6 +2839,7 @@ renderPoiCategories();
 updateHybridShare();
 updateGenerationControls();
 loadCities().catch((error) => status(`Cannot reach the local server: ${error.message}`));
+loadSolvers().catch((error) => console.warn("Unable to list solvers", error));
 loadInstances().catch((error) => console.warn("Unable to list workspace instances", error));
 refreshJobs().catch((error) => console.warn("Unable to list workbench jobs", error));
 setInterval(() => refreshJobs().catch(() => {}), 1000);

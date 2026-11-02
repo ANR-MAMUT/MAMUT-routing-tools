@@ -1282,3 +1282,9 @@ def test_cancelling_an_external_solve_kills_the_solver(client: TestClient, fake_
     assert time.monotonic() - started < 10
     assert live_process_count() == 0
     assert len(client.get(f"/api/instances/{instance_id}/solutions").json()["runs"]) == before
+
+
+def test_the_solve_panel_offers_a_solver_select(client: TestClient) -> None:
+    source = _frontend_source(client)
+    assert 'id="solve-solver"' in source and 'id="solve-solver-note"' in source
+    assert "/api/solvers" in source and "solver," in source  # the job payload carries the solver
