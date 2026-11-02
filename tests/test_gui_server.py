@@ -1190,3 +1190,95 @@ def test_legacy_runs_are_rechecked_once_and_cached(client: TestClient) -> None:
     instance_file.write_text(json.dumps(payload), encoding="utf-8")
     runs = client.get(f"/api/instances/{first['instance_id']}/solutions").json()["runs"]
     assert runs[0]["stale"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Solver selection: the registry, external solvers, real cancellation
+# --------------------------------------------------------------------------- #
+
+_FAKE_CONFIG = """schema_version = 1
+[solvers.fake]
+label = "Fake LKH"
+runtime = "python"
+input_format = "lkh"
+output_format = "lkh-mtsp"
+problem_types = ["CVRP"]
+argv = ["{python}", "-m", "mamut_routing_lib.solvers.external._fake_solver", "--params", "{params}"]
+progress_pattern = "progress cost=(?P<cost>[0-9.]+)"
+"""
+
+
+@pytest.fixture
+def fake_solver_config(tmp_path: Path, monkeypatch) -> Path:
+    from mamut_routing_lib.solvers import reload_solvers
+
+    path = tmp_path / "solvers.toml"
+    path.write_text(_FAKE_CONFIG)
+    monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(path))
+    reload_solvers()
+    return path
+
+
+def test_solvers_endpoint_lists_availability_and_per_instance_support(client: TestClient, fake_solver_config: Path) -> None:
+    listing = client.get("/api/solvers").json()
+    assert listing["ok"] and listing["config"] == str(fake_solver_config.resolve())
+    by_name = {row["name"]: row for row in listing["solvers"]}
+    assert by_name["pyvrp"]["available"] and by_name["fake"]["available"]
+    assert {"kayros", "filo2", "hgs-cvrp", "ails2", "lkh3"} <= set(by_name)
+    assert "supported" not in by_name["pyvrp"]
+
+    instance_id = _generate(client)["instance_id"]
+    scoped = {row["name"]: row for row in client.get(f"/api/solvers?instance_id={instance_id}&metric=fastest").json()["solvers"]}
+    assert scoped["pyvrp"]["supported"] and scoped["fake"]["supported"]
+    assert not scoped["kayros"]["supported"] and "TDVRP" in scoped["kayros"]["reasons"][0]
+    assert not scoped["filo2"]["supported"]  # a road metric: coordinates do not define the costs
+    assert client.get("/api/solvers?instance_id=nope").status_code == 404
+
+
+def test_an_external_solve_job_records_the_solver_and_its_provenance(client: TestClient, fake_solver_config: Path) -> None:
+    instance_id = _generate(client)["instance_id"]
+    submitted = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "payload": {"instance_id": instance_id, "metric": "fastest", "solver": "fake", "time_limit": 5}},
+    ).json()
+    job = _wait_for_job(client, submitted["job"]["job_id"])
+    assert job["status"] == "completed", job.get("error")
+    run = job["result"]["solution"]
+    assert run["solver"] == "fake" and run["method"] == "fake"
+    assert run["validation"]["valid"]
+    assert run["metadata"]["provenance"]["scale"]["exact"] is True
+    assert job["result"]["cost"] == pytest.approx(job["result"]["solver_cost"])
+
+
+def test_an_unknown_or_unavailable_solver_is_refused_at_submission(client: TestClient, monkeypatch) -> None:
+    instance_id = _generate(client)["instance_id"]
+    unknown = client.post("/api/jobs", json={"kind": "solve", "payload": {"instance_id": instance_id, "solver": "nope"}})
+    assert unknown.status_code == 400 and "unknown solver" in unknown.json()["error"]
+    monkeypatch.setenv("PATH", "/nonexistent")
+    missing = client.post("/api/jobs", json={"kind": "solve", "payload": {"instance_id": instance_id, "solver": "lkh3"}})
+    assert missing.status_code == 400 and "not available" in missing.json()["error"]
+
+
+def test_cancelling_an_external_solve_kills_the_solver(client: TestClient, fake_solver_config: Path, monkeypatch) -> None:
+    from mamut_routing_lib.solvers.external.process import live_process_count
+
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    instance_id = _generate(client)["instance_id"]
+    before = len(client.get(f"/api/instances/{instance_id}/solutions").json()["runs"])
+    submitted = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "payload": {"instance_id": instance_id, "metric": "fastest", "solver": "fake", "time_limit": 300}},
+    ).json()
+    job_id = submitted["job"]["job_id"]
+    for _ in range(400):
+        if live_process_count() > 0:
+            break
+        time.sleep(0.02)
+    assert live_process_count() == 1
+    started = time.monotonic()
+    client.delete(f"/api/jobs/{job_id}")
+    job = _wait_for_job(client, job_id)
+    assert job["status"] == "cancelled"
+    assert time.monotonic() - started < 10
+    assert live_process_count() == 0
+    assert len(client.get(f"/api/instances/{instance_id}/solutions").json()["runs"]) == before

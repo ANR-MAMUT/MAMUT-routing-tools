@@ -615,6 +615,14 @@ def create_app(workspace: Path, token: str) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
         yield
+        # Running solves stop at their next observation; external solvers run in their own
+        # process group and would outlive the server, so their groups are killed outright.
+        for record in jobs.list(limit=200):
+            if record.get("status") in ("queued", "running"):
+                jobs.cancel(str(record["job_id"]))
+        from mamut_routing_lib.solvers.external.process import terminate_all
+
+        terminate_all()
         jobs.shutdown()
 
     app = FastAPI(
@@ -955,8 +963,30 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         return jobs.submit(submission.kind, payload, runner)
 
     @app.post("/api/jobs")
-    async def create_job(submission: JobSubmission) -> dict[str, Any]:
+    async def create_job(submission: JobSubmission) -> Any:
+        if submission.kind == "solve":
+            from mamut_routing_lib.solvers import UnknownSolverError, get_solver
+            from mamut_routing_lib.solvers.external.config import SolverConfigError
+
+            name = str(submission.payload.get("solver") or "pyvrp")
+            try:
+                availability = get_solver(name).availability()
+            except (UnknownSolverError, SolverConfigError) as error:
+                return _payload_error(400, str(error))
+            if not availability.available:
+                hint = f" ({availability.hint})" if availability.hint else ""
+                return _payload_error(400, f"Solver {name} is not available: {availability.reason}{hint}")
         return {"ok": True, "job": submit_job(submission)}
+
+    @app.get("/api/solvers")
+    async def list_registered_solvers(instance_id: str = "", metric: str = "fastest", objective_function: str = "") -> Any:
+        """Every registered solver, available or not, and whether it can solve the selected variant."""
+        try:
+            return _solvers_payload(workspace, instance_id, metric, objective_function)
+        except KeyError:
+            return _payload_error(404, "Unknown workspace instance")
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
 
     @app.get("/api/jobs")
     async def list_jobs(limit: int = 50) -> dict[str, Any]:
@@ -1215,53 +1245,108 @@ def _import_solution_payload(
     }
 
 
+def _validation_report(solved: Any) -> dict[str, Any]:
+    if solved.check is None:
+        return {
+            "valid": False,
+            "status": "no_solution",
+            "routing_cost": None,
+            "num_routes": 0,
+            "error_message": solved.result.error or "the solver returned no routes",
+        }
+    return {"valid": solved.valid, **solved.check.model_dump(mode="json")}
+
+
 def _solve_payload(
     payload: dict[str, Any],
     *,
     instance_path: Path | None = None,
     monitor: Any | None = None,
 ) -> dict[str, Any]:
-    """Solve and canonically validate a static CVRP/VRPTW instance.
+    """Solve and canonically validate an instance.
 
-    The compatibility endpoint still accepts inline TSPLIB/JSON.  Persistent
-    jobs pass ``instance_path`` so collection sidecars and provenance remain
-    available to the solver and checker, and a ``SolveMonitor`` so the search
-    reports itself while it runs.
+    Persistent jobs pass ``instance_path``: the payload's ``solver`` (default
+    ``pyvrp``) runs through the lib's ``run_solver``, so collection sidecars and
+    provenance are available and the checker prices the routes; the
+    ``SolveMonitor`` reports progress and carries cancellation (it kills an
+    external solver's process group). The compatibility endpoint still accepts
+    inline TSPLIB/JSON, PyVRP only.
     """
     import tempfile
 
     from mamut_routing_lib.artifacts import load_benchmark_instance
     from mamut_routing_lib.enums import ObjectiveFunction
-    from mamut_routing_lib.solvers.pyvrp import solve_instance
 
     time_limit = float(payload.get("time_limit") or 30.0)
     if not (time_limit > 0):
         raise ValueError("'time_limit' must be a positive number")
     seed = int(payload.get("seed") if payload.get("seed") is not None else 0)
     objective = ObjectiveFunction(str(payload.get("objective_function") or "MonoCost"))
+    solver_name = str(payload.get("solver") or "pyvrp")
+
+    if instance_path is not None:
+        from mamut_routing_lib.solvers import run_solver
+
+        from mamut_routing_lib.artifacts import instance_problem_type
+        from mamut_routing_lib.enums import ProblemType
+
+        instance = load_benchmark_instance(instance_path)
+        if instance_problem_type(instance) is ProblemType.CVRP:
+            objective = ObjectiveFunction.MONO_COST  # CVRP has one objective (the workbench has always forced it)
+        solved = run_solver(
+            solver_name,
+            instance_path,
+            time_limit_s=max(1, int(time_limit)),
+            seed=seed,
+            objective_function=objective,
+            instance=instance,
+            monitor=monitor,
+        )
+        result = solved.result
+        return {
+            "ok": bool(solved.valid and result.status in ("feasible", "timeout")),
+            "solver": result.solver,
+            "status": result.status,
+            "error": result.error,
+            "cost": solved.cost if solved.cost is not None else result.solver_cost,
+            "solver_cost": result.solver_cost,
+            "time": round(result.wall_time, 3),
+            "routes": result.routes,
+            "n_routes": len(result.routes),
+            "dimension": instance.num_customers + 1,
+            "capacity": instance.vehicle_capacity,
+            "input_source": "workspace",
+            "method": result.method,
+            "objective_function": solved.objective.value,
+            "seed": result.seed,
+            "time_limit_s": int(result.time_limit_s),
+            "validation": _validation_report(solved),
+            "metadata": result.metadata,
+            "provenance": result.provenance,
+            "warnings": list(solved.support_warnings),
+        }
+
+    if solver_name != "pyvrp":
+        raise ValueError("Inline instances are solved with PyVRP only; queue a solve job for other solvers")
+    from mamut_routing_lib.solvers.pyvrp import solve_instance
 
     temporary_path: Path | None = None
     try:
-        if instance_path is not None:
-            input_source = "workspace"
-            instance_file = instance_path
+        vrp_json = payload.get("vrp_json")
+        vrp_text = payload.get("vrp_text")
+        if vrp_json is not None:
+            input_source = "vrp_json"
+            with tempfile.NamedTemporaryFile("w", suffix=".vrp.json", delete=False) as handle:
+                json.dump(vrp_json, handle)
+                temporary_path = Path(handle.name)
+            instance_file = temporary_path
             instance = load_benchmark_instance(instance_file)
+        elif vrp_text:
+            input_source = "vrp_text"
+            instance_file = Path("uploaded.vrp.json")
+            instance = _instance_from_vrp_text(str(vrp_text))
         else:
-            vrp_json = payload.get("vrp_json")
-            vrp_text = payload.get("vrp_text")
-            if vrp_json is not None:
-                input_source = "vrp_json"
-                with tempfile.NamedTemporaryFile("w", suffix=".vrp.json", delete=False) as handle:
-                    json.dump(vrp_json, handle)
-                    temporary_path = Path(handle.name)
-                instance_file = temporary_path
-                instance = load_benchmark_instance(instance_file)
-            elif vrp_text:
-                input_source = "vrp_text"
-                instance_file = Path("uploaded.vrp.json")
-                instance = _instance_from_vrp_text(str(vrp_text))
-            else:
-                raise ValueError("Missing required 'vrp_text' or 'vrp_json' field")
+            raise ValueError("Missing required 'vrp_text' or 'vrp_json' field")
 
         result = solve_instance(
             instance,
@@ -1275,6 +1360,7 @@ def _solve_payload(
         canonical_cost = validation.get("routing_cost")
         return {
             "ok": bool(result.solver_is_feasible and validation["valid"]),
+            "solver": "pyvrp",
             "cost": canonical_cost if canonical_cost is not None else result.solver_cost,
             "solver_cost": result.solver_cost,
             "time": round(result.wall_time, 3),
@@ -1310,14 +1396,16 @@ def _solve_monitor(context: JobContext, *, budget_s: int) -> Any:
     phase changes, so a ten-minute solve leaves a convergence trace rather than 600 heartbeats
     (the log endpoint returns the whole file on every poll).
     """
-    from mamut_routing_lib.solvers.pyvrp import SolveMonitor, SolveTick
+    from mamut_routing_lib.solvers import SolveMonitor, SolveTick
 
     seen: dict[str, Any] = {"phase": None, "best": None, "logged_at": -_SOLVE_LOG_HEARTBEAT_S}
 
     def on_tick(tick: SolveTick) -> bool:
         best = "no feasible solution yet" if tick.best_cost is None else f"best {tick.best_cost:,.0f}"
+        # External solvers report elapsed time (and an incumbent when they print one), not iterations.
+        work = f"{tick.iterations:,} iters" if tick.iterations is not None else f"t={tick.elapsed_s:.0f}s"
         context.progress(
-            f"{tick.phase} · {tick.iterations:,} iters · {best}",
+            f"{tick.phase} · {work} · {best}",
             current=min(int(tick.elapsed_s), budget_s),
             total=budget_s,
             unit="s",
@@ -1327,7 +1415,8 @@ def _solve_monitor(context: JobContext, *, budget_s: int) -> Any:
         # for a ten-minute run, which reads as a dead job rather than a converged one.
         heartbeat = tick.elapsed_s - seen["logged_at"] >= _SOLVE_LOG_HEARTBEAT_S
         if improved or heartbeat or tick.phase != seen["phase"]:
-            context.log(f"{tick.phase} · iter {tick.iterations:,} · t={tick.elapsed_s:.0f}s · {best}")
+            iteration = f" · iter {tick.iterations:,}" if tick.iterations is not None else ""
+            context.log(f"{tick.phase}{iteration} · t={tick.elapsed_s:.0f}s · {best}")
             seen["phase"] = tick.phase
             seen["logged_at"] = tick.elapsed_s
             if improved:
@@ -1360,6 +1449,10 @@ def _solve_workspace_payload(
         # The monitor stops the search by returning True rather than raising, so the
         # cancellation surfaces here — before anything is written to the solution store.
         context.check_cancelled()
+    if not result["routes"]:
+        reason = result.get("error") or result["validation"].get("error_message") or "no routes"
+        raise ValueError(f"{result['solver']} returned no solution ({result.get('status')}): {reason}")
+    if context is not None:
         context.progress("Persisting validated solution")
     solution = store.record(
         instance_id=instance_id,
@@ -1368,17 +1461,66 @@ def _solve_workspace_payload(
         routes=result["routes"],
         cost=result["cost"],
         objective_function=str(result["objective_function"]),
-        solver="pyvrp",
+        solver=str(result.get("solver") or "pyvrp"),
         method=str(result["method"]),
         seed=int(result["seed"]),
         time_limit_s=int(result["time_limit_s"]),
         wall_time_s=float(result["time"]),
         validation=result["validation"],
-        metadata={**(result.get("metadata") or {}), "metric": metric},
+        metadata={
+            **(result.get("metadata") or {}),
+            "metric": metric,
+            "status": result.get("status"),
+            "provenance": result.get("provenance") or {},
+        },
         job_id=context.job_id if context is not None else None,
         instance_sha256=instance_sha256,
     )
     return {**result, "instance_id": instance_id, "metric": metric, "solution": solution}
+
+
+_PROFILE_CACHE: dict[tuple[str, str | None], Any] = {}
+
+
+def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_function: str) -> dict[str, Any]:
+    """Registered solvers with availability, and per-solver support for one instance variant."""
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.objectives import default_objective
+    from mamut_routing_lib.solvers import list_solvers, profile_instance
+    from mamut_routing_lib.solvers.external.config import resolve_config_path
+
+    profile = None
+    objective = None
+    if instance_id:
+        record = _workspace_instance(workspace, instance_id)
+        instance_path = _instance_variant_path(record, str(metric or "fastest").lower())
+        key = (str(instance_path), file_sha256(instance_path))
+        profile, instance = _PROFILE_CACHE.get(key, (None, None))
+        if profile is None:
+            instance = load_benchmark_instance(instance_path)
+            profile = profile_instance(instance, instance_path)
+            _PROFILE_CACHE[key] = (profile, instance)
+        objective = ObjectiveFunction(objective_function) if objective_function else default_objective(instance)
+    rows = []
+    for solver in list_solvers():
+        availability = solver.availability()
+        row: dict[str, Any] = {
+            "name": solver.name,
+            "label": solver.label,
+            "available": availability.available,
+            "reason": availability.reason,
+            "hint": availability.hint,
+            "version": availability.version,
+            "capabilities": solver.capabilities.to_json(),
+            "source": getattr(getattr(solver, "descriptor", None), "source", "builtin"),
+        }
+        if profile is not None and objective is not None:
+            support = solver.supports(profile, objective)
+            row.update(supported=support.supported, reasons=list(support.reasons), warnings=list(support.warnings))
+        rows.append(row)
+    config = resolve_config_path()
+    return {"ok": True, "config": str(config) if config else None, "solvers": rows}
 
 
 def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
