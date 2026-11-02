@@ -146,3 +146,16 @@ def grid_osm_path(tmp_path: Path):
         return path
 
     return make
+
+
+@pytest.fixture(autouse=True)
+def _isolated_solvers_config(tmp_path_factory, monkeypatch):
+    """No test reads the developer's ~/.config/mamut-routing/solvers.toml or $MAMUT_ROUTING_SOLVERS_CONFIG."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg-config")))
+    monkeypatch.delenv("MAMUT_ROUTING_SOLVERS_CONFIG", raising=False)
+    monkeypatch.delenv("MAMUT_ROUTING_BKS_AUTHORS", raising=False)
+    from mamut_routing_lib.solvers import reload_solvers
+
+    reload_solvers()
+    yield
+    reload_solvers()
