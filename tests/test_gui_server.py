@@ -792,6 +792,23 @@ def test_importing_an_external_solution_validates_before_storing(client: TestCli
     assert [entry["run_id"] for entry in runs] == [run["run_id"]]
 
 
+def test_importing_an_lkh3_solution_file_is_accepted(client: TestClient) -> None:
+    """LKH-3's MTSP_SOLUTION_FILE: depot node 1, customers 2..n+1, empty vehicles dropped."""
+    instance = _generate_for_import(client)
+    text = (
+        "problem, Cost: 0_1234\nThe tours traveled by the 3 salesmen are:\n"
+        "1 2 3 1 (#2)  Cost: 600\n1 4 5 1 (#2)  Cost: 634\n1 1 (#0)  Cost: 0\n"
+    )
+    response = client.post(
+        f"/api/instances/{instance['instance_id']}/solutions/import",
+        json={"metric": "fastest", "text": text, "filename": "problem.sol", "label": "LKH-3"},
+    ).json()
+    assert response["ok"], response
+    run = response["solution"]
+    assert run["routes"] == [[1, 2], [3, 4]] and run["metadata"]["format"] == "lkh-mtsp"
+    assert run["solver"] == "LKH-3"
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [

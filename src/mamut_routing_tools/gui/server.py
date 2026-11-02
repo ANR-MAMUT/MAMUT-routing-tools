@@ -32,8 +32,7 @@ from mamut_routing_tools.gui.solutions import (
     compare_solution_records,
     file_sha256,
     instance_id_for,
-    normalize_imported_routes,
-    parse_solution_text,
+    read_imported_solution,
     validate_solution,
 )
 from mamut_routing_tools.workspace import instances_dir, osmdata_dir
@@ -1020,7 +1019,7 @@ def create_app(workspace: Path, token: str) -> FastAPI:
                 return _payload_error(409, _stale_message(stale))
             instance_path = Path(str(candidate.get("instance_path") or reference.get("instance_path") or ""))
             from mamut_routing_lib.artifacts import load_benchmark_instance
-            from mamut_routing_lib.solvers.pyvrp import hydrate_collection_instance
+            from mamut_routing_lib.artifacts import hydrate_collection_instance
 
             instance = load_benchmark_instance(instance_path)
             checkable = hydrate_collection_instance(instance, instance_path)
@@ -1168,8 +1167,7 @@ def _import_solution_payload(
     objective = ObjectiveFunction(str(payload.get("objective_function") or "MonoCost"))
     instance = load_benchmark_instance(instance_path)
 
-    routes, declared_cost = parse_solution_text(text, filename=filename)
-    normalized = normalize_imported_routes(routes, int(instance.num_customers))
+    normalized, declared_cost, solution_format = read_imported_solution(text, instance, filename=filename)
     validation = validate_solution(instance, normalized, instance_path=instance_path)
     if not validation.get("valid"):
         raise SolutionImportError(
@@ -1203,7 +1201,7 @@ def _import_solution_payload(
         time_limit_s=0,
         wall_time_s=0.0,
         validation=validation,
-        metadata={"metric": metric, "imported_from": filename or "pasted", "label": label},
+        metadata={"metric": metric, "imported_from": filename or "pasted", "label": label, "format": solution_format},
         source="imported",
         instance_sha256=instance_sha256,
     )
@@ -1428,7 +1426,7 @@ def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _timeline_payload(record: dict[str, Any], solution: dict[str, Any]) -> dict[str, Any]:
     from mamut_routing_lib.artifacts import load_benchmark_instance
-    from mamut_routing_lib.solvers.pyvrp import hydrate_collection_instance
+    from mamut_routing_lib.artifacts import hydrate_collection_instance
 
     from mamut_routing_tools.timeline import build_static_timeline
 
