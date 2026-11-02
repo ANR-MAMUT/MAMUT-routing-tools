@@ -65,7 +65,7 @@ def test_solve_with_a_configured_external_solver(tmp_path: Path, fixture_osm_pat
     config = tmp_path / "solvers.toml"
     config.write_text(
         'schema_version = 1\n[solvers.fake]\nruntime = "python"\ninput_format = "lkh"\noutput_format = "lkh-mtsp"\n'
-        'problem_types = ["CVRP"]\n'
+        'problem_types = ["CVRP"]\nsymmetric_only = false\n'
         'argv = ["{python}", "-m", "mamut_routing_lib.solvers.external._fake_solver", "--params", "{params}"]\n'
     )
     monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(config))

@@ -1203,6 +1203,7 @@ runtime = "python"
 input_format = "lkh"
 output_format = "lkh-mtsp"
 problem_types = ["CVRP"]
+symmetric_only = false
 argv = ["{python}", "-m", "mamut_routing_lib.solvers.external._fake_solver", "--params", "{params}"]
 progress_pattern = "progress cost=(?P<cost>[0-9.]+)"
 """
