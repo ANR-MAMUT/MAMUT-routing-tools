@@ -9,6 +9,7 @@ executes jobs and writes files.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -971,14 +972,17 @@ def create_app(workspace: Path, token: str) -> FastAPI:
 
             name = str(submission.payload.get("solver") or "pyvrp")
             try:
-                availability = get_solver(name).availability()
+                solver = get_solver(name)
             except UnknownSolverError as error:
                 return _payload_error(400, str(error))
             except SolverConfigError as error:
                 return _payload_error(400, f"solvers config: {error}")
+            availability = solver.availability()
             if not availability.available:
-                hint = f" ({availability.hint})" if availability.hint else ""
-                return _payload_error(400, f"Solver {name} is not available: {availability.reason}{hint}")
+                return _payload_error(400, f"Solver {name} is not available: {availability.describe()}")
+            refusal = await asyncio.to_thread(_solve_refusal, workspace, solver, submission.payload)
+            if refusal:
+                return _payload_error(400, refusal)
         return {"ok": True, "job": submit_job(submission)}
 
     @app.get("/api/solvers")
@@ -1430,7 +1434,9 @@ def _solve_monitor(context: JobContext, *, budget_s: int) -> Any:
                 seen["best"] = tick.best_cost
         return context.cancelled
 
-    return SolveMonitor(on_tick)
+    # The cancel flag is also polled between the solver's own steps (an external solver checks it
+    # before and after writing a large input), not only when a tick is due.
+    return SolveMonitor(on_tick, cancelled=lambda: context.cancelled)
 
 
 def _solve_workspace_payload(
@@ -1510,6 +1516,36 @@ def _cached_profile(instance_path: Path) -> tuple[Any, Any]:
     return entry
 
 
+def _solve_refusal(workspace: Path, solver: Any, payload: dict[str, Any]) -> str | None:
+    """Why ``solver`` cannot take the job's instance variant (checked at submit), or ``None``.
+
+    Same reading as the job: the selected metric's file, MonoCost on CVRP whatever the select says.
+    """
+    from mamut_routing_lib.enums import ObjectiveFunction, ProblemType
+    from mamut_routing_lib.objectives import default_objective
+
+    instance_id = str(payload.get("instance_id") or "")
+    if not instance_id:
+        return None  # the job reports it
+    try:
+        record = _workspace_instance(workspace, instance_id)
+        instance_path = _instance_variant_path(record, str(payload.get("metric") or "fastest").lower())
+        profile, instance = _cached_profile(instance_path)
+    except Exception:  # noqa: BLE001 - an unknown or unreadable instance fails in the job, with its own message
+        return None
+    try:
+        raw = payload.get("objective_function")
+        objective = ObjectiveFunction(str(raw)) if raw else default_objective(instance)
+    except ValueError:
+        return None
+    if profile.problem_type is ProblemType.CVRP:
+        objective = ObjectiveFunction.MONO_COST
+    support = solver.supports(profile, objective)
+    if support.supported:
+        return None
+    return f"{solver.label} cannot solve this variant: " + "; ".join(support.reasons)
+
+
 def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_function: str) -> dict[str, Any]:
     """Registered solvers with availability, and per-solver support for one instance variant."""
     from mamut_routing_lib.enums import ObjectiveFunction, ProblemType
@@ -1550,6 +1586,7 @@ def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_f
             "available": availability.available,
             "reason": availability.reason,
             "hint": availability.hint,
+            "note": availability.note,
             "version": availability.version,
             "capabilities": solver.capabilities.to_json(),
             "source": getattr(getattr(solver, "descriptor", None), "source", "builtin"),

@@ -734,7 +734,7 @@ async function loadCities() {
 /* ── Solvers ── */
 function solverOptionNote(solver) {
   if (!solver) return "";
-  if (!solver.available) return [solver.reason, solver.hint].filter(Boolean).join(" — ");
+  if (!solver.available) return [solver.reason, solver.hint, solver.note].filter(Boolean).join(" — ");
   if (solver.supported === false) return (solver.reasons || []).join("; ");
   return (solver.warnings || []).join("; ");
 }
@@ -1108,12 +1108,15 @@ function applySolutionView() {
   syncAnimateButton();
 }
 
+/* One Animate button per panel (Instance legend, Solve, Runs): the run is displayed whichever tab is open. */
 function syncAnimateButton() {
-  const button = el("animate-routes");
-  button.hidden = !(map && state.selected?.solved && state.lastRendered && state.selectedRunId);
-  button.disabled = routeAnimationLoading;
-  button.textContent = routeAnimationLoading ? "Loading…" : routeAnimation ? "Stop animation" : "Animate";
-  button.setAttribute("aria-pressed", String(Boolean(routeAnimation)));
+  const shown = Boolean(map && state.selected?.solved && state.lastRendered && state.selectedRunId);
+  for (const button of document.querySelectorAll("[data-animate-routes]")) {
+    button.hidden = !shown;
+    button.disabled = routeAnimationLoading;
+    button.textContent = routeAnimationLoading ? "Loading…" : routeAnimation ? "Stop animation" : "Animate";
+    button.setAttribute("aria-pressed", String(Boolean(routeAnimation)));
+  }
 }
 
 function closeRouteAnimation() {
@@ -2761,9 +2764,11 @@ el("bulk-download").addEventListener("click", async () => {
   } catch (error) { status(`Download failed: ${error.message}`); }
 });
 
-el("animate-routes").addEventListener("click", () => {
-  void toggleRouteAnimation();
-});
+for (const button of document.querySelectorAll("[data-animate-routes]")) {
+  button.addEventListener("click", () => {
+    void toggleRouteAnimation();
+  });
+}
 
 el("clear").addEventListener("click", () => {
   previewLayers.clearLayers();
@@ -2774,6 +2779,7 @@ el("clear").addEventListener("click", () => {
   state.lastRendered = null;
   if (state.selected) state.selected.rendered = null;
   renderLegend();
+  syncAnimateButton();  // nothing is drawn any more: no Animate (pushSolution ran before lastRendered was cleared)
   status("Map cleared.");
 });
 

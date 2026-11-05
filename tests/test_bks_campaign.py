@@ -377,3 +377,67 @@ def test_ctrl_c_while_workers_boot_does_not_kill_them(campaign: Path) -> None:
     summary = run_tasks(plan, out=spec.out, workers=2, memory_gb=8, progress=_interrupt_booting_workers)
     assert len(hit) == 4
     assert summary["completed"] == 4 and summary["valid"] == 4 and summary["failed_workers"] == 0
+
+
+def test_every_harvest_is_kept_and_the_ledger_remembers_creations(campaign: Path) -> None:
+    from mamut_routing_tools.bks_campaign import harvest_history
+
+    spec = load_spec(campaign)
+    run_tasks(build_plan(spec), out=spec.out, workers=2, memory_gb=8, progress=lambda line: None)
+    first = harvest(spec)
+    assert sorted(item["action"] for item in first) == ["created", "created"]
+    second = harvest(spec)  # the same best runs again: the store keeps its (equal) BKS
+    assert {item["action"] for item in second} == {"kept_existing"}
+    history = harvest_history(spec.out)
+    assert len(history) == 2 and history[0]["results"] == first and history[1]["results"] == second
+    assert json.loads((spec.out / "harvest.json").read_text()) == second  # the latest, as before
+    ledger, _ = write_reports(spec)
+    rows = [row for row in csv.DictReader(ledger.open()) if row["is_best"] == "True"]
+    assert [row["bks_action"] for row in rows] == ["created", "created"]
+    assert all(row["bks_action_at"] == history[0]["harvested"] for row in rows)
+
+
+def test_a_harvest_from_before_the_history_is_kept(campaign: Path) -> None:
+    from mamut_routing_tools.bks_campaign import harvest_history
+
+    spec = load_spec(campaign)
+    run_tasks(build_plan(spec, only="A1"), out=spec.out, workers=1, memory_gb=8, progress=lambda line: None)
+    old = [{"key": "legacy-key", "instance_id": "A1", "action": "created"}]
+    (spec.out / "harvest.json").write_text(json.dumps(old))
+    harvest(spec)
+    history = harvest_history(spec.out)
+    assert len(history) == 2 and history[0]["results"] == old
+
+
+def test_sigterm_aborts_the_running_tasks_at_once(campaign: Path, monkeypatch) -> None:
+    import os
+    import signal
+    import threading
+    import time
+
+    monkeypatch.setenv("FAKE_MODE", "slow")
+    monkeypatch.setenv("FAKE_SLEEP", "30")
+    spec = load_spec(campaign)
+    plan = build_plan(spec)
+    sent: list[float] = []
+
+    def _terminate_once_solvers_run() -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if _fake_solvers_in(spec.out / "raw"):
+                sent.append(time.monotonic())
+                os.kill(os.getpid(), signal.SIGTERM)  # a scheduler signalling the runner only
+                return
+            time.sleep(0.1)
+
+    lines: list[str] = []
+    killer = threading.Thread(target=_terminate_once_solvers_run, daemon=True)
+    killer.start()
+    summary = run_tasks(plan, out=spec.out, workers=2, memory_gb=8, progress=lines.append)
+    killer.join()
+    assert sent, "the solvers never started"
+    assert time.monotonic() - sent[0] < 20  # not the 30 s the solvers would take
+    assert summary["aborted"] and summary["completed"] == 0 and load_runs(spec.out) == []
+    assert any(line.startswith("SIGTERM: aborting") for line in lines)
+    assert _fake_solvers_in(spec.out / "raw") == []
+    assert len(build_plan(spec).tasks) == 4  # the next run redoes them

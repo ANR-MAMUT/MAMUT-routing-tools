@@ -138,24 +138,42 @@ def objective_rank(objective: str, cost: float, num_routes: int) -> tuple:
     return (float(cost),)
 
 
+ArchiveIndex = dict[tuple[str, str], list[dict[str, Any]]]
+
+
+def _valid_runs_by_group(spec: CampaignSpec) -> ArchiveIndex:
+    """Valid archived runs with routes, by (instance_id, objective): one pass over the archive."""
+    from mamut_routing_tools.bks_campaign.archive import iter_runs
+
+    index: ArchiveIndex = {}
+    for record in iter_runs(spec.out):
+        if not record.get("valid") or record.get("validated_cost") is None or not record.get("routes"):
+            continue
+        index.setdefault((record.get("instance_id"), record.get("objective_function")), []).append(record)
+    return index
+
+
 def _best_known_routes(
-    spec: CampaignSpec, instance_path: Path, instance_id: str, objective: Any, instance_sha256: str | None = None
+    spec: CampaignSpec,
+    instance_path: Path,
+    instance_id: str,
+    objective: Any,
+    instance_sha256: str | None = None,
+    *,
+    archive: ArchiveIndex | None = None,
 ) -> tuple[list[list[int]] | None, str | None]:
     """Routes of the best valid archived run or the stored BKS (warm starts), with their origin.
 
     Runs of an older version of the instance file are ignored; "best" follows the objective
-    (fewer routes first under ``HierarchicalVehicleCost``).
+    (fewer routes first under ``HierarchicalVehicleCost``). ``archive`` (``_valid_runs_by_group``)
+    spares one archive pass per instance when planning many.
     """
     from mamut_routing_lib.artifacts import get_bks_path_for_instance, load_bks
 
-    from mamut_routing_tools.bks_campaign.archive import iter_runs
-
+    if archive is None:
+        archive = _valid_runs_by_group(spec)
     best: tuple[tuple, list[list[int]], str] | None = None
-    for record in iter_runs(spec.out):
-        if record.get("instance_id") != instance_id or record.get("objective_function") != objective.value:
-            continue
-        if not record.get("valid") or record.get("validated_cost") is None or not record.get("routes"):
-            continue
+    for record in archive.get((instance_id, objective.value), ()):
         if instance_sha256 and record.get("instance_sha256") not in (None, instance_sha256):
             continue
         rank = objective_rank(objective.value, record["validated_cost"], len(record["routes"]))
@@ -190,7 +208,7 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
         solver = get_solver(run.solver, config=config)
         availability = solver.availability()
         if not availability.available:
-            unavailable[run.solver] = f"{availability.reason}" + (f" ({availability.hint})" if availability.hint else "")
+            unavailable[run.solver] = availability.describe()
             continue
         if run.warm_start == "best" and not solver.capabilities.warm_start:
             raise ValueError(f"[[runs]] {run.run_kind}: {run.solver} does not take warm starts")
@@ -202,6 +220,7 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
     stale: list[str] = []
     planned: set[str] = set()
     unsupported: list[tuple[str, str, str]] = []
+    archive: ArchiveIndex | None = None  # read once, on the first warm start
     for item in select_instances(spec):
         if only_pattern and not (only_pattern.search(item.instance_id) or only_pattern.search(item.instance_name)):
             continue
@@ -224,8 +243,10 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
             routes = sha = origin = None
             if run.warm_start == "best":
                 if objective.value not in warm:
+                    if archive is None:
+                        archive = _valid_runs_by_group(spec)
                     warm[objective.value] = _best_known_routes(
-                        spec, item.instance_path, item.instance_id, objective, current_sha
+                        spec, item.instance_path, item.instance_id, objective, current_sha, archive=archive
                     )
                 routes, origin = warm[objective.value]
                 if routes is None:

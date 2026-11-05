@@ -58,7 +58,25 @@ def _generated(tmp_path: Path, fixture_osm_path: Path, metric: str = "shortest")
 def test_update_bks_needs_authors(tmp_path: Path, fixture_osm_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("MAMUT_ROUTING_BKS_AUTHORS", raising=False)
     result = CliRunner().invoke(app, ["solve", str(_generated(tmp_path, fixture_osm_path)), "--update-bks"])
-    assert result.exit_code == 1 and "--update-bks needs --authors" in result.stderr
+    assert result.exit_code == 1 and "--save-bks needs --authors" in result.stderr
+
+
+def test_solve_takes_the_lib_flag_names_and_its_json_is_a_solution_file(tmp_path: Path, fixture_osm_path: Path) -> None:
+    from mamut_routing_lib.cli import app as lib_app
+
+    instance = _generated(tmp_path, fixture_osm_path)
+    result = CliRunner().invoke(app, ["solve", str(instance), "--time-limit-s", "1", "--save-bks", "--authors", "Tester"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["bks_update"]["action"] == "created"
+    solution = tmp_path / "run.json"
+    solution.write_text(result.stdout)
+    checked = CliRunner().invoke(lib_app, ["check", str(instance), str(solution)])
+    assert checked.exit_code == 0 and "Warning" not in checked.output, checked.output
+
+
+def test_a_zero_time_limit_is_a_usage_error(tmp_path: Path, fixture_osm_path: Path) -> None:
+    result = CliRunner().invoke(app, ["solve", str(_generated(tmp_path, fixture_osm_path)), "--time-limit", "0"])
+    assert result.exit_code == 2 and "Traceback" not in result.output
 
 
 def test_solve_with_a_configured_external_solver(tmp_path: Path, fixture_osm_path: Path, monkeypatch) -> None:

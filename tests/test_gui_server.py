@@ -1320,3 +1320,66 @@ def test_the_solve_panel_offers_a_solver_select(client: TestClient) -> None:
     source = _frontend_source(client)
     assert 'id="solve-solver"' in source and 'id="solve-solver-note"' in source
     assert "/api/solvers" in source and "solver," in source  # the job payload carries the solver
+
+
+def test_an_unsupported_solver_and_variant_pair_is_refused_at_submission(
+    client: TestClient, tmp_path: Path, monkeypatch
+) -> None:
+    from mamut_routing_lib.solvers import reload_solvers
+
+    path = tmp_path / "vrptw-only.toml"
+    path.write_text(_FAKE_CONFIG.replace('problem_types = ["CVRP"]', 'problem_types = ["VRPTW"]'))
+    monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(path))
+    reload_solvers()
+    instance_id = _generate(client)["instance_id"]
+    refused = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "payload": {"instance_id": instance_id, "metric": "fastest", "solver": "fake", "time_limit": 1}},
+    )
+    assert refused.status_code == 400 and "cannot solve this variant" in refused.json()["error"]
+    assert "not CVRP" in refused.json()["error"]  # refused before a job is queued, not inside it
+    accepted = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "payload": {"instance_id": instance_id, "metric": "fastest", "solver": "pyvrp", "time_limit": 1}},
+    )
+    assert accepted.status_code == 200, accepted.json()
+    _wait_for_job(client, accepted.json()["job"]["job_id"])
+
+
+def test_one_bad_solver_table_leaves_the_others_listed(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    from mamut_routing_lib.solvers import reload_solvers
+
+    path = tmp_path / "solvers.toml"
+    path.write_text(_FAKE_CONFIG + '[solvers.filo2]\nexecutabel = "/opt/filo2"\n')
+    monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(path))
+    reload_solvers()
+    listing = client.get("/api/solvers").json()
+    by_name = {row["name"]: row for row in listing["solvers"]}
+    assert listing["config_error"] is None and by_name["fake"]["available"]
+    assert not by_name["filo2"]["available"] and "did you mean 'executable'" in by_name["filo2"]["reason"]
+
+
+def test_instances_generated_before_the_family_rename_still_open(client: TestClient) -> None:
+    # Workbench instances from July 2026 are embedded CVRP files labelled Mamut2026 (now Poryos2026).
+    generated = _generate(client)
+    instance_id = generated["instance_id"]
+    folder = Path(generated["folder"])
+    for path in folder.glob("*.vrp.json"):
+        payload = json.loads(path.read_text())
+        if payload.get("benchmark_name") == "Poryos2026":
+            payload["benchmark_name"] = "Mamut2026"
+            path.write_text(json.dumps(payload))
+    listing = client.get(f"/api/solvers?instance_id={instance_id}&metric=fastest")
+    assert listing.status_code == 200, listing.json()
+    assert {row["name"]: row for row in listing.json()["solvers"]}["pyvrp"]["supported"]
+    assert client.get(f"/api/instances/{instance_id}/solutions").status_code == 200
+    run_id = _solve(client, instance_id)
+    assert run_id
+
+
+def test_animate_is_offered_on_the_solve_and_runs_tabs_too(client: TestClient) -> None:
+    source = _frontend_source(client)
+    for button in ('id="animate-routes"', 'id="solve-animate"', 'id="runs-animate"'):
+        assert button in source
+    assert source.count("data-animate-routes") >= 4  # three buttons, and the script drives them all
+    assert "syncAnimateButton();  // nothing is drawn any more" in source  # Clear map hides them

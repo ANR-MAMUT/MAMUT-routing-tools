@@ -400,7 +400,7 @@
     <div class="fading-rule" style="margin:8px 0"></div>
     <div class="legend-head">
       <div class="kicker">Routes · eye to show/hide · row to focus</div>
-      <button id="animate-routes" class="animate-btn" type="button" aria-pressed="false" hidden>Animate</button>
+      <button id="animate-routes" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden>Animate</button>
     </div>
     <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
   </section>
@@ -435,6 +435,7 @@
     <div class="row">
       <button id="solve" class="btn" type="button">Queue solve</button>
       <button id="import-open" class="btn btn-secondary" type="button">Import solution…</button>
+      <button id="solve-animate" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden title="Play the displayed run's vehicles over time">Animate</button>
     </div>
     <div id="import-panel" class="option-group" hidden>
       <label class="field"><span>Solution file (.sol or .json)</span><input id="import-file" type="file" accept=".sol,.txt,.json"></label>
@@ -458,6 +459,7 @@
     <div class="run-controls">
       <label class="field"><span>Displayed run</span><select id="solution-run"><option value="">Instance only · customer locations</option></select></label>
       <div id="solution-validation" class="validation-line">Solve this instance to create a validated run.</div>
+      <button id="runs-animate" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden title="Play the displayed run's vehicles over time">Animate</button>
       <label class="field"><span>Compare displayed run against</span><select id="comparison-run"><option value="">Select a reference run</option></select></label>
       <button id="compare" class="btn btn-secondary" type="button" disabled>Compare runs</button>
       <pre id="comparison-output" class="mono-output" hidden></pre>

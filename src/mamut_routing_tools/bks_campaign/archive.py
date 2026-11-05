@@ -7,7 +7,8 @@ Layout under ``campaign.out``::
     baseline.csv         the stored BKS before the campaign (``baseline``)
     ledger.csv           one row per run (``report``)
     cross-solver.csv     per instance: best per kind, gaps, seed spread (``report``)
-    harvest.json         what the single-writer harvest did
+    harvest.json         what the last single-writer harvest did
+    harvests/NNNN-<time>.json  every harvest, numbered (the ledger's bks_action reads them all)
     run.DONE             summary of the last ``run`` invocation
 
 A run is *done* when its record exists; an interrupted run leaves no record and

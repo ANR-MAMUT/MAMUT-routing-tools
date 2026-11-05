@@ -11,10 +11,13 @@
   ``MemAvailable``); at least one task always runs.
 - Workers solve, check and write their own run record (atomically); they never
   write a BKS. Harvest is a separate, single-writer step.
-- First Ctrl-C / SIGTERM: stop admitting, let the running tasks finish. A second
-  one aborts: workers get SIGTERM, which kills their solver's process group.
+- First Ctrl-C: stop admitting, let the running tasks finish. A second one
+  aborts: workers get SIGTERM, which kills their solver's process group.
   Workers ignore the terminal's SIGINT, from the moment they start (it is
   blocked while they boot), so the first Ctrl-C never interrupts a run halfway.
+- SIGTERM (``kill``, ``timeout``, systemd, a batch scheduler before its SIGKILL)
+  aborts at once: the running tasks are stopped and leave no record, so the next
+  ``run`` redoes them.
 """
 
 from __future__ import annotations
@@ -275,7 +278,11 @@ def run_tasks(
     context = mp.get_context("spawn")
 
     def _handle(signum: int, frame: Any) -> None:
-        if state["stop"]:
+        if signum == signal.SIGTERM:
+            # Whoever sends SIGTERM expects the process gone soon (often SIGKILL follows): abort now.
+            state["stop"] = state["abort"] = True
+            progress("SIGTERM: aborting the running tasks (they leave no record; the next run redoes them)")
+        elif state["stop"]:
             state["abort"] = True
             progress("second interrupt: aborting the running tasks")
         else:

@@ -15,7 +15,14 @@ Distinct from ``mamut_routing_tools.campaign``, which designs benchmark instance
 """
 
 from mamut_routing_tools.bks_campaign.archive import load_runs, run_key
-from mamut_routing_tools.bks_campaign.harvest import campaign_status, harvest, read_baseline, write_baseline, write_reports
+from mamut_routing_tools.bks_campaign.harvest import (
+    campaign_status,
+    harvest,
+    harvest_history,
+    read_baseline,
+    write_baseline,
+    write_reports,
+)
 from mamut_routing_tools.bks_campaign.plan import CampaignPlan, Task, build_plan, select_instances
 from mamut_routing_tools.bks_campaign.runner import execute_task, memory_budget_gb, run_tasks
 from mamut_routing_tools.bks_campaign.spec import CampaignSpec, load_spec, parse_seeds
@@ -28,6 +35,7 @@ __all__ = [
     "campaign_status",
     "execute_task",
     "harvest",
+    "harvest_history",
     "load_runs",
     "load_spec",
     "memory_budget_gb",

@@ -248,7 +248,7 @@ SOLVER_HELP = (
 @app.command("solve")
 def solve_cmd(
     instance_path: Annotated[Path, typer.Argument(help="A .vrp.json instance (generated or from a benchmark collection).")],
-    time_limit: Annotated[int, typer.Option("--time-limit", help="Wall-clock budget in seconds.")] = 30,
+    time_limit: Annotated[int, typer.Option("--time-limit-s", "--time-limit", min=1, help="Wall-clock budget in seconds.")] = 30,
     seed: Annotated[int, typer.Option("--seed")] = 42,
     objective: Annotated[
         Optional[str],
@@ -268,7 +268,11 @@ def solve_cmd(
     ] = None,
     update_bks: Annotated[
         bool,
-        typer.Option("--update-bks/--no-update-bks", help="Write a BKS file next to the instance when the solution improves it (needs --authors)."),
+        typer.Option(
+            "--save-bks/--no-save-bks",
+            "--update-bks/--no-update-bks",
+            help="Write a BKS file next to the instance when the solution improves it (needs --authors).",
+        ),
     ] = False,
     authors: Annotated[
         Optional[str],
@@ -280,11 +284,13 @@ def solve_cmd(
     Prints JSON. "cost" is the reference checker's cost of the routes and
     "validation" its verdict; "solver_cost" is the solver's own objective in
     instance units, for information. "status" is the solver's termination
-    (KAYROS: finished / converged / time_limit). With --update-bks --authors,
+    (KAYROS: finished / converged / time_limit). With --save-bks --authors,
     "bks_update" reports the store's action (created, replaced or
     kept_existing, with "tie" when the stored BKS costs exactly the same).
-    Exit status 1 when "ok" is false (the solver failed or the checker
-    rejected its routes).
+    The flags are those of `mamut-routing solve` (--time-limit and
+    --update-bks still work). The JSON is a solution file `mamut-routing
+    check` and `bks submit` read. Exit status 1 when "ok" is false (the
+    solver failed or the checker rejected its routes).
     """
     from mamut_routing_lib.enums import ObjectiveFunction
     from mamut_routing_lib.solutions import submit_bks
@@ -307,7 +313,7 @@ def solve_cmd(
             typer.echo(f"Unknown objective '{objective}'; use one of {', '.join(m.value for m in ObjectiveFunction)}.", err=True)
             raise typer.Exit(code=1) from None
     if update_bks and not (authors and authors.strip()):
-        typer.echo("--update-bks needs --authors (who to credit in the BKS), or $MAMUT_ROUTING_BKS_AUTHORS.", err=True)
+        typer.echo("--save-bks needs --authors (who to credit in the BKS), or $MAMUT_ROUTING_BKS_AUTHORS.", err=True)
         raise typer.Exit(code=1)
     workdir = None
     if keep_artifacts is not None:

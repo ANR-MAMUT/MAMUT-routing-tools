@@ -10,8 +10,11 @@
   worse than the baseline by more than float noise (``--offer-all`` offers
   every best run), one process per instance, credited to ``campaign.authors``.
   Ties and near-ties are the store's call: it re-validates, compares exact
-  decimal costs and keeps the incumbent on a tie.
-- ``write_reports`` writes ``ledger.csv`` (one row per run) and
+  decimal costs and keeps the incumbent on a tie. Every harvest is kept in
+  ``harvests/<NNNN>-<time>.json``; ``harvest.json`` is the latest one.
+- ``write_reports`` writes ``ledger.csv`` (one row per run; ``bks_action`` is
+  what the store did with the run in any harvest, ``created`` over a later
+  ``kept_existing``) and
   ``cross-solver.csv`` (per instance: best per kind, gap to the best, seed
   spread), ranking by the objective like the harvest.
 """
@@ -26,17 +29,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from mamut_routing_tools.bks_campaign.archive import load_runs
+from mamut_routing_tools.bks_campaign.archive import atomic_write_json, load_runs
 from mamut_routing_tools.bks_campaign.plan import objective_rank
 from mamut_routing_tools.bks_campaign.spec import CampaignSpec
 
-__all__ = ["BASELINE_FIELDS", "LEDGER_FIELDS", "harvest", "read_baseline", "write_baseline", "write_reports"]
+__all__ = ["BASELINE_FIELDS", "LEDGER_FIELDS", "harvest", "harvest_history", "read_baseline", "write_baseline", "write_reports"]
 
 BASELINE_FIELDS = ["instance_id", "objective_function", "cost", "num_routes", "method", "bks_sha256", "bks_path", "recorded"]
 LEDGER_FIELDS = [
     "instance_id", "objective_function", "n", "kind", "solver", "method", "solver_version", "seed", "time_limit_s",
     "wall_time", "status", "valid", "validated_cost", "num_routes", "baseline_cost", "vs_baseline_pct", "is_best",
-    "bks_action", "cost_exact", "check_error", "error", "host", "machine", "key",
+    "bks_action", "bks_action_at", "cost_exact", "check_error", "error", "host", "machine", "key",
 ]
 
 
@@ -234,8 +237,58 @@ def harvest(
     else:
         results.extend(_submit_one(job) for job in jobs)
     if not dry_run:
-        (spec.out / "harvest.json").write_text(json.dumps(results, indent=1, default=str) + "\n", encoding="utf-8")
+        _record_harvest(spec.out, results)
     return results
+
+
+#: Ledger ``bks_action`` precedence across harvests: what the store did that matters most.
+_ACTION_RANK = {"replaced": 0, "created": 1, "kept_existing": 2, "error": 3, "not_offered": 4, "skipped": 5}
+
+
+def _record_harvest(out: Path, results: list[dict[str, Any]]) -> Path:
+    """Write ``harvests/<NNNN>-<UTC time>.json`` (kept, numbered in order) and ``harvest.json`` (the latest)."""
+    history = out / "harvests"
+    history.mkdir(parents=True, exist_ok=True)
+    latest = out / "harvest.json"
+    numbers = [int(path.name[:4]) for path in history.glob("[0-9][0-9][0-9][0-9]-*.json")]
+    if latest.is_file() and not numbers:
+        # A harvest from before the history existed: keep it first, under its file time.
+        when = datetime.fromtimestamp(latest.stat().st_mtime, UTC)
+        legacy = json.loads(latest.read_text(encoding="utf-8"))
+        atomic_write_json(
+            history / f"0000-{when:%Y-%m-%dT%H-%M-%SZ}.json", {"harvested": when.isoformat(timespec="seconds"), "results": legacy}
+        )
+        numbers = [0]
+    now = datetime.now(UTC)
+    path = history / f"{max(numbers, default=0) + 1:04d}-{now:%Y-%m-%dT%H-%M-%SZ}.json"
+    atomic_write_json(path, {"harvested": now.isoformat(timespec="seconds"), "results": results})
+    latest.write_text(json.dumps(results, indent=1, default=str) + "\n", encoding="utf-8")
+    return path
+
+
+def harvest_history(out: Path) -> list[dict[str, Any]]:
+    """Every recorded harvest, oldest first: ``{"harvested": time, "results": [...]}``."""
+    history = sorted((out / "harvests").glob("[0-9][0-9][0-9][0-9]-*.json"))
+    if history:
+        return [json.loads(path.read_text(encoding="utf-8")) for path in history]
+    latest = out / "harvest.json"  # a campaign harvested before the history existed
+    if latest.is_file():
+        return [{"harvested": None, "results": json.loads(latest.read_text(encoding="utf-8"))}]
+    return []
+
+
+def _harvested_actions(out: Path) -> dict[str, tuple[str, str | None]]:
+    """run key -> (most significant store action over every harvest, when it happened)."""
+    actions: dict[str, tuple[str, str | None]] = {}
+    for entry in harvest_history(out):
+        for item in entry.get("results", []):
+            key, action = item.get("key"), item.get("action")
+            if not key or not action:
+                continue
+            known = actions.get(key)
+            if known is None or _ACTION_RANK.get(action, 9) <= _ACTION_RANK.get(known[0], 9):
+                actions[key] = (action, entry.get("harvested"))
+    return actions
 
 
 # --------------------------------------------------------------------------- #
@@ -249,10 +302,7 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
     runs = load_runs(spec.out)
     current, _stale = _current_runs(runs)
     baseline = read_baseline(spec.out)
-    harvest_path = spec.out / "harvest.json"
-    harvested = {}
-    if harvest_path.is_file():
-        harvested = {item["key"]: item.get("action") for item in json.loads(harvest_path.read_text(encoding="utf-8"))}
+    harvested = _harvested_actions(spec.out)
     best = {group: record["key"] for group, record in _best_runs(current).items()}
 
     ledger = spec.out / "ledger.csv"
@@ -271,7 +321,8 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
                 "baseline_cost": reference,
                 "vs_baseline_pct": gap,
                 "is_best": best.get(group) == record.get("key"),
-                "bks_action": harvested.get(record.get("key"), ""),
+                "bks_action": harvested.get(record.get("key"), ("", None))[0],
+                "bks_action_at": harvested.get(record.get("key"), ("", None))[1] or "",
             })
 
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
