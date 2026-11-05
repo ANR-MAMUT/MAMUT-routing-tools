@@ -13,7 +13,9 @@ import io
 import json
 import os
 import re
+import threading
 import zipfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -617,9 +619,8 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         yield
         # Running solves stop at their next observation; external solvers run in their own
         # process group and would outlive the server, so their groups are killed outright.
-        for record in jobs.list(limit=200):
-            if record.get("status") in ("queued", "running"):
-                jobs.cancel(str(record["job_id"]))
+        for job_id in jobs.active_ids():
+            jobs.cancel(job_id)
         from mamut_routing_lib.solvers.external.process import terminate_all
 
         terminate_all()
@@ -971,16 +972,22 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             name = str(submission.payload.get("solver") or "pyvrp")
             try:
                 availability = get_solver(name).availability()
-            except (UnknownSolverError, SolverConfigError) as error:
+            except UnknownSolverError as error:
                 return _payload_error(400, str(error))
+            except SolverConfigError as error:
+                return _payload_error(400, f"solvers config: {error}")
             if not availability.available:
                 hint = f" ({availability.hint})" if availability.hint else ""
                 return _payload_error(400, f"Solver {name} is not available: {availability.reason}{hint}")
         return {"ok": True, "job": submit_job(submission)}
 
     @app.get("/api/solvers")
-    async def list_registered_solvers(instance_id: str = "", metric: str = "fastest", objective_function: str = "") -> Any:
-        """Every registered solver, available or not, and whether it can solve the selected variant."""
+    def list_registered_solvers(instance_id: str = "", metric: str = "fastest", objective_function: str = "") -> Any:
+        """Every registered solver, available or not, and whether it can solve the selected variant.
+
+        A plain ``def``: FastAPI runs it in a worker thread, because profiling a large matrix
+        (the symmetry check) would otherwise stall the event loop.
+        """
         try:
             return _solvers_payload(workspace, instance_id, metric, objective_function)
         except KeyError:
@@ -1479,31 +1486,63 @@ def _solve_workspace_payload(
     return {**result, "instance_id": instance_id, "metric": metric, "solution": solution}
 
 
-_PROFILE_CACHE: dict[tuple[str, str | None], Any] = {}
+#: (instance path, sha256) -> (profile, instance), newest last; bounded, shared by the request threads.
+_PROFILE_CACHE: "OrderedDict[tuple[str, str | None], Any]" = OrderedDict()
+_PROFILE_CACHE_SIZE = 16
+_PROFILE_LOCK = threading.Lock()
+
+
+def _cached_profile(instance_path: Path) -> tuple[Any, Any]:
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.solvers import profile_instance
+
+    key = (str(instance_path), file_sha256(instance_path))
+    with _PROFILE_LOCK:
+        if key in _PROFILE_CACHE:
+            _PROFILE_CACHE.move_to_end(key)
+            return _PROFILE_CACHE[key]
+    instance = load_benchmark_instance(instance_path)
+    entry = (profile_instance(instance, instance_path), instance)
+    with _PROFILE_LOCK:
+        _PROFILE_CACHE[key] = entry
+        while len(_PROFILE_CACHE) > _PROFILE_CACHE_SIZE:
+            _PROFILE_CACHE.popitem(last=False)
+    return entry
 
 
 def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_function: str) -> dict[str, Any]:
     """Registered solvers with availability, and per-solver support for one instance variant."""
-    from mamut_routing_lib.artifacts import load_benchmark_instance
-    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.enums import ObjectiveFunction, ProblemType
     from mamut_routing_lib.objectives import default_objective
-    from mamut_routing_lib.solvers import list_solvers, profile_instance
-    from mamut_routing_lib.solvers.external.config import resolve_config_path
+    from mamut_routing_lib.solvers import BUILTIN_SOLVERS, list_solvers
+    from mamut_routing_lib.solvers.external.config import SolverConfigError, resolve_config_path
+
+    BUILTIN_ORDER = {name: index for index, name in enumerate(BUILTIN_SOLVERS)}
 
     profile = None
     objective = None
     if instance_id:
         record = _workspace_instance(workspace, instance_id)
         instance_path = _instance_variant_path(record, str(metric or "fastest").lower())
-        key = (str(instance_path), file_sha256(instance_path))
-        profile, instance = _PROFILE_CACHE.get(key, (None, None))
-        if profile is None:
-            instance = load_benchmark_instance(instance_path)
-            profile = profile_instance(instance, instance_path)
-            _PROFILE_CACHE[key] = (profile, instance)
+        profile, instance = _cached_profile(instance_path)
         objective = ObjectiveFunction(objective_function) if objective_function else default_objective(instance)
+        if profile.problem_type is ProblemType.CVRP:
+            objective = ObjectiveFunction.MONO_COST  # what the solve job runs on CVRP, whatever the select says
     rows = []
-    for solver in list_solvers():
+    try:
+        solvers = list_solvers()
+        config_error = None
+    except SolverConfigError as error:
+        # A broken solvers.toml blocks the external solvers only: PyVRP and KAYROS never read it.
+        from mamut_routing_lib.solvers import IN_PROCESS_SOLVERS, get_solver
+
+        config_error = f"solvers config: {error}"
+        solvers = [get_solver(name) for name in IN_PROCESS_SOLVERS]
+        for name in BUILTIN_SOLVERS:
+            if name not in IN_PROCESS_SOLVERS:
+                rows.append({"name": name, "label": name, "available": False, "reason": config_error, "hint": None,
+                             "version": None, "capabilities": None, "source": None})
+    for solver in solvers:
         availability = solver.availability()
         row: dict[str, Any] = {
             "name": solver.name,
@@ -1519,8 +1558,12 @@ def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_f
             support = solver.supports(profile, objective)
             row.update(supported=support.supported, reasons=list(support.reasons), warnings=list(support.warnings))
         rows.append(row)
-    config = resolve_config_path()
-    return {"ok": True, "config": str(config) if config else None, "solvers": rows}
+    rows.sort(key=lambda row: BUILTIN_ORDER.get(row["name"], len(BUILTIN_ORDER)))
+    try:
+        config = resolve_config_path()
+    except SolverConfigError:
+        config = None
+    return {"ok": True, "config": str(config) if config else None, "config_error": config_error, "solvers": rows}
 
 
 def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:

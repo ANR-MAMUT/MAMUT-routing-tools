@@ -66,7 +66,7 @@ def parse_seeds(value: str | int | list[int]) -> list[int]:
     if isinstance(value, int):
         return [value]
     if isinstance(value, list):
-        return [int(item) for item in value]
+        return list(dict.fromkeys(int(item) for item in value))
     seeds: list[int] = []
     for part in str(value).split(","):
         part = part.strip()
@@ -81,7 +81,7 @@ def parse_seeds(value: str | int | list[int]) -> list[int]:
             seeds.append(int(part))
     if not seeds:
         raise ValueError(f"no seeds in {value!r}")
-    return seeds
+    return list(dict.fromkeys(seeds))  # "1-3,2" is seeds 1, 2, 3: a repeated seed would be a duplicate run
 
 
 class CampaignSection(_Strict):
@@ -115,6 +115,16 @@ class SelectSection(_Strict):
     max_n: int | None = None
     name_regex: str | None = None
     objective: dict[ProblemType, ObjectiveFunction] = Field(default_factory=dict)
+
+    @field_validator("name_regex")
+    @classmethod
+    def _name_regex(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as error:
+                raise ValueError(f"not a regular expression ({error})") from error
+        return value
 
 
 class BudgetSpec(_Strict):
@@ -157,6 +167,15 @@ class RunSpec(_Strict):
 
     def seed_list(self) -> list[int]:
         return parse_seeds(self.seeds)
+
+    @field_validator("seeds")
+    @classmethod
+    def _seeds(cls, value: str | int | list[int]) -> str | int | list[int]:
+        try:
+            parse_seeds(value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f'expected seeds like "1-5,7" ({error})') from error
+        return value
 
     @field_validator("kind")
     @classmethod

@@ -1,10 +1,12 @@
 """From a campaign spec to the list of runs still to do.
 
 Every (instance, run entry, seed) becomes a task with its budget, objective
-and run key. Tasks whose record already exists are done (resumption), tasks a
-solver cannot take are listed with the reason instead of failing at run time,
-and unavailable solvers are reported once. Longest budgets go first so the
-pool's tail is short.
+and run key. Tasks whose record already exists are done (resumption) unless the
+instance file changed since that run (``stale``: they run again), tasks a solver
+cannot take are listed with the reason instead of failing at run time, and
+unavailable solvers are reported once. A key listed twice (repeated seeds, two
+identical run entries) is planned once. Longest budgets go first so the tail
+is short.
 """
 
 from __future__ import annotations
@@ -56,6 +58,8 @@ class CampaignPlan:
     unsupported: list[tuple[str, str, str]]  # (instance_id, solver, reason)
     unavailable: dict[str, str]  # solver -> reason
     retried: list[str]
+    #: Done runs of an instance file that changed since: planned again.
+    stale: list[str] = field(default_factory=list)
 
     @property
     def core_hours(self) -> float:
@@ -78,6 +82,7 @@ class CampaignPlan:
             "todo": len(self.tasks),
             "done": len(self.done),
             "retried": len(self.retried),
+            "stale": len(self.stale),
             "per_kind": per_solver,
             "core_hours": round(self.core_hours, 2),
             "makespan_lower_bound_h": round(self.makespan_lower_bound_h(workers), 2),
@@ -126,26 +131,43 @@ def select_instances(spec: CampaignSpec) -> list[Any]:
     return chosen
 
 
-def _best_known_routes(spec: CampaignSpec, instance_path: Path, instance_id: str, objective: Any) -> tuple[list[list[int]] | None, str | None]:
-    """Routes of the best valid archived run or the stored BKS (warm starts), with their origin."""
+def objective_rank(objective: str, cost: float, num_routes: int) -> tuple:
+    """Sort key of a solution under ``objective``: fleet first for ``HierarchicalVehicleCost``."""
+    if objective == "HierarchicalVehicleCost":
+        return (int(num_routes), float(cost))
+    return (float(cost),)
+
+
+def _best_known_routes(
+    spec: CampaignSpec, instance_path: Path, instance_id: str, objective: Any, instance_sha256: str | None = None
+) -> tuple[list[list[int]] | None, str | None]:
+    """Routes of the best valid archived run or the stored BKS (warm starts), with their origin.
+
+    Runs of an older version of the instance file are ignored; "best" follows the objective
+    (fewer routes first under ``HierarchicalVehicleCost``).
+    """
     from mamut_routing_lib.artifacts import get_bks_path_for_instance, load_bks
 
     from mamut_routing_tools.bks_campaign.archive import iter_runs
 
-    best: tuple[float, list[list[int]], str] | None = None
+    best: tuple[tuple, list[list[int]], str] | None = None
     for record in iter_runs(spec.out):
         if record.get("instance_id") != instance_id or record.get("objective_function") != objective.value:
             continue
         if not record.get("valid") or record.get("validated_cost") is None or not record.get("routes"):
             continue
-        cost = float(record["validated_cost"])
-        if best is None or cost < best[0]:
-            best = (cost, record["routes"], f"run:{record['key']}")
+        if instance_sha256 and record.get("instance_sha256") not in (None, instance_sha256):
+            continue
+        rank = objective_rank(objective.value, record["validated_cost"], len(record["routes"]))
+        if best is None or rank < best[0]:
+            best = (rank, record["routes"], f"run:{record['key']}")
     bks_path = get_bks_path_for_instance(instance_path, objective)
     if bks_path.is_file():
         bks = load_bks(bks_path)
-        if bks.cost is not None and (best is None or float(bks.cost) < best[0]):
-            best = (float(bks.cost), bks.routes, f"bks:{bks.metadata.get('method') or 'stored'}")
+        if bks.cost is not None:
+            rank = objective_rank(objective.value, bks.cost, len(bks.routes))
+            if best is None or rank < best[0]:
+                best = (rank, bks.routes, f"bks:{bks.metadata.get('method') or 'stored'}")
     if best is None:
         return None, None
     return [list(route) for route in best[1]], best[2]
@@ -156,6 +178,7 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
     from mamut_routing_lib.artifacts import load_benchmark_instance
     from mamut_routing_lib.objectives import base_objective
     from mamut_routing_lib.solvers import get_solver, profile_instance
+    from mamut_routing_lib.solvers.provenance import file_sha256
 
     only_pattern = re.compile(only) if only else None
     config = str(spec.campaign.solvers_config) if spec.campaign.solvers_config else None
@@ -176,6 +199,8 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
     tasks: list[Task] = []
     done: list[str] = []
     retried: list[str] = []
+    stale: list[str] = []
+    planned: set[str] = set()
     unsupported: list[tuple[str, str, str]] = []
     for item in select_instances(spec):
         if only_pattern and not (only_pattern.search(item.instance_id) or only_pattern.search(item.instance_name)):
@@ -185,6 +210,7 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
         objective = spec.select.objective.get(item.problem_type) or base_objective(instance)
         profile = profile_instance(instance, item.instance_path)
         n = int(instance.num_customers)
+        current_sha = file_sha256(item.instance_path)
         warm: dict[str, tuple[list[list[int]] | None, str | None]] = {}
         for run in spec.runs:
             solver = solvers.get(run.solver)
@@ -198,7 +224,9 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
             routes = sha = origin = None
             if run.warm_start == "best":
                 if objective.value not in warm:
-                    warm[objective.value] = _best_known_routes(spec, item.instance_path, item.instance_id, objective)
+                    warm[objective.value] = _best_known_routes(
+                        spec, item.instance_path, item.instance_id, objective, current_sha
+                    )
                 routes, origin = warm[objective.value]
                 if routes is None:
                     unsupported.append((item.instance_id, run.solver, "warm_start = best but no archived run or stored BKS"))
@@ -206,9 +234,15 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
                 sha = hashlib.sha256(json.dumps(routes, separators=(",", ":")).encode()).hexdigest()
             for seed in run.seed_list():
                 key = run_key(item.instance_id, objective.value, run.run_kind, seed, budget)
+                if key in planned:  # the same run listed twice would share its raw directory
+                    continue
+                planned.add(key)
                 record_path = run_path(spec.out, key)
                 if record_path.is_file():
-                    if retry_failed and _failed(record_path):
+                    record = _read_record(record_path)
+                    if record.get("instance_sha256") not in (None, current_sha):
+                        stale.append(key)  # a run of an older instance file: run it again
+                    elif retry_failed and _failed(record):
                         retried.append(key)
                     else:
                         done.append(key)
@@ -238,12 +272,18 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
                     )
                 )
     tasks.sort(key=lambda task: (-task.time_limit_s, task.key))
-    return CampaignPlan(tasks=tasks, done=done, unsupported=unsupported, unavailable=unavailable, retried=retried)
+    return CampaignPlan(
+        tasks=tasks, done=done, unsupported=unsupported, unavailable=unavailable, retried=retried, stale=stale
+    )
 
 
-def _failed(path: Path) -> bool:
+def _read_record(path: Path) -> dict[str, Any]:
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return True
+        return {"status": "failed", "valid": False}  # an unreadable record counts as a failed run
+    return record if isinstance(record, dict) else {"status": "failed", "valid": False}
+
+
+def _failed(record: dict[str, Any]) -> bool:
     return record.get("status") in ("timeout", "failed") or not record.get("valid")

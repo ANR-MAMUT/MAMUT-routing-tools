@@ -213,6 +213,11 @@ class JobManager:
             )
             return json.loads(json.dumps(records[: max(1, min(limit, 200))]))
 
+    def active_ids(self) -> list[str]:
+        """Every queued or running job (``list`` is capped at the newest 200)."""
+        with self._lock:
+            return [job_id for job_id, record in self._records.items() if record.get("status") in ("queued", "running")]
+
     def log_text(self, job_id: str) -> str:
         if job_id not in self._records:
             raise KeyError(job_id)

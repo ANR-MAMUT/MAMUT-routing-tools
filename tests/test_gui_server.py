@@ -1236,6 +1236,37 @@ def test_solvers_endpoint_lists_availability_and_per_instance_support(client: Te
     assert client.get("/api/solvers?instance_id=nope").status_code == 404
 
 
+def test_the_hierarchical_objective_on_cvrp_leaves_solvers_enabled(client: TestClient) -> None:
+    # The solve job runs CVRP as MonoCost whatever the objective select says: so does the support check.
+    instance_id = _generate(client)["instance_id"]
+    query = f"/api/solvers?instance_id={instance_id}&metric=fastest&objective_function=HierarchicalVehicleCost"
+    by_name = {row["name"]: row for row in client.get(query).json()["solvers"]}
+    assert by_name["pyvrp"]["supported"], by_name["pyvrp"]["reasons"]
+
+
+def test_a_broken_solvers_config_leaves_pyvrp_usable(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    from mamut_routing_lib.solvers import reload_solvers
+
+    broken = tmp_path / "broken.toml"
+    broken.write_text('schema_version = 1\n[solvers.filo2]\nexecutable = "/opt/filo2\n')  # unclosed string
+    monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(broken))
+    reload_solvers()
+    instance_id = _generate(client)["instance_id"]
+    listing = client.get(f"/api/solvers?instance_id={instance_id}&metric=fastest").json()
+    assert listing["ok"] and "solvers config" in listing["config_error"]
+    by_name = {row["name"]: row for row in listing["solvers"]}
+    assert [row["name"] for row in listing["solvers"]][:2] == ["pyvrp", "kayros"]
+    assert by_name["pyvrp"]["available"] and by_name["pyvrp"]["supported"]
+    assert not by_name["filo2"]["available"] and "solvers config" in by_name["filo2"]["reason"]
+    submitted = client.post("/api/jobs", json={"kind": "solve", "payload": {"instance_id": instance_id, "time_limit": 1}})
+    assert submitted.status_code == 200, submitted.json()
+    refused = client.post(
+        "/api/jobs", json={"kind": "solve", "payload": {"instance_id": instance_id, "time_limit": 1, "solver": "filo2"}}
+    )
+    assert refused.status_code == 400 and "solvers config" in refused.json()["error"]
+    _wait_for_job(client, submitted.json()["job"]["job_id"])
+
+
 def test_an_external_solve_job_records_the_solver_and_its_provenance(client: TestClient, fake_solver_config: Path) -> None:
     instance_id = _generate(client)["instance_id"]
     submitted = client.post(

@@ -3,16 +3,17 @@
 - ``write_baseline`` freezes the stored BKS of every selected instance before
   the campaign (``baseline.csv``) and refuses to overwrite it: gains are
   measured against what was published, not against the campaign's own writes.
-- ``harvest`` is the only step that writes BKS files. It takes the best valid
-  run per (instance, objective), skips runs whose instance file changed since
-  the run (``instance_sha256``), and offers it to the BKS store unless it is
+- ``harvest`` is the only step that writes BKS files. It sets aside the runs
+  whose instance file changed since (``instance_sha256``), takes the best valid
+  remaining run per (instance, objective) (fewer routes first under
+  ``HierarchicalVehicleCost``), and offers it to the BKS store unless it is
   worse than the baseline by more than float noise (``--offer-all`` offers
   every best run), one process per instance, credited to ``campaign.authors``.
   Ties and near-ties are the store's call: it re-validates, compares exact
   decimal costs and keeps the incumbent on a tie.
 - ``write_reports`` writes ``ledger.csv`` (one row per run) and
   ``cross-solver.csv`` (per instance: best per kind, gap to the best, seed
-  spread).
+  spread), ranking by the objective like the harvest.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from mamut_routing_tools.bks_campaign.archive import load_runs
+from mamut_routing_tools.bks_campaign.plan import objective_rank
 from mamut_routing_tools.bks_campaign.spec import CampaignSpec
 
 __all__ = ["BASELINE_FIELDS", "LEDGER_FIELDS", "harvest", "read_baseline", "write_baseline", "write_reports"]
@@ -109,9 +111,22 @@ def _best_runs(runs: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, An
 
 
 def _objective_key(record: dict[str, Any]) -> tuple:
-    if record.get("objective_function") == "HierarchicalVehicleCost":
-        return (int(record.get("num_routes") or 0), float(record["validated_cost"]))
-    return (float(record["validated_cost"]),)
+    return objective_rank(str(record.get("objective_function")), record["validated_cost"], int(record.get("num_routes") or 0))
+
+
+def _current_runs(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(runs of the instance files as they are now, runs of a file that changed since)."""
+    from mamut_routing_lib.solvers.provenance import file_sha256
+
+    shas: dict[str, str | None] = {}
+    current, stale = [], []
+    for record in runs:
+        path = record.get("instance_path")
+        if path and path not in shas:
+            shas[path] = file_sha256(path) if Path(path).is_file() else None
+        recorded = record.get("instance_sha256")
+        (stale if recorded and path and shas.get(path) != recorded else current).append(record)
+    return current, stale
 
 
 #: Relative margin of the baseline pre-filter. A float total depends on the order and the arithmetic
@@ -188,17 +203,17 @@ def harvest(
 ) -> list[dict[str, Any]]:
     """Offer each instance's best run to the BKS store (the campaign's only writer)."""
     from mamut_routing_lib.artifacts import load_benchmark_instance
-    from mamut_routing_lib.solvers.provenance import file_sha256
 
-    runs = load_runs(spec.out, with_routes=True)
+    runs, stale = _current_runs(load_runs(spec.out, with_routes=True))
     baseline = read_baseline(spec.out)
     results: list[dict[str, Any]] = []
     jobs = []
-    for group, record in sorted(_best_runs(runs).items()):
-        if record.get("instance_sha256") and file_sha256(record["instance_path"]) != record["instance_sha256"]:
+    best = _best_runs(runs)
+    for group, record in sorted(_best_runs(stale).items()):
+        if group not in best:  # only runs of an older instance file: nothing current to offer
             results.append({"key": record["key"], "instance_id": group[0], "action": "skipped",
-                            "reason": "the instance file changed after the run"})
-            continue
+                            "reason": "the instance file changed after the run (plan runs it again)"})
+    for group, record in sorted(best.items()):
         if not offer_all and not _may_beat_baseline(record, baseline.get(group)):
             results.append({"key": record["key"], "instance_id": group[0], "action": "not_offered",
                             "reason": "worse than the baseline"})
@@ -230,13 +245,15 @@ def harvest(
 
 def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
     """``ledger.csv`` (one row per run) and ``cross-solver.csv`` (per instance and objective)."""
+    spec.out.mkdir(parents=True, exist_ok=True)  # before any `run`: empty reports, not a traceback
     runs = load_runs(spec.out)
+    current, _stale = _current_runs(runs)
     baseline = read_baseline(spec.out)
     harvest_path = spec.out / "harvest.json"
     harvested = {}
     if harvest_path.is_file():
         harvested = {item["key"]: item.get("action") for item in json.loads(harvest_path.read_text(encoding="utf-8"))}
-    best = {group: record["key"] for group, record in _best_runs(runs).items()}
+    best = {group: record["key"] for group, record in _best_runs(current).items()}
 
     ledger = spec.out / "ledger.csv"
     with ledger.open("w", newline="", encoding="utf-8") as handle:
@@ -258,7 +275,7 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
             })
 
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for record in runs:
+    for record in current:  # runs of an instance file that changed since are not compared
         groups.setdefault((record.get("instance_id"), record.get("objective_function")), []).append(record)
     kinds = sorted({record.get("kind") for record in runs if record.get("kind")})
     compare = spec.out / "cross-solver.csv"
@@ -270,7 +287,7 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
         writer.writeheader()
         for group, records in sorted(groups.items()):
             valid = [record for record in records if record.get("valid") and record.get("validated_cost") is not None]
-            overall = min(valid, key=lambda record: float(record["validated_cost"]), default=None)
+            overall = min(valid, key=_objective_key, default=None)
             row: dict[str, Any] = {
                 "instance_id": group[0],
                 "objective_function": group[1],
@@ -284,7 +301,7 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
                     row[f"{kind}_valid_runs"] = 0
                     continue
                 costs = [float(record["validated_cost"]) for record in kind_runs]
-                kind_best_run = min(kind_runs, key=lambda record: float(record["validated_cost"]))
+                kind_best_run = min(kind_runs, key=_objective_key)
                 kind_best = float(kind_best_run["validated_cost"])
                 row[f"{kind}_best"] = kind_best
                 row[f"{kind}_routes"] = kind_best_run.get("num_routes")

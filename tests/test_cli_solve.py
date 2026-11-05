@@ -79,6 +79,12 @@ def test_solve_with_a_configured_external_solver(tmp_path: Path, fixture_osm_pat
     assert payload["provenance"]["scale"]["exact"] is True
     assert payload["cost"] == pytest.approx(payload["solver_cost"])
 
+    monkeypatch.setenv("FAKE_MODE", "crash")
+    crashed = CliRunner().invoke(app, ["solve", str(_generated(tmp_path, fixture_osm_path)), "--solver", "fake", "--time-limit", "5"])
+    assert crashed.exit_code == 1  # the JSON still says why
+    failed = json.loads(crashed.stdout)
+    assert not failed["ok"] and failed["status"] == "failed" and "no solution file" in failed["error"]
+
 
 def test_unknown_or_unsuitable_solvers_are_errors(tmp_path: Path, fixture_osm_path: Path) -> None:
     instance = _generated(tmp_path, fixture_osm_path)

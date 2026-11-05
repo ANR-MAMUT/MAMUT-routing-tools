@@ -283,6 +283,8 @@ def solve_cmd(
     (KAYROS: finished / converged / time_limit). With --update-bks --authors,
     "bks_update" reports the store's action (created, replaced or
     kept_existing, with "tie" when the stored BKS costs exactly the same).
+    Exit status 1 when "ok" is false (the solver failed or the checker
+    rejected its routes).
     """
     from mamut_routing_lib.enums import ObjectiveFunction
     from mamut_routing_lib.solutions import submit_bks
@@ -371,6 +373,8 @@ def solve_cmd(
         else:
             payload["bks_update"] = {"action": "skipped", "reason": "no feasible, checker-valid solution"}
     typer.echo(json.dumps(payload, indent=1, default=str))
+    if not payload["ok"]:
+        raise typer.Exit(code=1)  # scripts must see a failed or invalid solve (the JSON says why)
 
 
 @generate_app.command("materialize-distances")
@@ -732,6 +736,24 @@ def _load_campaign(spec_path: Path):  # type: ignore[no-untyped-def]
         raise typer.Exit(code=2) from error
 
 
+def _campaign_plan(spec, spec_path: Path, *, only: str | None, retry_failed: bool = False):  # type: ignore[no-untyped-def]
+    """``build_plan`` with spec mistakes it can only see now (unknown solver, bad --only) as usage errors."""
+    import re
+
+    from mamut_routing_tools.bks_campaign import build_plan
+
+    if only is not None:
+        try:
+            re.compile(only)
+        except re.error as error:
+            raise typer.BadParameter(f"not a regular expression ({error})", param_hint="--only") from error
+    try:
+        return build_plan(spec, only=only, retry_failed=retry_failed)
+    except ValueError as error:  # UnknownSolverError, SolverConfigError, a warm start the solver refuses
+        typer.echo(f"Error: {spec_path}: {error}", err=True)
+        raise typer.Exit(code=2) from error
+
+
 @bks_campaign_app.command("plan")
 def bks_campaign_plan(
     spec_path: Annotated[Path, _SPEC_ARG],
@@ -740,10 +762,8 @@ def bks_campaign_plan(
     as_json: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
     """Dry run: what `run` would do -- runs to do and done, core-hours, makespan, memory, refusals."""
-    from mamut_routing_tools.bks_campaign import build_plan
-
     spec = _load_campaign(spec_path)
-    plan = build_plan(spec, only=only, retry_failed=retry_failed)
+    plan = _campaign_plan(spec, spec_path, only=only, retry_failed=retry_failed)
     summary = plan.summary(spec.resources.workers)
     summary["unsupported_examples"] = [list(item) for item in plan.unsupported[:10]]
     if as_json:
@@ -790,12 +810,14 @@ def bks_campaign_run(
 
     First Ctrl-C: no new run starts and the running ones finish. Second: abort
     (solvers are killed with their process groups). Interrupted runs leave no
-    record and are picked up by the next `run`.
+    record and are picked up by the next `run`. A worker that dies (out of
+    memory) gets a failed record (`--retry-failed` runs it again); the
+    other runs carry on.
     """
-    from mamut_routing_tools.bks_campaign import build_plan, memory_budget_gb, read_baseline, run_tasks
+    from mamut_routing_tools.bks_campaign import memory_budget_gb, read_baseline, run_tasks
 
     spec = _load_campaign(spec_path)
-    plan = build_plan(spec, only=only, retry_failed=retry_failed)
+    plan = _campaign_plan(spec, spec_path, only=only, retry_failed=retry_failed)
     for solver, reason in plan.unavailable.items():
         typer.secho(f"unavailable: {solver}: {reason}", fg=typer.colors.YELLOW, err=True)
     if not read_baseline(spec.out):

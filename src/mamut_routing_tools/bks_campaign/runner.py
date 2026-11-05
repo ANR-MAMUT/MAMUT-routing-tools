@@ -1,8 +1,11 @@
-"""Run a campaign's tasks: a resumable process pool with memory-aware admission.
+"""Run a campaign's tasks: resumable worker processes with memory-aware admission.
 
-- One task per worker process (``spawn``, ``max_tasks_per_child=1``): a solver's
-  memory is returned to the system after every run, and a fixed driver is
-  picked up by the next worker.
+- One spawned worker process per task: a solver's memory is returned to the
+  system after every run, and a fixed driver is picked up by the next worker.
+  Workers are managed one by one (no shared pool), so a worker that dies (the
+  out-of-memory killer) costs only its own run: it gets a ``failed`` record
+  (``--retry-failed`` runs it again), its orphaned solver is killed, and the
+  other runs carry on.
 - Admission: a task starts only while the memory estimates of the running
   tasks plus its own fit the budget (``resources.memory_gb``, or 80 % of
   ``MemAvailable``); at least one task always runs.
@@ -10,22 +13,24 @@
   write a BKS. Harvest is a separate, single-writer step.
 - First Ctrl-C / SIGTERM: stop admitting, let the running tasks finish. A second
   one aborts: workers get SIGTERM, which kills their solver's process group.
-  Workers ignore the terminal's SIGINT themselves, so the first Ctrl-C never
-  interrupts a run halfway.
+  Workers ignore the terminal's SIGINT, from the moment they start (it is
+  blocked while they boot), so the first Ctrl-C never interrupts a run halfway.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import multiprocessing as mp
+import multiprocessing.connection
 import os
 import signal
 import socket
 import time
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from mamut_routing_tools.bks_campaign.archive import SCHEMA_VERSION, atomic_write_json, raw_dir, run_path
 from mamut_routing_tools.bks_campaign.plan import CampaignPlan, Task
@@ -56,13 +61,35 @@ def memory_budget_gb(setting: float | str) -> float:
     return 8.0  # pragma: no cover
 
 
+#: Signals held back while a worker boots: the terminal's Ctrl-C must not kill it before it ignores SIGINT.
+_BOOT_SIGNALS = {signal.SIGINT, signal.SIGTERM}
+#: Seconds an aborted worker gets to kill its solver before it is killed itself.
+ABORT_GRACE_S = 15.0
+
+
+@contextlib.contextmanager
+def _signals_blocked() -> Iterator[None]:
+    """Block SIGINT/SIGTERM in this thread; a process started meanwhile inherits the mask."""
+    if not hasattr(signal, "pthread_sigmask"):  # pragma: no cover - Windows
+        yield
+        return
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, _BOOT_SIGNALS)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
 def _worker_init(nice: int | None) -> None:
+    # Ignoring SIGINT discards a Ctrl-C that arrived while the worker booted with it blocked.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     def _terminate(signum: int, frame: Any) -> None:
         raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGTERM, _terminate)
+    if hasattr(signal, "pthread_sigmask"):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _BOOT_SIGNALS)
     for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
         os.environ.setdefault(variable, "1")
     if nice:
@@ -72,18 +99,10 @@ def _worker_init(nice: int | None) -> None:
             pass
 
 
-def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
-    """Worker: solve one task, check it, write its record; returns a short summary."""
-    from importlib.metadata import version
-
-    from mamut_routing_lib.enums import ObjectiveFunction
-    from mamut_routing_lib.solvers import SolveMonitor, run_solver
+def _base_record(task: Task, started: str) -> dict[str, Any]:
     from mamut_routing_lib.solvers.provenance import environment, file_sha256
 
-    task = Task(**payload)
-    out = Path(task.out)
-    started = datetime.now(UTC).isoformat(timespec="seconds")
-    record: dict[str, Any] = {
+    return {
         "schema_version": SCHEMA_VERSION,
         "key": task.key,
         "campaign": task.campaign,
@@ -104,6 +123,22 @@ def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
         "loadavg_start": _loadavg(),
         **environment(include_host=True),
     }
+
+
+def _summary(record: dict[str, Any]) -> dict[str, Any]:
+    return {key: record.get(key) for key in ("key", "status", "valid", "validated_cost", "num_routes", "wall_time", "error")}
+
+
+def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
+    """Worker: solve one task, check it, write its record; returns a short summary."""
+    from importlib.metadata import version
+
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.solvers import SolveMonitor, run_solver
+
+    task = Task(**payload)
+    out = Path(task.out)
+    record = _base_record(task, datetime.now(UTC).isoformat(timespec="seconds"))
     try:
         record["tools_version"] = version("mamut-routing-tools")
     except Exception:  # noqa: BLE001
@@ -154,7 +189,71 @@ def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
             (workdir / name).unlink(missing_ok=True)
     record.update(finished=datetime.now(UTC).isoformat(timespec="seconds"), loadavg_end=_loadavg())
     atomic_write_json(run_path(out, task.key), record)
-    return {key: record.get(key) for key in ("key", "status", "valid", "validated_cost", "num_routes", "wall_time", "error")}
+    return _summary(record)
+
+
+def _task_main(payload: dict[str, Any], nice: int | None, connection: Any) -> None:
+    """Worker process entry: ignore Ctrl-C, run the task, send its summary back."""
+    _worker_init(nice)
+    summary = execute_task(payload)
+    try:
+        connection.send(summary)
+    finally:
+        connection.close()
+
+
+def _death_reason(exitcode: int | None) -> str:
+    if exitcode is not None and exitcode < 0:
+        number = -exitcode
+        try:
+            name = signal.Signals(number).name
+        except ValueError:  # pragma: no cover
+            name = f"signal {number}"
+        hint = " (the out-of-memory killer?)" if number == signal.SIGKILL else ""
+        return f"the worker was killed by {name}{hint}"
+    return f"the worker exited with code {exitcode} before recording the run"
+
+
+def _kill_orphans(workdir: Path) -> int:
+    """Kill the process groups still working in ``workdir`` (a dead worker's solver); Linux only."""
+    proc = Path("/proc")
+    if not proc.is_dir():  # pragma: no cover - not Linux
+        return 0
+    target = workdir.resolve()
+    own_group = os.getpgid(0)
+    groups: set[int] = set()
+    for entry in proc.iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            if Path(os.readlink(entry / "cwd")) != target:
+                continue
+            group = os.getpgid(int(entry.name))
+        except (OSError, ValueError):
+            continue
+        if group != own_group:
+            groups.add(group)
+    for group in groups:
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):  # pragma: no cover
+            pass
+    return len(groups)
+
+
+@dataclass
+class _Worker:
+    task: Task
+    process: Any
+    connection: Any
+
+    def summary(self) -> dict[str, Any] | None:
+        try:
+            if self.connection.poll():
+                return self.connection.recv()
+        except (EOFError, OSError):
+            pass
+        return None
 
 
 def run_tasks(
@@ -173,6 +272,7 @@ def run_tasks(
     state = {"stop": False, "abort": False}
     results: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    context = mp.get_context("spawn")
 
     def _handle(signum: int, frame: Any) -> None:
         if state["stop"]:
@@ -184,21 +284,52 @@ def run_tasks(
 
     previous = {sig: signal.signal(sig, _handle) for sig in (signal.SIGINT, signal.SIGTERM)}
     nice = tasks[0].nice if tasks else None
-    executor = ProcessPoolExecutor(
-        max_workers=workers,
-        mp_context=mp.get_context("spawn"),
-        max_tasks_per_child=1,
-        initializer=_worker_init,
-        initargs=(nice,),
-    )
-    running: dict[Future, Task] = {}
+    running: dict[Any, _Worker] = {}
     pending = list(tasks)
+
+    def _start(task: Task) -> None:
+        receiver, sender = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_task_main, args=(task.to_payload(), nice, sender), name=f"bks-campaign {task.key}"
+        )
+        with _signals_blocked():
+            process.start()
+        sender.close()
+        running[process.sentinel] = _Worker(task=task, process=process, connection=receiver)
+        progress(f"start {task.key} ({task.time_limit_s}s, ~{task.memory_gb:.1f} GB)")
+
+    def _finish(worker: _Worker) -> None:
+        worker.process.join()
+        summary = worker.summary()
+        worker.connection.close()
+        task = worker.task
+        if summary is None:
+            killed = _kill_orphans(raw_dir(out, task.key))
+            terminated = worker.process.exitcode in (-signal.SIGTERM, 128 + signal.SIGTERM)
+            if state["abort"] or terminated:
+                # An aborted or terminated run (SIGTERM to the whole group: systemd, a scheduler)
+                # leaves no record: the next `run` picks it up.
+                progress(f"stop  {task.key}: interrupted, no record")
+                return
+            reason = _death_reason(worker.process.exitcode)
+            if killed:
+                reason += f"; its solver was left running and has been killed ({killed} process group(s))"
+            record = _base_record(task, datetime.now(UTC).isoformat(timespec="seconds"))
+            record.update(status="failed", valid=False, error=reason, finished=datetime.now(UTC).isoformat(timespec="seconds"))
+            atomic_write_json(run_path(out, task.key), record)
+            summary = _summary(record)
+            failures.append(summary)
+        results.append(summary)
+        cost = summary.get("validated_cost")
+        detail = f" cost {cost}" if cost is not None else (f" ({summary['error']})" if summary.get("error") else "")
+        progress(f"done  {task.key}: {summary.get('status')}{detail}")
+
     try:
         while pending or running:
             if state["abort"]:
                 break
             while pending and not state["stop"] and len(running) < workers:
-                in_use = sum(task.memory_gb for task in running.values())
+                in_use = sum(worker.task.memory_gb for worker in running.values())
                 candidate = pending[0]
                 if running and in_use + candidate.memory_gb > memory_gb:
                     # The longest task does not fit: start the first smaller one that does.
@@ -207,29 +338,25 @@ def run_tasks(
                         break
                     candidate = fitting
                 pending.remove(candidate)
-                running[executor.submit(execute_task, candidate.to_payload())] = candidate
-                progress(f"start {candidate.key} ({candidate.time_limit_s}s, ~{candidate.memory_gb:.1f} GB)")
+                _start(candidate)
             if not running:
                 break
-            done, _ = wait(list(running), timeout=1.0, return_when=FIRST_COMPLETED)
-            for future in done:
-                task = running.pop(future)
-                try:
-                    summary = future.result()
-                except Exception as error:  # noqa: BLE001 - a dead worker (OOM kill) is reported, not fatal
-                    summary = {"key": task.key, "status": "failed", "valid": False, "error": f"worker died: {error}"}
-                    failures.append(summary)
-                results.append(summary)
-                cost = summary.get("validated_cost")
-                progress(f"done  {task.key}: {summary.get('status')}" + (f" cost {cost}" if cost is not None else ""))
+            for sentinel in mp.connection.wait(list(running), timeout=1.0):
+                _finish(running.pop(sentinel))
     finally:
-        if state["abort"]:
-            for process in list(getattr(executor, "_processes", {}).values()):
-                try:
-                    os.kill(process.pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):  # pragma: no cover
-                    pass
-        executor.shutdown(wait=True, cancel_futures=True)
+        if running:
+            # Abort (or an unexpected error here): SIGTERM lets each worker kill its solver's group.
+            for worker in running.values():
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(worker.process.pid, signal.SIGTERM)
+            deadline = time.monotonic() + ABORT_GRACE_S
+            for worker in running.values():
+                worker.process.join(max(0.0, deadline - time.monotonic()))
+                if worker.process.is_alive():
+                    worker.process.kill()
+                    worker.process.join()
+                _kill_orphans(raw_dir(out, worker.task.key))
+                worker.connection.close()
         for sig, handler in previous.items():
             signal.signal(sig, handler)
     summary = {
