@@ -5,10 +5,11 @@
   measured against what was published, not against the campaign's own writes.
 - ``harvest`` is the only step that writes BKS files. It takes the best valid
   run per (instance, objective), skips runs whose instance file changed since
-  the run (``instance_sha256``), offers it to the BKS store only if it beats
-  the baseline (``--offer-all`` offers every best run), one process per
-  instance, credited to ``campaign.authors``. The store itself re-validates and
-  keeps the incumbent on a tie.
+  the run (``instance_sha256``), and offers it to the BKS store unless it is
+  worse than the baseline by more than float noise (``--offer-all`` offers
+  every best run), one process per instance, credited to ``campaign.authors``.
+  Ties and near-ties are the store's call: it re-validates, compares exact
+  decimal costs and keeps the incumbent on a tie.
 - ``write_reports`` writes ``ledger.csv`` (one row per run) and
   ``cross-solver.csv`` (per instance: best per kind, gap to the best, seed
   spread).
@@ -113,12 +114,24 @@ def _objective_key(record: dict[str, Any]) -> tuple:
     return (float(record["validated_cost"]),)
 
 
-def _beats_baseline(record: dict[str, Any], baseline: dict[str, Any] | None) -> bool:
+#: Relative margin of the baseline pre-filter. A float total depends on the order and the arithmetic
+#: that summed the arcs (by at most about n * 2**-53 of the cost, 5e-13 at n = 4000), and the
+#: baseline may have been priced by another checker release than the runs; the store compares exact
+#: decimal costs. So the pre-filter only drops runs that are worse by more than this margin and
+#: leaves ties and near-ties to the store.
+BASELINE_MARGIN = 1e-10
+
+
+def _may_beat_baseline(record: dict[str, Any], baseline: dict[str, Any] | None) -> bool:
+    """False only when the run is worse than the baseline beyond float noise (``BASELINE_MARGIN``)."""
     if baseline is None or baseline.get("cost") in ("", None):
         return True
-    reference = {"objective_function": record["objective_function"], "validated_cost": float(baseline["cost"]),
-                 "num_routes": int(baseline["num_routes"] or 0)}
-    return _objective_key(record) < _objective_key(reference)
+    if record.get("objective_function") == "HierarchicalVehicleCost":
+        routes, reference_routes = int(record.get("num_routes") or 0), int(baseline.get("num_routes") or 0)
+        if routes != reference_routes:
+            return routes < reference_routes
+    cost, reference = float(record["validated_cost"]), float(baseline["cost"])
+    return cost - reference <= BASELINE_MARGIN * max(1.0, abs(reference))
 
 
 def _submit_one(job: dict[str, Any]) -> dict[str, Any]:
@@ -186,9 +199,9 @@ def harvest(
             results.append({"key": record["key"], "instance_id": group[0], "action": "skipped",
                             "reason": "the instance file changed after the run"})
             continue
-        if not offer_all and not _beats_baseline(record, baseline.get(group)):
+        if not offer_all and not _may_beat_baseline(record, baseline.get(group)):
             results.append({"key": record["key"], "instance_id": group[0], "action": "not_offered",
-                            "reason": "does not beat the baseline"})
+                            "reason": "worse than the baseline"})
             continue
         instance = load_benchmark_instance(record["instance_path"])
         metadata = getattr(instance, "metadata", None)
@@ -266,14 +279,15 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
                 "winner": overall["kind"] if overall else None,
             }
             for kind in kinds:
-                costs = [float(record["validated_cost"]) for record in valid if record.get("kind") == kind]
-                if not costs:
+                kind_runs = [record for record in valid if record.get("kind") == kind]
+                if not kind_runs:
                     row[f"{kind}_valid_runs"] = 0
                     continue
-                kind_best = min(costs)
-                routes = next(record.get("num_routes") for record in valid if record.get("kind") == kind and float(record["validated_cost"]) == kind_best)
+                costs = [float(record["validated_cost"]) for record in kind_runs]
+                kind_best_run = min(kind_runs, key=lambda record: float(record["validated_cost"]))
+                kind_best = float(kind_best_run["validated_cost"])
                 row[f"{kind}_best"] = kind_best
-                row[f"{kind}_routes"] = routes
+                row[f"{kind}_routes"] = kind_best_run.get("num_routes")
                 row[f"{kind}_gap_pct"] = round(100.0 * (kind_best - float(overall["validated_cost"])) / float(overall["validated_cost"]), 4) if overall and float(overall["validated_cost"]) else None
                 row[f"{kind}_spread_pct"] = round(100.0 * (max(costs) - kind_best) / kind_best, 4) if kind_best else None
                 row[f"{kind}_valid_runs"] = len(costs)

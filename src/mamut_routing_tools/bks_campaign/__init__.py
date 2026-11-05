@@ -6,8 +6,9 @@ a TOML spec (``spec``). The steps, as the Mamut2026 campaigns ran them by hand:
 1. ``baseline``: freeze the stored BKS before anything runs;
 2. ``run``: a resumable, memory-aware process pool; each run is checked and
    archived as ``runs/<key>.json`` (winner or not), never written as a BKS;
-3. ``harvest``: the single writer -- each instance's best run, if it beats the
-   baseline, goes through the BKS store (strictly better only, ties kept);
+3. ``harvest``: the single writer -- each instance's best run, unless clearly
+   worse than the baseline, goes through the BKS store (exact costs: strictly
+   better only, ties kept);
 4. ``report``: ``ledger.csv`` and ``cross-solver.csv``.
 
 Distinct from ``mamut_routing_tools.campaign``, which designs benchmark instances.

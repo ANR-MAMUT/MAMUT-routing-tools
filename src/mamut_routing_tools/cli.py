@@ -825,7 +825,7 @@ def bks_campaign_harvest(
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Report what the store would do without writing.")] = False,
     workers: Annotated[int, typer.Option("--workers", min=1, help="Parallel instances (one process each).")] = 1,
 ) -> None:
-    """Write improved BKS: each instance's best valid run, if it beats the baseline (the only writer)."""
+    """Write improved BKS: each instance's best valid run, unless clearly worse than the baseline (the only writer)."""
     from mamut_routing_tools.bks_campaign import harvest
 
     spec = _load_campaign(spec_path)

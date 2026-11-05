@@ -177,6 +177,9 @@ def test_run_resume_baseline_harvest_and_reports(campaign: Path) -> None:
 
     again = harvest(spec)  # the baseline had no BKS, so the best runs are offered again: ties keep the incumbent
     assert {item["action"] for item in again} == {"kept_existing"} and all(item["tie"] for item in again)
+    write_baseline(spec, force=True)  # now the baseline holds the campaign's own BKS
+    tied = harvest(spec)  # ties are the store's call, not the float pre-filter's
+    assert {item["action"] for item in tied} == {"kept_existing"} and all(item["tie"] for item in tied)
 
     ledger, compare = write_reports(spec)
     rows = list(csv.DictReader(ledger.open()))
@@ -184,6 +187,24 @@ def test_run_resume_baseline_harvest_and_reports(campaign: Path) -> None:
     assert sum(row["is_best"] == "True" for row in rows) == 2
     table = list(csv.DictReader(compare.open()))
     assert len(table) == 2 and table[0]["winner"] == "fake-seed" and table[0]["fake-seed_valid_runs"] == "2"
+
+
+def test_baseline_pre_filter_only_drops_runs_clearly_worse() -> None:
+    from mamut_routing_tools.bks_campaign.harvest import _may_beat_baseline
+
+    def run(cost: float, routes: int = 10, objective: str = "MonoCost") -> dict:
+        return {"objective_function": objective, "validated_cost": cost, "num_routes": routes}
+
+    baseline = {"cost": "1547830.702", "num_routes": "39"}
+    assert _may_beat_baseline(run(1547659.77), baseline)
+    assert _may_beat_baseline(run(1547830.702), baseline)  # a tie: the store compares exact costs
+    assert _may_beat_baseline(run(1547830.702 + 2e-9), baseline)  # the same routes summed in another order
+    assert not _may_beat_baseline(run(1547830.703), baseline)  # one unit of the last decimal worse
+    assert _may_beat_baseline(run(5.0), {"cost": "", "num_routes": ""})  # no BKS yet
+    hierarchical = {"cost": "828.94", "num_routes": "10"}
+    assert _may_beat_baseline(run(900.0, 9, "HierarchicalVehicleCost"), hierarchical)
+    assert not _may_beat_baseline(run(800.0, 11, "HierarchicalVehicleCost"), hierarchical)
+    assert not _may_beat_baseline(run(829.0, 10, "HierarchicalVehicleCost"), hierarchical)
 
 
 def test_harvest_skips_runs_of_a_changed_instance(campaign: Path) -> None:
