@@ -1269,10 +1269,19 @@ function drawRoutes(rendered, fit) {
   if (same) {
     applySolutionView();
   } else {
+    // Only the render mode changed (the same solution, now on roads or straight lines):
+    // an open animation is reopened on the new geometry instead of just closing.
+    const reopen = Boolean(routeAnimation) && Array.isArray(solutionData.key)
+      && key.slice(0, 3).every((value, index) => value === solutionData.key[index]);
     const geometry = activeRouteGeometry(rendered);
     const { nodes, depot } = instanceNodeData(routes);
     solutionData = { key, routeLines: geometry.routeLines, nodes, depot, routeMode: geometry.routeMode, hasRoutes: routes.length > 0 };
     pushSolution();
+    if (reopen) {
+      setTimeout(() => {
+        if (!routeAnimation && solutionData.key === key) toggleRouteAnimation();
+      }, 0);
+    }
   }
   if (fit) fitMapTo(solutionLayers?.bounds());
   syncAppearanceControls();
