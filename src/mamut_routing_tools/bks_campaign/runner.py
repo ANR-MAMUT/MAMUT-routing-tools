@@ -9,6 +9,9 @@
 - Admission: a task starts only while the memory estimates of the running
   tasks plus its own fit the budget (``resources.memory_gb``, or 80 % of
   ``MemAvailable``); at least one task always runs.
+- A ``warm_start = "best"`` task starts only once the other runs of its
+  instance and objective have finished, and looks its start routes up at that
+  moment: the best valid archived run, or the stored BKS.
 - Workers solve, check and write their own run record (atomically); they never
   write a BKS. Harvest is a separate, single-writer step.
 - First Ctrl-C: stop admitting, let the running tasks finish. A second one
@@ -23,6 +26,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import multiprocessing as mp
 import multiprocessing.connection
@@ -36,12 +40,15 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from mamut_routing_tools.bks_campaign.archive import SCHEMA_VERSION, atomic_write_json, raw_dir, run_path
-from mamut_routing_tools.bks_campaign.plan import CampaignPlan, Task
+from mamut_routing_tools.bks_campaign.plan import CampaignPlan, Task, best_known_routes
 
-__all__ = ["execute_task", "memory_budget_gb", "run_tasks"]
+__all__ = ["RUN_MARKER_ENV", "execute_task", "memory_budget_gb", "run_tasks"]
 
 #: Solver input files are large for big explicit matrices (130 MB at n = 4000); keep only outputs.
 _INPUT_FILES = ("problem.vrp", "problem.par")
+#: A worker sets this to its run key before it solves; its solver's whole process tree inherits it,
+#: which is how the solver of a worker that died is told apart from any other process.
+RUN_MARKER_ENV = "MAMUT_BKS_CAMPAIGN_RUN"
 
 
 def _loadavg() -> float | None:
@@ -120,8 +127,8 @@ def _base_record(task: Task, started: str) -> dict[str, Any]:
         "solver": task.solver,
         "seed": task.seed,
         "time_limit_s": task.time_limit_s,
-        "warm_start_key": task.warm_start_key,
-        "warm_start_sha256": task.warm_start_sha256,
+        "warm_start_key": None,  # set by the worker for a warm-started run
+        "warm_start_sha256": None,
         "started": started,
         "loadavg_start": _loadavg(),
         **environment(include_host=True),
@@ -148,15 +155,34 @@ def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
         record["tools_version"] = None
     monitor = SolveMonitor(None, interval_s=3600.0, record_trajectory=True)
     workdir = raw_dir(out, task.key)
+    objective = ObjectiveFunction(task.objective)
+    initial_routes = None
+    if task.warm_start == "best":
+        # Looked up now, not when the plan was made: the runs this one starts from have finished.
+        initial_routes, origin = best_known_routes(
+            out, Path(task.instance_path), task.instance_id, objective, record["instance_sha256"]
+        )
+        if initial_routes is None:
+            record.update(
+                status="failed",
+                valid=False,
+                error="warm_start = best: no valid archived run or stored BKS to start from",
+                finished=datetime.now(UTC).isoformat(timespec="seconds"),
+                loadavg_end=_loadavg(),
+            )
+            atomic_write_json(run_path(out, task.key), record)
+            return _summary(record)
+        record["warm_start_key"] = origin
+        record["warm_start_sha256"] = hashlib.sha256(json.dumps(initial_routes, separators=(",", ":")).encode()).hexdigest()
     try:
         solved = run_solver(
             task.solver,
             task.instance_path,
             time_limit_s=task.time_limit_s,
             seed=task.seed,
-            objective_function=ObjectiveFunction(task.objective),
+            objective_function=objective,
             monitor=monitor,
-            initial_routes=task.warm_start_routes,
+            initial_routes=initial_routes,
             workdir=workdir,
             keep_artifacts=True,
             options=task.options,
@@ -198,6 +224,7 @@ def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
 def _task_main(payload: dict[str, Any], nice: int | None, connection: Any) -> None:
     """Worker process entry: ignore Ctrl-C, run the task, send its summary back."""
     _worker_init(nice)
+    os.environ[RUN_MARKER_ENV] = str(payload["key"])  # inherited by the solver's process tree
     summary = execute_task(payload)
     try:
         connection.send(summary)
@@ -217,19 +244,24 @@ def _death_reason(exitcode: int | None) -> str:
     return f"the worker exited with code {exitcode} before recording the run"
 
 
-def _kill_orphans(workdir: Path) -> int:
-    """Kill the process groups still working in ``workdir`` (a dead worker's solver); Linux only."""
+def _kill_orphans(key: str) -> int:
+    """Kill the process groups the worker of run ``key`` left behind (its solver); Linux only.
+
+    Only processes that carry the worker's mark in their environment (``RUN_MARKER_ENV``) are
+    touched: the solver and whatever it spawned. Working in the run's directory is not enough --
+    a shell following ``solver.log`` there is none of our business.
+    """
     proc = Path("/proc")
     if not proc.is_dir():  # pragma: no cover - not Linux
         return 0
-    target = workdir.resolve()
+    marker = f"{RUN_MARKER_ENV}={key}".encode()
     own_group = os.getpgid(0)
     groups: set[int] = set()
     for entry in proc.iterdir():
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
         try:
-            if Path(os.readlink(entry / "cwd")) != target:
+            if marker not in (entry / "environ").read_bytes().split(b"\0"):
                 continue
             group = os.getpgid(int(entry.name))
         except (OSError, ValueError):
@@ -293,6 +325,14 @@ def run_tasks(
     nice = tasks[0].nice if tasks else None
     running: dict[Any, _Worker] = {}
     pending = list(tasks)
+    # Runs of each (instance, objective) that a warm start waits for: not started, or running.
+    cold_open: dict[tuple[str, str], int] = {}
+    for task in tasks:
+        if task.warm_start != "best":
+            cold_open[task.group] = cold_open.get(task.group, 0) + 1
+
+    def _ready(task: Task) -> bool:
+        return task.warm_start != "best" or not cold_open.get(task.group)
 
     def _start(task: Task) -> None:
         receiver, sender = context.Pipe(duplex=False)
@@ -310,8 +350,10 @@ def run_tasks(
         summary = worker.summary()
         worker.connection.close()
         task = worker.task
+        if task.warm_start != "best":
+            cold_open[task.group] -= 1  # whatever its outcome, nobody waits for it any more
         if summary is None:
-            killed = _kill_orphans(raw_dir(out, task.key))
+            killed = _kill_orphans(task.key)
             terminated = worker.process.exitcode in (-signal.SIGTERM, 128 + signal.SIGTERM)
             if state["abort"] or terminated:
                 # An aborted or terminated run (SIGTERM to the whole group: systemd, a scheduler)
@@ -337,10 +379,12 @@ def run_tasks(
                 break
             while pending and not state["stop"] and len(running) < workers:
                 in_use = sum(worker.task.memory_gb for worker in running.values())
-                candidate = pending[0]
+                candidate = next((task for task in pending if _ready(task)), None)
+                if candidate is None:
+                    break  # only warm starts are left, waiting for the runs they start from
                 if running and in_use + candidate.memory_gb > memory_gb:
                     # The longest task does not fit: start the first smaller one that does.
-                    fitting = next((task for task in pending if in_use + task.memory_gb <= memory_gb), None)
+                    fitting = next((task for task in pending if _ready(task) and in_use + task.memory_gb <= memory_gb), None)
                     if fitting is None:
                         break
                     candidate = fitting
@@ -362,7 +406,7 @@ def run_tasks(
                 if worker.process.is_alive():
                     worker.process.kill()
                     worker.process.join()
-                _kill_orphans(raw_dir(out, worker.task.key))
+                _kill_orphans(worker.task.key)
                 worker.connection.close()
         for sig, handler in previous.items():
             signal.signal(sig, handler)

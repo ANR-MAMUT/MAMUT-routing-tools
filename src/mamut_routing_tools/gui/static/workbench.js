@@ -1102,7 +1102,7 @@ function applySolutionView() {
     depotColor: colors.depot,
     unassignedColor: (node) => (String(node.properties?.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric),
     dark: isDark(),
-    dim: routeAnimation ? 0.35 : 1,
+    dim: animationPlaying() ? 0.35 : 1,
   });
   routeAnimation?.setView({ palette: window.MamutNocturne.routeColors(), visibleRoutes, focusedRoute: state.focusedRoute });
   syncAnimateButton();
@@ -1114,9 +1114,15 @@ function syncAnimateButton() {
   for (const button of document.querySelectorAll("[data-animate-routes]")) {
     button.hidden = !shown;
     button.disabled = routeAnimationLoading;
-    button.textContent = routeAnimationLoading ? "Loading…" : routeAnimation ? "Stop animation" : "Animate";
-    button.setAttribute("aria-pressed", String(Boolean(routeAnimation)));
+    button.textContent = routeAnimationLoading ? "Loading…" : animationPlaying() ? "Stop animation" : "Animate";
+    button.setAttribute("aria-pressed", String(animationPlaying()));
   }
+}
+
+/* routeAnimation also holds the "needs WebGL2" notice, so that it closes with the run; only
+   a real animation dims the routes and turns the buttons into "Stop animation". */
+function animationPlaying() {
+  return Boolean(routeAnimation && !routeAnimation.unavailable);
 }
 
 function closeRouteAnimation() {
@@ -1126,7 +1132,8 @@ function closeRouteAnimation() {
 }
 
 /* Times come from the run's /timeline: the checker's accounting on the instance's
-   free-flow fastest arc costs. */
+   free-flow fastest arc costs. When that cannot clock the run, the timeline has no
+   routes and a note, and the animation runs at constant speed. */
 async function toggleRouteAnimation() {
   if (routeAnimation) {
     closeRouteAnimation();
@@ -1140,7 +1147,16 @@ async function toggleRouteAnimation() {
   syncAnimateButton();
   const key = solutionData.key;
   try {
-    const timeline = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/${encodeURIComponent(runId)}/timeline`);
+    let timeline = null;
+    let clockLabels;
+    try {
+      timeline = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/${encodeURIComponent(runId)}/timeline`);
+      // The server words the clock when the default does not fit (why it is constant speed, say).
+      if (timeline.note) clockLabels = { [timeline.clock]: timeline.note };
+    } catch (error) {
+      // No schedule for this run: the vehicles still drive, at constant speed.
+      clockLabels = { schematic: `Constant speed (25 km/h): no schedule for this run (${error.message})` };
+    }
     if (state.selected !== instance || solutionData.key !== key) return;
     const ranked = window.MamutMap.rankRouteLines(solutionData.routeLines, { minTolerance: 0.5 });
     const routes = state.selected?.solved?.routes || [];
@@ -1149,6 +1165,7 @@ async function toggleRouteAnimation() {
       deckSrc: DECK_SRC,
       routeLines: window.MamutMap.thinRouteLines(ranked, TRIPS_VERTEX_BUDGET).routeLines,
       timeline,
+      clockLabels,
       palette: window.MamutNocturne.routeColors(),
       visibleRoutes,
       focusedRoute: state.focusedRoute,
@@ -1274,7 +1291,7 @@ function drawRoutes(rendered, fit) {
   } else {
     // Only the render mode changed (the same solution, now on roads or straight lines):
     // an open animation is reopened on the new geometry instead of just closing.
-    const reopen = Boolean(routeAnimation) && Array.isArray(solutionData.key)
+    const reopen = animationPlaying() && Array.isArray(solutionData.key)
       && key.slice(0, 3).every((value, index) => value === solutionData.key[index]);
     const geometry = activeRouteGeometry(rendered);
     const { nodes, depot } = instanceNodeData(routes);
@@ -1629,7 +1646,12 @@ async function displaySolutionRun(runId, fit = true) {
   state.selectedRunId = runId;
   instance.solved = run;
   const metric = run.metadata?.metric || el("solve-metric").value || "fastest";
-  el("solve-metric").value = metric;
+  if (el("solve-metric").value !== metric) {
+    el("solve-metric").value = metric;
+    // Setting a select's value fires no change event: do what its listeners would.
+    syncVrpExportControls();
+    loadSolvers().catch(() => {});
+  }
   const rendered = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/${encodeURIComponent(runId)}/render?metric=${encodeURIComponent(metric)}`, {});
   if (state.selected !== instance) return;
   instance.rendered = rendered;

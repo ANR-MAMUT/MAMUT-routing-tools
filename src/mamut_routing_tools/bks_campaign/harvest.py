@@ -3,7 +3,9 @@
 - ``write_baseline`` freezes the stored BKS of every selected instance before
   the campaign (``baseline.csv``) and refuses to overwrite it: gains are
   measured against what was published, not against the campaign's own writes.
-- ``harvest`` is the only step that writes BKS files. It sets aside the runs
+- ``harvest`` is the only step that writes BKS files, and it records what the
+  store did even when it does not finish (a store error, a store process that
+  died, Ctrl-C): BKS written before the failure are in the history. It sets aside the runs
   whose instance file changed since (``instance_sha256``), takes the best valid
   remaining run per (instance, objective) (fewer routes first under
   ``HierarchicalVehicleCost``), and offers it to the BKS store unless it is
@@ -158,12 +160,12 @@ def _submit_one(job: dict[str, Any]) -> dict[str, Any]:
     from mamut_routing_lib.solutions import preview_bks_update, submit_bks
 
     record = job["record"]
-    objective = ObjectiveFunction(record["objective_function"])
-    if job["dry_run"]:
-        preview = preview_bks_update(record["instance_path"], record["routes"], objective_function=objective)
-        return {"key": record["key"], "instance_id": record["instance_id"], "action": preview["action"], "tie": preview["tie"],
-                "candidate_cost": preview["candidate_cost"], "path": preview["path"]}
     try:
+        objective = ObjectiveFunction(record["objective_function"])
+        if job["dry_run"]:
+            preview = preview_bks_update(record["instance_path"], record["routes"], objective_function=objective)
+            return {"key": record["key"], "instance_id": record["instance_id"], "action": preview["action"], "tie": preview["tie"],
+                    "candidate_cost": preview["candidate_cost"], "path": preview["path"]}
         update = submit_bks(
             record["instance_path"],
             record["routes"],
@@ -171,10 +173,16 @@ def _submit_one(job: dict[str, Any]) -> dict[str, Any]:
             objective_function=objective,
             metadata=job["metadata"],
         )
-    except ValueError as error:
-        return {"key": record["key"], "instance_id": record["instance_id"], "action": "error", "error": str(error)}
+    except ValueError as error:  # the store's own refusals: an invalid solution, an invalid stored BKS
+        return _store_error(record, str(error))
+    except Exception as error:  # noqa: BLE001 - a full disk or a read-only file fails this instance, not the harvest
+        return _store_error(record, f"{type(error).__name__}: {error}")
     return {"key": record["key"], "instance_id": record["instance_id"], "action": update.action, "tie": update.tie,
             "candidate_cost": update.candidate_cost, "path": str(update.path)}
+
+
+def _store_error(record: dict[str, Any], message: str) -> dict[str, Any]:
+    return {"key": record["key"], "instance_id": record["instance_id"], "action": "error", "error": message}
 
 
 def _bks_metadata(spec: CampaignSpec, record: dict[str, Any]) -> dict[str, Any]:
@@ -229,15 +237,29 @@ def harvest(
                             "reason": f"{record.get('num_routes')} routes < published lower bound {lower}"})
             continue
         jobs.append({"record": record, "authors": spec.campaign.authors, "metadata": _bks_metadata(spec, record), "dry_run": dry_run})
-    if workers > 1 and len(jobs) > 1:
-        import multiprocessing as mp
+    try:
+        if workers > 1 and len(jobs) > 1:
+            import multiprocessing as mp
 
-        with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn")) as pool:
-            results.extend(pool.map(_submit_one, jobs))
-    else:
-        results.extend(_submit_one(job) for job in jobs)
-    if not dry_run:
-        _record_harvest(spec.out, results)
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp.get_context("spawn")) as pool:
+                futures = [pool.submit(_submit_one, job) for job in jobs]
+                for job, future in zip(jobs, futures):
+                    try:
+                        results.append(future.result())
+                    except Exception as error:  # noqa: BLE001 - the store process died (out of memory, killed)
+                        results.append(
+                            _store_error(
+                                job["record"],
+                                f"the store process failed ({type(error).__name__}: {error}); check the BKS file before harvesting again",
+                            )
+                        )
+        else:
+            for job in jobs:
+                results.append(_submit_one(job))
+    finally:
+        # Also on Ctrl-C or an unexpected error: the BKS files written so far must be in the history.
+        if not dry_run:
+            _record_harvest(spec.out, results)
     return results
 
 

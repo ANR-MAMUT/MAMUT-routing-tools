@@ -369,6 +369,7 @@ def solve_cmd(
                 authors=str(authors),
                 objective_function=solved.objective,
                 metadata=solved.bks_metadata(),
+                checkable=solved.checkable,
             )
             payload["bks_update"] = {
                 "action": update.action,

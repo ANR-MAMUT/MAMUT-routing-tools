@@ -1095,7 +1095,10 @@ def create_app(workspace: Path, token: str) -> FastAPI:
     async def solution_run_timeline(instance_id: str, run_id: str) -> Any:
         """Per-stop times of a run for the route animation, clocked by the
         instance's free-flow ``fastest`` arc costs (seconds) whatever metric the
-        run was solved on: the only travel time the instance defines."""
+        run was solved on: the only travel time the instance defines. When those
+        times cannot clock the run (no ``fastest`` variant, a window missed under
+        them) the answer has no routes and says why: the animation then runs at
+        constant speed, as on the website."""
         try:
             record = _workspace_instance(workspace, instance_id)
             solution = _solution_or_reference(solutions, record, instance_id, run_id)
@@ -1493,22 +1496,31 @@ def _solve_workspace_payload(
 
 
 #: (instance path, sha256) -> (profile, instance), newest last; bounded, shared by the request threads.
-_PROFILE_CACHE: "OrderedDict[tuple[str, str | None], Any]" = OrderedDict()
+_PROFILE_CACHE: "OrderedDict[tuple[str, int, int], Any]" = OrderedDict()
 _PROFILE_CACHE_SIZE = 16
 _PROFILE_LOCK = threading.Lock()
 
 
 def _cached_profile(instance_path: Path) -> tuple[Any, Any]:
+    """(solver-support profile, default objective) of an instance file.
+
+    Only these few facts are kept, never the instance: a workspace instance embeds its full
+    matrix (tens of megabytes at n = 1000), and sixteen of them would stay in memory for a
+    select that is refreshed on every instance or metric change. The key is the file's stat,
+    so a lookup does not read (and hash) the file either.
+    """
     from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.objectives import default_objective
     from mamut_routing_lib.solvers import profile_instance
 
-    key = (str(instance_path), file_sha256(instance_path))
+    stat = instance_path.stat()
+    key = (str(instance_path), stat.st_mtime_ns, stat.st_size)
     with _PROFILE_LOCK:
         if key in _PROFILE_CACHE:
             _PROFILE_CACHE.move_to_end(key)
             return _PROFILE_CACHE[key]
     instance = load_benchmark_instance(instance_path)
-    entry = (profile_instance(instance, instance_path), instance)
+    entry = (profile_instance(instance, instance_path), default_objective(instance))
     with _PROFILE_LOCK:
         _PROFILE_CACHE[key] = entry
         while len(_PROFILE_CACHE) > _PROFILE_CACHE_SIZE:
@@ -1522,7 +1534,6 @@ def _solve_refusal(workspace: Path, solver: Any, payload: dict[str, Any]) -> str
     Same reading as the job: the selected metric's file, MonoCost on CVRP whatever the select says.
     """
     from mamut_routing_lib.enums import ObjectiveFunction, ProblemType
-    from mamut_routing_lib.objectives import default_objective
 
     instance_id = str(payload.get("instance_id") or "")
     if not instance_id:
@@ -1530,12 +1541,12 @@ def _solve_refusal(workspace: Path, solver: Any, payload: dict[str, Any]) -> str
     try:
         record = _workspace_instance(workspace, instance_id)
         instance_path = _instance_variant_path(record, str(payload.get("metric") or "fastest").lower())
-        profile, instance = _cached_profile(instance_path)
+        profile, default = _cached_profile(instance_path)
     except Exception:  # noqa: BLE001 - an unknown or unreadable instance fails in the job, with its own message
         return None
     try:
         raw = payload.get("objective_function")
-        objective = ObjectiveFunction(str(raw)) if raw else default_objective(instance)
+        objective = ObjectiveFunction(str(raw)) if raw else default
     except ValueError:
         return None
     if profile.problem_type is ProblemType.CVRP:
@@ -1549,7 +1560,6 @@ def _solve_refusal(workspace: Path, solver: Any, payload: dict[str, Any]) -> str
 def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_function: str) -> dict[str, Any]:
     """Registered solvers with availability, and per-solver support for one instance variant."""
     from mamut_routing_lib.enums import ObjectiveFunction, ProblemType
-    from mamut_routing_lib.objectives import default_objective
     from mamut_routing_lib.solvers import BUILTIN_SOLVERS, list_solvers
     from mamut_routing_lib.solvers.external.config import SolverConfigError, resolve_config_path
 
@@ -1560,8 +1570,8 @@ def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_f
     if instance_id:
         record = _workspace_instance(workspace, instance_id)
         instance_path = _instance_variant_path(record, str(metric or "fastest").lower())
-        profile, instance = _cached_profile(instance_path)
-        objective = ObjectiveFunction(objective_function) if objective_function else default_objective(instance)
+        profile, default = _cached_profile(instance_path)
+        objective = ObjectiveFunction(objective_function) if objective_function else default
         if profile.problem_type is ProblemType.CVRP:
             objective = ObjectiveFunction.MONO_COST  # what the solve job runs on CVRP, whatever the select says
     rows = []
@@ -1646,23 +1656,58 @@ def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
     return references
 
 
+def _schematic_timeline(reason: str) -> dict[str, Any]:
+    """No per-stop times: the animation falls back to a constant speed, and says why."""
+    from mamut_routing_tools.timeline import TIMELINE_START_RULE
+
+    return {
+        "ok": True,
+        "clock": "schematic",
+        "clock_metric": None,
+        "note": f"Constant speed (25 km/h): {reason}",
+        "time_unit": "s",
+        "start_rule": TIMELINE_START_RULE,
+        "routes": [],
+    }
+
+
 def _timeline_payload(record: dict[str, Any], solution: dict[str, Any]) -> dict[str, Any]:
     from mamut_routing_lib.artifacts import load_benchmark_instance
     from mamut_routing_lib.artifacts import hydrate_collection_instance
 
-    from mamut_routing_tools.timeline import build_static_timeline
+    from mamut_routing_tools.timeline import TimelineError, build_static_timeline
 
-    instance_path = _instance_variant_path(record, "fastest")
+    run_metric = str((solution.get("metadata") or {}).get("metric") or "fastest")
+    try:
+        instance_path = _instance_variant_path(record, "fastest")
+    except (ValueError, FileNotFoundError):
+        return _schematic_timeline("this instance has no fastest variant to take travel times from")
     instance = hydrate_collection_instance(load_benchmark_instance(instance_path), instance_path)
     routes = [[int(stop) for stop in route] for route in solution["routes"]]
-    timeline = build_static_timeline(
-        routes,
-        instance.arc_costs,
-        depot=instance.depot,
-        time_windows=getattr(instance, "time_windows", None),
-        service_times=getattr(instance, "service_times", None),
-    )
-    return {"ok": True, "clock": "free_flow_fastest", "clock_metric": "fastest", **timeline}
+    time_windows = getattr(instance, "time_windows", None)
+    try:
+        timeline = build_static_timeline(
+            routes,
+            instance.arc_costs,
+            depot=instance.depot,
+            time_windows=time_windows,
+            service_times=getattr(instance, "service_times", None),
+        )
+    except TimelineError:
+        # A run solved on another metric was checked on that metric's costs, not on these times.
+        return _schematic_timeline(
+            f"this run (solved on the {run_metric} metric) misses a time window under the fastest travel times"
+        )
+    clock, note = "free_flow_fastest", None  # CVRP: travel times only, the animation's default wording
+    if time_windows is not None:
+        if run_metric == "fastest":
+            clock = "checker"  # exactly the schedule the checker validated
+        else:
+            note = (
+                "Free-flow travel times (fastest metric), waiting for windows, service times; "
+                f"the run was solved on the {run_metric} metric"
+            )
+    return {"ok": True, "clock": clock, "clock_metric": "fastest", "note": note, **timeline}
 
 
 def _solution_or_reference(
@@ -1733,11 +1778,7 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
     """Road polylines for arbitrary routes over a workbench meta object:
     cache-first on meta.road_cache, live Dijkstra fill on the meta's OSM
     graph for shortest/fastest, straight lines otherwise."""
-    from mamut_routing_tools.geometry.materialize import (
-        candidate_route_segment,
-        node_coordinates_map,
-        resolve_source_osm_path,
-    )
+    from mamut_routing_tools.geometry.materialize import candidate_route_segment, resolve_source_osm_path
     from mamut_routing_tools.roadgraph.build import road_graph_candidates
 
     metric = str(payload.get("metric") or "shortest")

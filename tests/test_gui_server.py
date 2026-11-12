@@ -1383,3 +1383,99 @@ def test_animate_is_offered_on_the_solve_and_runs_tabs_too(client: TestClient) -
         assert button in source
     assert source.count("data-animate-routes") >= 4  # three buttons, and the script drives them all
     assert "syncAnimateButton();  // nothing is drawn any more" in source  # Clear map hides them
+
+
+def _timeline_record(tmp_path: Path, *, time_windows: list | None, fastest: bool = True) -> dict:
+    """A workspace record whose fastest variant is a three-customer line, 10 s between neighbours."""
+    from mamut_routing_lib.models import BenchmarkInstance, BenchmarkInstanceCVRP
+
+    common = dict(
+        instance_name="line",
+        instance_origin="Solomon1987",
+        benchmark_name="Dimacs2021",
+        num_customers=3,
+        vehicle_capacity=10,
+        coordinates=[(0, 0), (1, 0), (2, 0), (3, 0)],
+        demands=[0, 1, 1, 1],
+        depot=0,
+        arc_costs=[[abs(i - j) * 10 for j in range(4)] for i in range(4)],
+        metadata={"metric_variant": "fastest", "authors": "toy"},
+    )
+    if time_windows is None:
+        instance = BenchmarkInstanceCVRP(**common)
+    else:
+        instance = BenchmarkInstance(**common, service_times=[0, 5, 5, 5], time_windows=time_windows)
+    (tmp_path / "line_fastest.vrp.json").write_text(json.dumps(instance.model_dump(mode="json")))
+    return {"folder": str(tmp_path), "files": {"vrp_json": {"fastest": "line_fastest.vrp.json"} if fastest else {"euclidean": "x"}}}
+
+
+def test_the_timeline_names_its_clock_and_falls_back_to_constant_speed(tmp_path: Path) -> None:
+    """A run the fastest travel times cannot clock still animates: no routes, and the reason."""
+    from mamut_routing_tools.gui.server import _timeline_payload
+
+    def timeline(record: dict, routes: list, metric: str) -> dict:
+        return _timeline_payload(record, {"routes": routes, "metadata": {"metric": metric}})
+
+    cvrp = timeline(_timeline_record(tmp_path, time_windows=None), [[1, 2, 3]], "euclidean")
+    assert cvrp["clock"] == "free_flow_fastest" and cvrp["note"] is None  # travel times only: the default wording
+    assert cvrp["routes"][0]["stops"] == [[1, 10.0, 10.0, 10.0], [2, 20.0, 20.0, 20.0], [3, 30.0, 30.0, 30.0]]
+
+    loose = [(0, 1000), (0, 1000), (0, 1000), (0, 1000)]
+    checked = timeline(_timeline_record(tmp_path, time_windows=loose), [[1, 2, 3]], "fastest")
+    assert checked["clock"] == "checker" and checked["note"] is None  # the schedule the checker validated
+    assert checked["routes"][0]["stops"][1] == [2, 25.0, 25.0, 30.0]  # service times are applied
+    other = timeline(_timeline_record(tmp_path, time_windows=loose), [[1, 2, 3]], "euclidean")
+    assert other["clock"] == "free_flow_fastest" and other["routes"] == checked["routes"]
+    assert "service times" in other["note"] and "euclidean metric" in other["note"]  # not "no service times"
+
+    tight = [(0, 1000), (0, 1000), (0, 1000), (0, 12)]  # customer 3 last is late under the fastest times
+    missed = timeline(_timeline_record(tmp_path, time_windows=tight), [[1, 2, 3]], "shortest")
+    assert missed["ok"] and missed["clock"] == "schematic" and missed["routes"] == []
+    assert missed["note"].startswith("Constant speed (25 km/h)") and "shortest metric" in missed["note"]
+
+    absent = timeline(_timeline_record(tmp_path, time_windows=None, fastest=False), [[1, 2, 3]], "euclidean")
+    assert absent["ok"] and absent["clock"] == "schematic" and absent["routes"] == []
+    assert "no fastest variant" in absent["note"]
+
+
+def test_the_animation_plays_whatever_the_timeline_answers(client: TestClient) -> None:
+    source = client.get("/static/workbench.js").text
+    # The server's wording of the clock reaches the animation, and a failed request is a constant-speed animation.
+    assert "if (timeline.note) clockLabels = { [timeline.clock]: timeline.note };" in source
+    assert "clockLabels = { schematic: `Constant speed (25 km/h): no schedule for this run (${error.message})` };" in source
+    assert "\n      clockLabels,\n" in source
+    # The "needs WebGL2" notice is not a running animation.
+    assert "return Boolean(routeAnimation && !routeAnimation.unavailable);" in source
+    assert "dim: animationPlaying() ? 0.35 : 1," in source and "dim: routeAnimation ?" not in source
+
+
+def test_displaying_a_run_refreshes_the_solver_list_for_its_metric(client: TestClient) -> None:
+    """Setting the Metric select from a displayed run fires no change event: the solver support
+    (FILO2 and AILS-II on road metrics) would stay that of the previous metric."""
+    source = client.get("/static/workbench.js").text
+    start = source.index('const metric = run.metadata?.metric || el("solve-metric").value || "fastest";')
+    block = source[start : source.index("const rendered = await api(", start)]
+    assert 'if (el("solve-metric").value !== metric) {' in block
+    assert block.index('el("solve-metric").value = metric;') < block.index("loadSolvers()") and "syncVrpExportControls();" in block
+
+
+def test_the_profile_cache_keeps_facts_not_instances(client: TestClient) -> None:
+    import os
+
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_tools.gui import server
+
+    instance_id = _generate(client)["instance_id"]
+    assert client.get(f"/api/solvers?instance_id={instance_id}&metric=fastest").status_code == 200
+    assert server._PROFILE_CACHE
+    for (path, _mtime, _size), (profile, default) in server._PROFILE_CACHE.items():
+        assert default is ObjectiveFunction.MONO_COST  # the default objective, not the instance and its matrix
+        assert not hasattr(default, "arc_costs") and not hasattr(profile, "arc_costs")
+    path = Path(next(iter(server._PROFILE_CACHE))[0])
+    before = len(server._PROFILE_CACHE)
+    assert server._cached_profile(path) is server._cached_profile(path) and len(server._PROFILE_CACHE) == before
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))  # the file changed: a new entry
+    server._cached_profile(path)
+    assert len(server._PROFILE_CACHE) == before + 1
+

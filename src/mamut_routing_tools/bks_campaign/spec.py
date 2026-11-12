@@ -34,7 +34,8 @@
     kind = "pyvrp-polish"
     seeds = "3000-3003"
     budget_factor = 1.5
-    warm_start = "best"                 # from the best archived run or the stored BKS
+    warm_start = "best"                 # from the best archived run or the stored BKS, looked up
+                                        # when the run starts: after the other runs of its instance
 
     [resources]
     workers = 90

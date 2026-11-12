@@ -258,20 +258,121 @@ def test_hierarchical_rankings_put_fewer_routes_first(campaign: Path) -> None:
     assert objective_rank("MonoCost", 900.0, 11) < objective_rank("MonoCost", 950.0, 10)
 
 
-def test_warm_start_from_the_best_run(campaign: Path) -> None:
-    spec = load_spec(campaign)
-    run_tasks(build_plan(spec, only="A1"), out=spec.out, workers=1, memory_gb=8, progress=lambda line: None)
-    campaign.write_text(
-        campaign.read_text() + '\n[[runs]]\nsolver = "pyvrp"\nkind = "polish"\nseeds = "3000"\nwarm_start = "best"\n'
-    )
+POLISH = '''
+[[runs]]
+solver = "pyvrp"
+kind = "polish"
+seeds = "3000"
+budget_factor = 1.5
+warm_start = "best"
+'''
+
+
+def test_a_warm_start_runs_after_the_campaign_runs_and_starts_from_them(campaign: Path) -> None:
+    """One `run` of a fresh campaign: the polish waits for the seeds and starts from their best."""
+    campaign.write_text(campaign.read_text().replace("[[runs]]", POLISH + "\n[[runs]]", 1))  # listed first, on purpose
     spec = load_spec(campaign)
     plan = build_plan(spec, only="A1")
-    polish = [task for task in plan.tasks if task.kind == "polish"]
-    assert len(polish) == 1 and polish[0].warm_start_routes
-    assert polish[0].warm_start_key.startswith("run:") and polish[0].warm_start_sha256
-    run_tasks(plan, out=spec.out, workers=1, memory_gb=8, progress=lambda line: None)
+    assert plan.unsupported == []  # no archived run and no stored BKS yet, but runs to start from are planned
+    assert [task.kind for task in plan.tasks] == ["fake-seed", "fake-seed", "polish"]  # despite its longer budget
+    lines: list[str] = []
+    summary = run_tasks(plan, out=spec.out, workers=3, memory_gb=8, progress=lines.append)
+    assert summary["completed"] == 3 and summary["valid"] == 3
+    starts = [line.split()[1] for line in lines if line.startswith("start ")]
+    done = [line.split()[1].rstrip(":") for line in lines if line.startswith("done ")]
+    polish = next(key for key in starts if "polish" in key)
+    assert set(done[:2]) == {key for key in starts if "polish" not in key}  # both seeds finished ...
+    assert lines.index(f"start {polish} (3s, ~{plan.tasks[-1].memory_gb:.1f} GB)") > max(
+        index for index, line in enumerate(lines) if line.startswith("done ") and "polish" not in line
+    )  # ... before the polish started
+    runs = {run["kind"]: run for run in load_runs(spec.out, with_routes=True)}
+    record = runs["polish"]
+    assert record["valid"] and record["warm_start_key"].startswith("run:") and record["warm_start_sha256"]
+    assert record["validated_cost"] <= runs["fake-seed"]["validated_cost"]
+    assert build_plan(spec, only="A1").tasks == []  # done, like any run
+
+
+def test_a_warm_start_alone_needs_something_to_start_from(campaign: Path) -> None:
+    text = campaign.read_text()
+    first = text.index("[[runs]]")
+    campaign.write_text(text[:first] + POLISH + text[text.index("[resources]"):])  # the polish is the only run entry
+    spec = load_spec(campaign)
+    plan = build_plan(spec, only="A1")
+    assert plan.tasks == [] and "no archived run, stored BKS or planned run" in plan.unsupported[0][2]
+
+
+def test_a_warm_start_whose_runs_all_failed_is_a_failed_run(campaign: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FAKE_MODE", "crash")
+    campaign.write_text(campaign.read_text() + POLISH)
+    spec = load_spec(campaign)
+    summary = run_tasks(build_plan(spec, only="A1"), out=spec.out, workers=2, memory_gb=8, progress=lambda line: None)
+    assert summary["completed"] == 3 and summary["valid"] == 0
     record = next(run for run in load_runs(spec.out) if run["kind"] == "polish")
-    assert record["valid"] and record["warm_start_key"] == polish[0].warm_start_key
+    assert record["status"] == "failed" and "no valid archived run or stored BKS" in record["error"]
+    assert len(build_plan(spec, only="A1", retry_failed=True).tasks) == 3
+
+
+def test_orphan_kill_only_touches_the_runs_own_processes(tmp_path: Path) -> None:
+    """A shell following the log in the run's directory is not the dead worker's solver."""
+    import os
+    import subprocess
+    import time
+
+    from mamut_routing_tools.bks_campaign.runner import RUN_MARKER_ENV, _kill_orphans
+
+    if not Path("/proc").is_dir():
+        pytest.skip("needs /proc")
+    raw = tmp_path / "raw" / "run-key"
+    raw.mkdir(parents=True)
+    sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+    bystander = subprocess.Popen(sleep, cwd=raw, start_new_session=True)  # someone working in the directory
+    other_run = subprocess.Popen(sleep, cwd=raw, start_new_session=True, env={**os.environ, RUN_MARKER_ENV: "run-key-2"})
+    solver = subprocess.Popen(sleep, cwd=tmp_path, start_new_session=True, env={**os.environ, RUN_MARKER_ENV: "run-key"})
+    try:
+        assert _kill_orphans("run-key") == 1
+        assert solver.wait(timeout=10) < 0  # killed, wherever it was working
+        time.sleep(0.2)
+        assert bystander.poll() is None and other_run.poll() is None
+    finally:
+        for process in (bystander, other_run, solver):
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+
+def test_a_store_error_fails_one_instance_and_the_harvest_is_still_recorded(campaign: Path, monkeypatch) -> None:
+    from mamut_routing_lib import solutions
+
+    from mamut_routing_tools.bks_campaign import harvest_history
+
+    spec = load_spec(campaign)
+    run_tasks(build_plan(spec), out=spec.out, workers=2, memory_gb=8, progress=lambda line: None)
+    real_submit = solutions.submit_bks
+    failure: list[BaseException] = [PermissionError("read-only collection")]
+
+    def submit(instance_path, *args, **kwargs):
+        if "B2" in str(instance_path):
+            raise failure[0]
+        return real_submit(instance_path, *args, **kwargs)
+
+    monkeypatch.setattr(solutions, "submit_bks", submit)
+    results = {item["instance_id"].rsplit("-", 1)[-1].upper(): item for item in harvest(spec)}
+    assert results["A1"]["action"] == "created"
+    assert results["B2"]["action"] == "error" and "PermissionError: read-only collection" in results["B2"]["error"]
+    history = harvest_history(spec.out)
+    assert len(history) == 1 and {item["action"] for item in history[0]["results"]} == {"created", "error"}
+
+    # Interrupted between two instances: what was written before is in the history all the same.
+    for path in (campaign.parent / "benchmarks").rglob("*.bks.*.json"):
+        path.unlink()
+    failure[0] = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        harvest(spec)
+    history = harvest_history(spec.out)
+    assert len(history) == 2 and [item["action"] for item in history[1]["results"]] == ["created"]
+    ledger, _ = write_reports(spec)
+    created = [row for row in csv.DictReader(ledger.open()) if row["bks_action"] == "created"]
+    assert len(created) == 1 and "A1" in created[0]["instance_id"].upper()
 
 
 def test_memory_admission_still_runs_everything(campaign: Path) -> None:

@@ -28,6 +28,7 @@ from typing import Any, Iterator
 __all__ = [
     "SCHEMA_VERSION",
     "atomic_write_json",
+    "group_runs",
     "iter_runs",
     "load_runs",
     "raw_dir",
@@ -75,6 +76,25 @@ def iter_runs(out: Path) -> Iterator[dict[str, Any]]:
             continue
         record["_file"] = str(path)
         yield record
+
+
+def group_runs(out: Path, instance_id: str, objective: str) -> list[dict[str, Any]]:
+    """The records of one instance and objective, read without scanning the whole archive.
+
+    Run keys start with ``<instance_id>__<objective>__``, so the files are found by name; the
+    records' own fields then decide (two ids can sanitise to the same key prefix).
+    """
+    directory = runs_dir(out)
+    prefix = _UNSAFE.sub("-", f"{instance_id}__{objective}__")
+    records = []
+    for path in sorted(directory.glob(f"{prefix}*.json")) if directory.is_dir() else ():
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict) and record.get("instance_id") == instance_id and record.get("objective_function") == objective:
+            records.append(record)
+    return records
 
 
 def load_runs(out: Path, *, with_routes: bool = False) -> list[dict[str, Any]]:

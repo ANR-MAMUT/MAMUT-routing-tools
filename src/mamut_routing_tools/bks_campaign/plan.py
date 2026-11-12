@@ -7,21 +7,27 @@ cannot take are listed with the reason instead of failing at run time, and
 unavailable solvers are reported once. A key listed twice (repeated seeds, two
 identical run entries) is planned once. Longest budgets go first so the tail
 is short.
+
+``warm_start = "best"`` runs start from the campaign's best result so far, so
+they are planned after every other run and the runner starts each one only
+once the other runs of its instance and objective have finished. Their start
+routes are looked up at that moment (``best_known_routes``), not here: a plan
+made before the campaign ran would otherwise freeze the stored BKS as their
+start.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from mamut_routing_tools.bks_campaign.archive import run_key, run_path
+from mamut_routing_tools.bks_campaign.archive import group_runs, run_key, run_path
 from mamut_routing_tools.bks_campaign.spec import CampaignSpec
 
-__all__ = ["CampaignPlan", "Task", "build_plan", "default_memory_gb", "select_instances"]
+__all__ = ["CampaignPlan", "Task", "best_known_routes", "build_plan", "default_memory_gb", "select_instances"]
 
 
 @dataclass(frozen=True)
@@ -42,10 +48,14 @@ class Task:
     memory_gb: float
     solvers_config: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
-    warm_start_routes: list[list[int]] | None = None
-    warm_start_key: str | None = None
-    warm_start_sha256: str | None = None
+    #: ``best``: start from the best valid run or stored BKS known when the task starts.
+    warm_start: str = "none"
     nice: int | None = None
+
+    @property
+    def group(self) -> tuple[str, str]:
+        """What a warm start waits for: the other runs of this instance and objective."""
+        return (self.instance_id, self.objective)
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -153,8 +163,8 @@ def _valid_runs_by_group(spec: CampaignSpec) -> ArchiveIndex:
     return index
 
 
-def _best_known_routes(
-    spec: CampaignSpec,
+def best_known_routes(
+    out: Path,
     instance_path: Path,
     instance_id: str,
     objective: Any,
@@ -165,15 +175,22 @@ def _best_known_routes(
     """Routes of the best valid archived run or the stored BKS (warm starts), with their origin.
 
     Runs of an older version of the instance file are ignored; "best" follows the objective
-    (fewer routes first under ``HierarchicalVehicleCost``). ``archive`` (``_valid_runs_by_group``)
-    spares one archive pass per instance when planning many.
+    (fewer routes first under ``HierarchicalVehicleCost``). Without ``archive``, only the records
+    of this instance and objective are read from ``out`` (a worker about to start); the planner
+    passes its one-pass index (``_valid_runs_by_group``) instead.
     """
     from mamut_routing_lib.artifacts import get_bks_path_for_instance, load_bks
 
     if archive is None:
-        archive = _valid_runs_by_group(spec)
+        records = [
+            record
+            for record in group_runs(out, instance_id, objective.value)
+            if record.get("valid") and record.get("validated_cost") is not None and record.get("routes")
+        ]
+    else:
+        records = archive.get((instance_id, objective.value), [])
     best: tuple[tuple, list[list[int]], str] | None = None
-    for record in archive.get((instance_id, objective.value), ()):
+    for record in records:
         if instance_sha256 and record.get("instance_sha256") not in (None, instance_sha256):
             continue
         rank = objective_rank(objective.value, record["validated_cost"], len(record["routes"]))
@@ -230,8 +247,9 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
         profile = profile_instance(instance, item.instance_path)
         n = int(instance.num_customers)
         current_sha = file_sha256(item.instance_path)
-        warm: dict[str, tuple[list[list[int]] | None, str | None]] = {}
-        for run in spec.runs:
+        cold_planned = False  # a run of this instance is still to do: a warm start can wait for it
+        # Cold entries first, whatever their order in the spec: a warm start needs to know of them.
+        for run in sorted(spec.runs, key=lambda entry: entry.warm_start == "best"):
             solver = solvers.get(run.solver)
             if solver is None:
                 continue
@@ -240,19 +258,18 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
                 unsupported.append((item.instance_id, run.solver, "; ".join(support.reasons)))
                 continue
             budget = spec.budget.seconds(n, run.budget_factor)
-            routes = sha = origin = None
-            if run.warm_start == "best":
-                if objective.value not in warm:
-                    if archive is None:
-                        archive = _valid_runs_by_group(spec)
-                    warm[objective.value] = _best_known_routes(
-                        spec, item.instance_path, item.instance_id, objective, current_sha, archive=archive
+            if run.warm_start == "best" and not cold_planned:
+                # Nothing of this instance will run first: there must be something to start from already.
+                if archive is None:
+                    archive = _valid_runs_by_group(spec)
+                known, _ = best_known_routes(
+                    spec.out, item.instance_path, item.instance_id, objective, current_sha, archive=archive
+                )
+                if known is None:
+                    unsupported.append(
+                        (item.instance_id, run.solver, "warm_start = best but no archived run, stored BKS or planned run to start from")
                     )
-                routes, origin = warm[objective.value]
-                if routes is None:
-                    unsupported.append((item.instance_id, run.solver, "warm_start = best but no archived run or stored BKS"))
                     continue
-                sha = hashlib.sha256(json.dumps(routes, separators=(",", ":")).encode()).hexdigest()
             for seed in run.seed_list():
                 key = run_key(item.instance_id, objective.value, run.run_kind, seed, budget)
                 if key in planned:  # the same run listed twice would share its raw directory
@@ -286,13 +303,13 @@ def build_plan(spec: CampaignSpec, *, only: str | None = None, retry_failed: boo
                         memory_gb=run.memory_gb if run.memory_gb is not None else default_memory_gb(run.solver, n),
                         solvers_config=config,
                         options=dict(run.options),
-                        warm_start_routes=routes,
-                        warm_start_key=origin,
-                        warm_start_sha256=sha,
+                        warm_start=run.warm_start,
                         nice=spec.resources.nice,
                     )
                 )
-    tasks.sort(key=lambda task: (-task.time_limit_s, task.key))
+                cold_planned = cold_planned or run.warm_start != "best"
+    # Warm starts last (they start from the other runs' results); longest budgets first within each.
+    tasks.sort(key=lambda task: (task.warm_start == "best", -task.time_limit_s, task.key))
     return CampaignPlan(
         tasks=tasks, done=done, unsupported=unsupported, unavailable=unavailable, retried=retried, stale=stale
     )
