@@ -77,6 +77,10 @@ def test_convert_round_trips_and_prices_exactly(tmp_path):
     assert result.instance_name == "Blauth-toyville"
     assert result.instance_path.name == "Blauth-toyville.vrp.json"
     assert result.atf_path.name == "Blauth-toyville.atf.json.gz"
+    family = tmp_path / "family"
+    assert result.instance_path == family / "TDVRPTW" / "n=2" / "Blauth-toyville.vrp.json"
+    assert result.atf_path == family / "sidecars" / "n=2" / "Blauth-toyville.atf.json.gz"
+    assert (family / "mamut-collection.json").is_file()
     assert result.max_arrival == HORIZON_END + TRAVEL
 
     loaded = load_td_instance(result.instance_path)  # verifies atf_sha256

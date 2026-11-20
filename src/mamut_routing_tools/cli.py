@@ -673,7 +673,7 @@ def geometry_materialize_plan_cmd(
 @convert_app.command("blauth2024")
 def convert_blauth2024_cmd(
     upstream: Annotated[Path, typer.Argument(help="Checkout of gitlab.com/muelleratorunibonnde/vrptdt-benchmark (holds instances/).")],
-    output_dir: Annotated[Path, typer.Option("--output-dir", help="Family directory to write into (benchmarks/TDVRPTW/Blauth2024 or a preview dir).")],
+    output_dir: Annotated[Path, typer.Option("--output-dir", help="Family collection root to write into (benchmarks/Blauth2024 or a preview dir): instances go to TDVRPTW/n=<N>/, sidecars to sidecars/n=<N>/.")],
     sizes: Annotated[str, typer.Option("--sizes", help="Comma-separated sizes to convert.")] = "10,500",
     cities: Annotated[str, typer.Option("--cities", help="Comma-separated upstream city names, or 'all'.")] = "all",
     upstream_commit: Annotated[Optional[str], typer.Option("--upstream-commit", help="Upstream git commit recorded in provenance (default: read from the checkout).")] = None,

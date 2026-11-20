@@ -2,8 +2,8 @@
 
 Upstream: https://gitlab.com/muelleratorunibonnde/vrptdt-benchmark (delivery-only
 variant; the pickup-and-delivery variant is out of MAMUT's node-routing scope).
-Design authority: the Blauth2024 family design note in tdvrptw-workspace
-(reports/design/blauth2024-family-design.md) and the TD benchmark standard.
+The family contract is documented in the README of the Blauth2024 family
+repository and in the time-dependent benchmark format page.
 
 The conversion is a pure relabeling of upstream integer-millisecond data:
 depot -> 0, items "1".."n" -> customers 1..n, arrival-time functions copied
@@ -31,9 +31,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mamut_routing_lib.json_utils import save_json_to_file
+from mamut_routing_lib.sidecars import COLLECTION_MARKER_FILENAME, CollectionMarker, save_collection_marker
 from mamut_routing_lib.td import InstanceATFs, compute_atf_sha256, save_instance_atfs
 
 FAMILY = "Blauth2024"
+#: Directory of the family's single problem type under the collection root.
+PROBLEM_TYPE_DIR = "TDVRPTW"
 UPSTREAM_CITIES = (
     "berlin",
     "cincinnati",
@@ -166,9 +169,12 @@ def convert_instance(
 ) -> ConvertedInstance:
     """Convert one (city, size) delivery-only instance; returns paths + pins.
 
-    Writes ``n=<N>/Blauth-<city>.vrp.json`` and ``.atf.json.gz`` under
-    ``output_root`` (the family directory, historic problem-type-first
-    layout). Raises :class:`Blauth2024ConversionError` on any gate failure.
+    ``output_root`` is the family collection root (``benchmarks/Blauth2024``).
+    Writes the instance at ``TDVRPTW/n=<N>/Blauth-<city>.vrp.json`` and its
+    sidecar at ``sidecars/n=<N>/Blauth-<city>.atf.json.gz``, referenced from the
+    instance by that root-relative path, and the ``mamut-collection.json``
+    marker when the root has none. Raises :class:`Blauth2024ConversionError`
+    on any gate failure.
     """
     items_path = upstream_root / "instances" / f"{city}_{n}.json"
     tt_path = upstream_root / "instances" / f"{city}_{n}_tt.json.bz2"
@@ -286,9 +292,13 @@ def convert_instance(
     )
     atf_sha = compute_atf_sha256(atfs)
 
-    size_dir = output_root / f"n={n}"
+    if not (output_root / COLLECTION_MARKER_FILENAME).is_file():
+        save_collection_marker(CollectionMarker(family=FAMILY, layout_version=2), output_root)
+    size_dir = output_root / PROBLEM_TYPE_DIR / f"n={n}"
     size_dir.mkdir(parents=True, exist_ok=True)
-    atf_path = size_dir / f"{name}.atf.json.gz"
+    sidecar_dir = output_root / "sidecars" / f"n={n}"
+    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    atf_path = sidecar_dir / f"{name}.atf.json.gz"
     save_instance_atfs(atfs, atf_path)
 
     coordinates = [[data["depot"]["longitude"], data["depot"]["latitude"]]]
@@ -312,7 +322,7 @@ def convert_instance(
         "horizon": [HORIZON_START, HORIZON_END],
         "fleet_fixed_cost": FLEET_FIXED_COST,
         "time_windows": time_windows,
-        "td": {"model": "atf-ndcpwlf", "atf_path": atf_path.name, "atf_sha256": atf_sha},
+        "td": {"model": "atf-ndcpwlf", "atf_path": atf_path.relative_to(output_root).as_posix(), "atf_sha256": atf_sha},
         "metadata": {
             "authors": "Florian Rascoussier (0nyr)",
             "generator": generator,

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from mamut_routing_lib.sidecars import CollectionMarker, save_collection_marker
 from mamut_routing_lib.models import BenchmarkInstance
 from mamut_routing_tools.bks_campaign import (
     build_plan,
@@ -62,8 +63,9 @@ def _instance(name: str, shift: int) -> BenchmarkInstance:
 @pytest.fixture
 def campaign(tmp_path: Path) -> Path:
     benchmarks = tmp_path / "benchmarks"
+    save_collection_marker(CollectionMarker(family="Dimacs2021", layout_version=2), benchmarks / "Dimacs2021")
     for name, shift in (("A1", 0), ("B2", 5)):
-        path = benchmarks / "VRPTW" / "Dimacs2021" / "n=3" / f"{name}.vrp.json"
+        path = benchmarks / "Dimacs2021" / "VRPTW" / "n=3" / f"{name}.vrp.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(_instance(name, shift).model_dump(mode="json")))
     (tmp_path / "solvers.toml").write_text(SOLVERS)

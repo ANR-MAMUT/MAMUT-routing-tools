@@ -2,7 +2,7 @@
 collection tree (slim CVRP / VRPTW instances, shared geo / road / traffic /
 distances sidecars, and the TDVRP/TDVRPTW twins of the road-graph v2 td model).
 
-Relocated from ``mamut_routing_publish.td_generation`` (session 34): generation
+Relocated from ``mamut_routing_publish.td_generation``: generation
 now lives in the generation tool. Consumes the TD bridge produced by
 ``mamut_routing_tools.td.traffic`` plus the stage-1 sampling intermediates from
 ``mamut_routing_tools.generation``.
