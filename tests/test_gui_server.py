@@ -38,7 +38,7 @@ def _frontend_source(client: TestClient) -> str:
     all, not which file carries it, so they assert against the whole bundle.
     """
     parts = [client.get("/").text]
-    for asset in ("workbench.css", "workbench.js", "layout.js"):
+    for asset in ("workbench.css", "workbench.js", "layout.js", "mamut-map.js", "mamut-trips.js"):
         response = client.get(f"/static/{asset}")
         assert response.status_code == 200, f"missing frontend asset {asset}"
         parts.append(response.text)
@@ -76,9 +76,15 @@ def test_gui_shell_inlines_the_basemap_api_key_only_when_configured(
     monkeypatch.setenv("MAMUT_BASEMAP_API_KEY", "cb1_test-KEY_01")
     with TestClient(app, base_url="http://localhost", headers=headers) as client:
         assert 'window.__MAMUT_BASEMAP_API_KEY__="cb1_test-KEY_01";' in client.get("/").text
+        # CARTO vector styles through the shared MapLibre kit, every CARTO request
+        # keyed; no raster tile template survives (it would draw a watermark).
         source = client.get("/static/workbench.js").text
-        assert "basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png?key=" in source
-        assert 'href="https://carto.com/attributions">CARTO</a>' in source
+        kit = client.get("/static/mamut-map.js").text
+        assert "apiKey: basemapApiKey," in source
+        assert "transformRequest: (url) => withBasemapKey(url, apiKey)" in kit
+        assert "https://basemaps.cartocdn.com/gl/${styleName}/style.json?key=" in kit
+        assert 'href="https://carto.com/attributions">CARTO</a>' in kit
+        assert "{z}/{x}/{y}{r}.png" not in source + kit
 
     monkeypatch.setenv("MAMUT_BASEMAP_API_KEY", 'bad"key')
     with TestClient(app, base_url="http://localhost", headers=headers) as client:
@@ -146,6 +152,10 @@ def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client
     ):
         assert f'id="{control}"' in html
     assert 'value="cached_road"' in html and 'value="straight_line"' in html
+    # Route animation: the button, the playback bar host, deck.gl loaded on demand only.
+    assert 'id="animate-routes"' in html and 'id="tripsBar"' in html
+    assert '<script src="/static/vendor/deck.gl' not in html
+    assert 'const DECK_SRC = "/static/vendor/deck.gl/dist.min.js";' in html
 
 
 def test_gui_shell_groups_the_form_and_moves_jobs_out_of_the_panel(client: TestClient) -> None:
@@ -355,6 +365,13 @@ def test_preview_generate_solve_render_round_trip(client: TestClient) -> None:
         "/api/workbench/render-routes", json={"meta": meta, "routes": solved["routes"], "metric": "fastest"}
     ).json()
     assert rendered["ok"] and rendered["summary"]["render_mode"] in ("cached_road", "mixed")
+    # One arc start per arc, the first at 0, strictly increasing and inside the line:
+    # the client slices per-arc segments (depot legs, animation timing) from them.
+    for feature, route in zip(rendered["geojson"]["features"], solved["routes"]):
+        starts = feature["properties"]["arc_starts"]
+        assert len(starts) == len(route) + 1 and starts[0] == 0
+        assert all(later > earlier for earlier, later in zip(starts, starts[1:]))
+        assert starts[-1] < len(feature["geometry"]["coordinates"]) - 1
 
     rendered_euclidean = client.post(
         "/api/workbench/render-routes", json={"meta": meta, "routes": solved["routes"], "metric": "euclidean"}
@@ -489,6 +506,16 @@ def test_solve_jobs_persist_validated_runs_and_compare_them(client: TestClient) 
         params={"metric": "fastest"},
     ).json()
     assert rendered["ok"] and rendered["summary"]["route_count"] >= 1
+
+    # The animation timeline is clocked by the fastest arc costs, one entry per stop.
+    run = next(run for run in listing["runs"] if run["run_id"] == run_ids[1])
+    timeline = client.get(f"/api/instances/{instance_id}/solutions/{run_ids[1]}/timeline").json()
+    assert timeline["ok"] and timeline["clock"] == "free_flow_fastest" and timeline["time_unit"] == "s"
+    assert [[stop[0] for stop in route["stops"]] for route in timeline["routes"]] == run["routes"]
+    for route in timeline["routes"]:
+        times = [route["departure"]] + [value for stop in route["stops"] for value in stop[1:]] + [route["return_arrival"]]
+        assert times == sorted(times)
+    assert client.get(f"/api/instances/{instance_id}/solutions/nope/timeline").status_code == 404
 
     jobs = client.get("/api/jobs").json()["jobs"]
     assert len([job for job in jobs if job["kind"] == "solve" and job["status"] == "completed"]) == 2
@@ -763,6 +790,23 @@ def test_importing_an_external_solution_validates_before_storing(client: TestCli
 
     runs = client.get(f"/api/instances/{instance_id}/solutions").json()["runs"]
     assert [entry["run_id"] for entry in runs] == [run["run_id"]]
+
+
+def test_importing_an_lkh3_solution_file_is_accepted(client: TestClient) -> None:
+    """LKH-3's MTSP_SOLUTION_FILE: depot node 1, customers 2..n+1, empty vehicles dropped."""
+    instance = _generate_for_import(client)
+    text = (
+        "problem, Cost: 0_1234\nThe tours traveled by the 3 salesmen are:\n"
+        "1 2 3 1 (#2)  Cost: 600\n1 4 5 1 (#2)  Cost: 634\n1 1 (#0)  Cost: 0\n"
+    )
+    response = client.post(
+        f"/api/instances/{instance['instance_id']}/solutions/import",
+        json={"metric": "fastest", "text": text, "filename": "problem.sol", "label": "LKH-3"},
+    ).json()
+    assert response["ok"], response
+    run = response["solution"]
+    assert run["routes"] == [[1, 2], [3, 4]] and run["metadata"]["format"] == "lkh-mtsp"
+    assert run["solver"] == "LKH-3"
 
 
 @pytest.mark.parametrize(
@@ -1102,6 +1146,7 @@ def test_replacing_an_instance_marks_its_runs_stale(client: TestClient) -> None:
     assert runs[0]["stale"] is True and "regenerated" in runs[0]["stale_reason"]
     assert _solution_count(client, first["instance_id"]) == 0
     assert client.post(f"/api/instances/{first['instance_id']}/solutions/{run_id}/render").status_code == 409
+    assert client.get(f"/api/instances/{first['instance_id']}/solutions/{run_id}/timeline").status_code == 409
     compared = client.post(
         f"/api/instances/{first['instance_id']}/solutions/compare",
         json={"candidate_run_id": run_id, "reference_run_id": run_id},
@@ -1145,3 +1190,292 @@ def test_legacy_runs_are_rechecked_once_and_cached(client: TestClient) -> None:
     instance_file.write_text(json.dumps(payload), encoding="utf-8")
     runs = client.get(f"/api/instances/{first['instance_id']}/solutions").json()["runs"]
     assert runs[0]["stale"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Solver selection: the registry, external solvers, real cancellation
+# --------------------------------------------------------------------------- #
+
+_FAKE_CONFIG = """schema_version = 1
+[solvers.fake]
+label = "Fake LKH"
+runtime = "python"
+input_format = "lkh"
+output_format = "lkh-mtsp"
+problem_types = ["CVRP"]
+symmetric_only = false
+argv = ["{python}", "-m", "mamut_routing_lib.solvers.external._fake_solver", "--params", "{params}"]
+progress_pattern = "progress cost=(?P<cost>[0-9.]+)"
+"""
+
+
+@pytest.fixture
+def fake_solver_config(tmp_path: Path, monkeypatch) -> Path:
+    from mamut_routing_lib.solvers import reload_solvers
+
+    path = tmp_path / "solvers.toml"
+    path.write_text(_FAKE_CONFIG)
+    monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(path))
+    reload_solvers()
+    return path
+
+
+def test_solvers_endpoint_lists_availability_and_per_instance_support(client: TestClient, fake_solver_config: Path) -> None:
+    listing = client.get("/api/solvers").json()
+    assert listing["ok"] and listing["config"] == str(fake_solver_config.resolve())
+    by_name = {row["name"]: row for row in listing["solvers"]}
+    assert by_name["pyvrp"]["available"] and by_name["fake"]["available"]
+    assert {"kayros", "filo2", "hgs-cvrp", "ails2", "lkh3"} <= set(by_name)
+    assert "supported" not in by_name["pyvrp"]
+
+    instance_id = _generate(client)["instance_id"]
+    scoped = {row["name"]: row for row in client.get(f"/api/solvers?instance_id={instance_id}&metric=fastest").json()["solvers"]}
+    assert scoped["pyvrp"]["supported"] and scoped["fake"]["supported"]
+    assert not scoped["kayros"]["supported"] and "TDVRP" in scoped["kayros"]["reasons"][0]
+    assert not scoped["filo2"]["supported"]  # a road metric: coordinates do not define the costs
+    assert client.get("/api/solvers?instance_id=nope").status_code == 404
+
+
+def test_the_hierarchical_objective_on_cvrp_leaves_solvers_enabled(client: TestClient) -> None:
+    # The solve job runs CVRP as MonoCost whatever the objective select says: so does the support check.
+    instance_id = _generate(client)["instance_id"]
+    query = f"/api/solvers?instance_id={instance_id}&metric=fastest&objective_function=HierarchicalVehicleCost"
+    by_name = {row["name"]: row for row in client.get(query).json()["solvers"]}
+    assert by_name["pyvrp"]["supported"], by_name["pyvrp"]["reasons"]
+
+
+def test_a_broken_solvers_config_leaves_pyvrp_usable(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    from mamut_routing_lib.solvers import reload_solvers
+
+    broken = tmp_path / "broken.toml"
+    broken.write_text('schema_version = 1\n[solvers.filo2]\nexecutable = "/opt/filo2\n')  # unclosed string
+    monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(broken))
+    reload_solvers()
+    instance_id = _generate(client)["instance_id"]
+    listing = client.get(f"/api/solvers?instance_id={instance_id}&metric=fastest").json()
+    assert listing["ok"] and "solvers config" in listing["config_error"]
+    by_name = {row["name"]: row for row in listing["solvers"]}
+    assert [row["name"] for row in listing["solvers"]][:2] == ["pyvrp", "kayros"]
+    assert by_name["pyvrp"]["available"] and by_name["pyvrp"]["supported"]
+    assert not by_name["filo2"]["available"] and "solvers config" in by_name["filo2"]["reason"]
+    submitted = client.post("/api/jobs", json={"kind": "solve", "payload": {"instance_id": instance_id, "time_limit": 1}})
+    assert submitted.status_code == 200, submitted.json()
+    refused = client.post(
+        "/api/jobs", json={"kind": "solve", "payload": {"instance_id": instance_id, "time_limit": 1, "solver": "filo2"}}
+    )
+    assert refused.status_code == 400 and "solvers config" in refused.json()["error"]
+    _wait_for_job(client, submitted.json()["job"]["job_id"])
+
+
+def test_an_external_solve_job_records_the_solver_and_its_provenance(client: TestClient, fake_solver_config: Path) -> None:
+    instance_id = _generate(client)["instance_id"]
+    submitted = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "payload": {"instance_id": instance_id, "metric": "fastest", "solver": "fake", "time_limit": 5}},
+    ).json()
+    job = _wait_for_job(client, submitted["job"]["job_id"])
+    assert job["status"] == "completed", job.get("error")
+    run = job["result"]["solution"]
+    assert run["solver"] == "fake" and run["method"] == "fake"
+    assert run["validation"]["valid"]
+    assert run["metadata"]["provenance"]["scale"]["exact"] is True
+    assert job["result"]["cost"] == pytest.approx(job["result"]["solver_cost"])
+
+
+def test_an_unknown_or_unavailable_solver_is_refused_at_submission(client: TestClient, monkeypatch) -> None:
+    instance_id = _generate(client)["instance_id"]
+    unknown = client.post("/api/jobs", json={"kind": "solve", "payload": {"instance_id": instance_id, "solver": "nope"}})
+    assert unknown.status_code == 400 and "unknown solver" in unknown.json()["error"]
+    monkeypatch.setenv("PATH", "/nonexistent")
+    missing = client.post("/api/jobs", json={"kind": "solve", "payload": {"instance_id": instance_id, "solver": "lkh3"}})
+    assert missing.status_code == 400 and "not available" in missing.json()["error"]
+
+
+def test_cancelling_an_external_solve_kills_the_solver(client: TestClient, fake_solver_config: Path, monkeypatch) -> None:
+    from mamut_routing_lib.solvers.external.process import live_process_count
+
+    monkeypatch.setenv("FAKE_MODE", "sleep")
+    instance_id = _generate(client)["instance_id"]
+    before = len(client.get(f"/api/instances/{instance_id}/solutions").json()["runs"])
+    submitted = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "payload": {"instance_id": instance_id, "metric": "fastest", "solver": "fake", "time_limit": 300}},
+    ).json()
+    job_id = submitted["job"]["job_id"]
+    for _ in range(400):
+        if live_process_count() > 0:
+            break
+        time.sleep(0.02)
+    assert live_process_count() == 1
+    started = time.monotonic()
+    client.delete(f"/api/jobs/{job_id}")
+    job = _wait_for_job(client, job_id)
+    assert job["status"] == "cancelled"
+    assert time.monotonic() - started < 10
+    assert live_process_count() == 0
+    assert len(client.get(f"/api/instances/{instance_id}/solutions").json()["runs"]) == before
+
+
+def test_the_solve_panel_offers_a_solver_select(client: TestClient) -> None:
+    source = _frontend_source(client)
+    assert 'id="solve-solver"' in source and 'id="solve-solver-note"' in source
+    assert "/api/solvers" in source and "solver," in source  # the job payload carries the solver
+
+
+def test_an_unsupported_solver_and_variant_pair_is_refused_at_submission(
+    client: TestClient, tmp_path: Path, monkeypatch
+) -> None:
+    from mamut_routing_lib.solvers import reload_solvers
+
+    path = tmp_path / "vrptw-only.toml"
+    path.write_text(_FAKE_CONFIG.replace('problem_types = ["CVRP"]', 'problem_types = ["VRPTW"]'))
+    monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(path))
+    reload_solvers()
+    instance_id = _generate(client)["instance_id"]
+    refused = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "payload": {"instance_id": instance_id, "metric": "fastest", "solver": "fake", "time_limit": 1}},
+    )
+    assert refused.status_code == 400 and "cannot solve this variant" in refused.json()["error"]
+    assert "not CVRP" in refused.json()["error"]  # refused before a job is queued, not inside it
+    accepted = client.post(
+        "/api/jobs",
+        json={"kind": "solve", "payload": {"instance_id": instance_id, "metric": "fastest", "solver": "pyvrp", "time_limit": 1}},
+    )
+    assert accepted.status_code == 200, accepted.json()
+    _wait_for_job(client, accepted.json()["job"]["job_id"])
+
+
+def test_one_bad_solver_table_leaves_the_others_listed(client: TestClient, tmp_path: Path, monkeypatch) -> None:
+    from mamut_routing_lib.solvers import reload_solvers
+
+    path = tmp_path / "solvers.toml"
+    path.write_text(_FAKE_CONFIG + '[solvers.filo2]\nexecutabel = "/opt/filo2"\n')
+    monkeypatch.setenv("MAMUT_ROUTING_SOLVERS_CONFIG", str(path))
+    reload_solvers()
+    listing = client.get("/api/solvers").json()
+    by_name = {row["name"]: row for row in listing["solvers"]}
+    assert listing["config_error"] is None and by_name["fake"]["available"]
+    assert not by_name["filo2"]["available"] and "did you mean 'executable'" in by_name["filo2"]["reason"]
+
+
+def test_instances_generated_before_the_family_rename_still_open(client: TestClient) -> None:
+    # Workbench instances from July 2026 are embedded CVRP files labelled Mamut2026 (now Poryos2026).
+    generated = _generate(client)
+    instance_id = generated["instance_id"]
+    folder = Path(generated["folder"])
+    for path in folder.glob("*.vrp.json"):
+        payload = json.loads(path.read_text())
+        if payload.get("benchmark_name") == "Poryos2026":
+            payload["benchmark_name"] = "Mamut2026"
+            path.write_text(json.dumps(payload))
+    listing = client.get(f"/api/solvers?instance_id={instance_id}&metric=fastest")
+    assert listing.status_code == 200, listing.json()
+    assert {row["name"]: row for row in listing.json()["solvers"]}["pyvrp"]["supported"]
+    assert client.get(f"/api/instances/{instance_id}/solutions").status_code == 200
+    run_id = _solve(client, instance_id)
+    assert run_id
+
+
+def test_animate_is_offered_on_the_solve_and_runs_tabs_too(client: TestClient) -> None:
+    source = _frontend_source(client)
+    for button in ('id="animate-routes"', 'id="solve-animate"', 'id="runs-animate"'):
+        assert button in source
+    assert source.count("data-animate-routes") >= 4  # three buttons, and the script drives them all
+    assert "syncAnimateButton();  // nothing is drawn any more" in source  # Clear map hides them
+
+
+def _timeline_record(tmp_path: Path, *, time_windows: list | None, fastest: bool = True) -> dict:
+    """A workspace record whose fastest variant is a three-customer line, 10 s between neighbours."""
+    from mamut_routing_lib.models import BenchmarkInstance, BenchmarkInstanceCVRP
+
+    common = dict(
+        instance_name="line",
+        instance_origin="Solomon1987",
+        benchmark_name="Dimacs2021",
+        num_customers=3,
+        vehicle_capacity=10,
+        coordinates=[(0, 0), (1, 0), (2, 0), (3, 0)],
+        demands=[0, 1, 1, 1],
+        depot=0,
+        arc_costs=[[abs(i - j) * 10 for j in range(4)] for i in range(4)],
+        metadata={"metric_variant": "fastest", "authors": "toy"},
+    )
+    if time_windows is None:
+        instance = BenchmarkInstanceCVRP(**common)
+    else:
+        instance = BenchmarkInstance(**common, service_times=[0, 5, 5, 5], time_windows=time_windows)
+    (tmp_path / "line_fastest.vrp.json").write_text(json.dumps(instance.model_dump(mode="json")))
+    return {"folder": str(tmp_path), "files": {"vrp_json": {"fastest": "line_fastest.vrp.json"} if fastest else {"euclidean": "x"}}}
+
+
+def test_the_timeline_names_its_clock_and_falls_back_to_constant_speed(tmp_path: Path) -> None:
+    """A run the fastest travel times cannot clock still animates: no routes, and the reason."""
+    from mamut_routing_tools.gui.server import _timeline_payload
+
+    def timeline(record: dict, routes: list, metric: str) -> dict:
+        return _timeline_payload(record, {"routes": routes, "metadata": {"metric": metric}})
+
+    cvrp = timeline(_timeline_record(tmp_path, time_windows=None), [[1, 2, 3]], "euclidean")
+    assert cvrp["clock"] == "free_flow_fastest" and cvrp["note"] is None  # travel times only: the default wording
+    assert cvrp["routes"][0]["stops"] == [[1, 10.0, 10.0, 10.0], [2, 20.0, 20.0, 20.0], [3, 30.0, 30.0, 30.0]]
+
+    loose = [(0, 1000), (0, 1000), (0, 1000), (0, 1000)]
+    checked = timeline(_timeline_record(tmp_path, time_windows=loose), [[1, 2, 3]], "fastest")
+    assert checked["clock"] == "checker" and checked["note"] is None  # the schedule the checker validated
+    assert checked["routes"][0]["stops"][1] == [2, 25.0, 25.0, 30.0]  # service times are applied
+    other = timeline(_timeline_record(tmp_path, time_windows=loose), [[1, 2, 3]], "euclidean")
+    assert other["clock"] == "free_flow_fastest" and other["routes"] == checked["routes"]
+    assert "service times" in other["note"] and "euclidean metric" in other["note"]  # not "no service times"
+
+    tight = [(0, 1000), (0, 1000), (0, 1000), (0, 12)]  # customer 3 last is late under the fastest times
+    missed = timeline(_timeline_record(tmp_path, time_windows=tight), [[1, 2, 3]], "shortest")
+    assert missed["ok"] and missed["clock"] == "schematic" and missed["routes"] == []
+    assert missed["note"].startswith("Constant speed (25 km/h)") and "shortest metric" in missed["note"]
+
+    absent = timeline(_timeline_record(tmp_path, time_windows=None, fastest=False), [[1, 2, 3]], "euclidean")
+    assert absent["ok"] and absent["clock"] == "schematic" and absent["routes"] == []
+    assert "no fastest variant" in absent["note"]
+
+
+def test_the_animation_plays_whatever_the_timeline_answers(client: TestClient) -> None:
+    source = client.get("/static/workbench.js").text
+    # The server's wording of the clock reaches the animation, and a failed request is a constant-speed animation.
+    assert "if (timeline.note) clockLabels = { [timeline.clock]: timeline.note };" in source
+    assert "clockLabels = { schematic: `Constant speed (25 km/h): no schedule for this run (${error.message})` };" in source
+    assert "\n      clockLabels,\n" in source
+    # The "needs WebGL2" notice is not a running animation.
+    assert "return Boolean(routeAnimation && !routeAnimation.unavailable);" in source
+    assert "dim: animationPlaying() ? 0.35 : 1," in source and "dim: routeAnimation ?" not in source
+
+
+def test_displaying_a_run_refreshes_the_solver_list_for_its_metric(client: TestClient) -> None:
+    """Setting the Metric select from a displayed run fires no change event: the solver support
+    (FILO2 and AILS-II on road metrics) would stay that of the previous metric."""
+    source = client.get("/static/workbench.js").text
+    start = source.index('const metric = run.metadata?.metric || el("solve-metric").value || "fastest";')
+    block = source[start : source.index("const rendered = await api(", start)]
+    assert 'if (el("solve-metric").value !== metric) {' in block
+    assert block.index('el("solve-metric").value = metric;') < block.index("loadSolvers()") and "syncVrpExportControls();" in block
+
+
+def test_the_profile_cache_keeps_facts_not_instances(client: TestClient) -> None:
+    import os
+
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_tools.gui import server
+
+    instance_id = _generate(client)["instance_id"]
+    assert client.get(f"/api/solvers?instance_id={instance_id}&metric=fastest").status_code == 200
+    assert server._PROFILE_CACHE
+    for (path, _mtime, _size), (profile, default) in server._PROFILE_CACHE.items():
+        assert default is ObjectiveFunction.MONO_COST  # the default objective, not the instance and its matrix
+        assert not hasattr(default, "arc_costs") and not hasattr(profile, "arc_costs")
+    path = Path(next(iter(server._PROFILE_CACHE))[0])
+    before = len(server._PROFILE_CACHE)
+    assert server._cached_profile(path) is server._cached_profile(path) and len(server._PROFILE_CACHE) == before
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))  # the file changed: a new entry
+    server._cached_profile(path)
+    assert len(server._PROFILE_CACHE) == before + 1
+

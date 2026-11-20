@@ -56,6 +56,11 @@ app.add_typer(geometry_app, name="geometry")
 app.add_typer(osm_app, name="osm")
 app.add_typer(generate_app, name="generate")
 app.add_typer(convert_app, name="convert")
+bks_campaign_app = typer.Typer(
+    help="BKS campaigns: baseline, resumable multi-solver runs, single-writer harvest, reports (TOML spec).",
+    no_args_is_help=True,
+)
+app.add_typer(bks_campaign_app, name="bks-campaign")
 
 
 def _resolve_city_osm(city: str, osm_path: Path | None, workspace: Path) -> Path:
@@ -233,107 +238,150 @@ def gui_run_cmd(
     uvicorn.run(create_app(workspace, token), host="127.0.0.1", port=port, log_level="info")
 
 
+SOLVER_HELP = (
+    "Solver: pyvrp (CVRP/VRPTW), kayros (TDVRP/TDVRPTW Duration), or an external executable "
+    "-- filo2, hgs-cvrp, ails2, lkh3, or one of yours -- from the solvers config. "
+    "`mamut-routing solvers list` shows what is available."
+)
+
+
 @app.command("solve")
 def solve_cmd(
     instance_path: Annotated[Path, typer.Argument(help="A .vrp.json instance (generated or from a benchmark collection).")],
-    time_limit: Annotated[int, typer.Option("--time-limit", help="Wall-clock budget in seconds.")] = 30,
+    time_limit: Annotated[int, typer.Option("--time-limit-s", "--time-limit", min=1, help="Wall-clock budget in seconds.")] = 30,
     seed: Annotated[int, typer.Option("--seed")] = 42,
-    objective: Annotated[str, typer.Option("--objective", help="MonoCost or HierarchicalVehicleCost (VRPTW only; kayros solves Duration).")] = "MonoCost",
-    solver: Annotated[str, typer.Option("--solver", help="pyvrp (CVRP/VRPTW) or kayros (TDVRPTW/TDVRP Duration, exact/anytime BPC-seeded).")] = "pyvrp",
-    update_bks: Annotated[bool, typer.Option("--update-bks/--no-update-bks", help="Write a BKS file next to the instance when the solution improves it.")] = False,
+    objective: Annotated[
+        Optional[str],
+        typer.Option(
+            "--objective",
+            help="MonoCost, HierarchicalVehicleCost (VRPTW), Duration (TD). Default: MonoCost, or Duration for TD instances.",
+        ),
+    ] = None,
+    solver: Annotated[str, typer.Option("--solver", help=SOLVER_HELP)] = "pyvrp",
+    solvers_config: Annotated[
+        Optional[Path],
+        typer.Option("--solvers-config", help="Solvers config TOML (default: $MAMUT_ROUTING_SOLVERS_CONFIG, then ~/.config/mamut-routing/solvers.toml)."),
+    ] = None,
+    keep_artifacts: Annotated[
+        Optional[Path],
+        typer.Option("--keep-artifacts", help="Keep an external solver's input, output and log in this directory."),
+    ] = None,
+    update_bks: Annotated[
+        bool,
+        typer.Option(
+            "--save-bks/--no-save-bks",
+            "--update-bks/--no-update-bks",
+            help="Write a BKS file next to the instance when the solution improves it (needs --authors).",
+        ),
+    ] = False,
+    authors: Annotated[
+        Optional[str],
+        typer.Option("--authors", envvar="MAMUT_ROUTING_BKS_AUTHORS", help="Who to credit in a written BKS (or $MAMUT_ROUTING_BKS_AUTHORS)."),
+    ] = None,
 ) -> None:
-    """Solve an instance: PyVRP via mamut-routing-lib, or KAYROS for TD instances.
+    """Solve an instance with any registered solver and check the result.
 
-    For PyVRP, "cost" is the reference checker's cost of the routes (the
-    solver's own objective, on arc costs scaled to integers for float
-    matrices, is "solver_cost"); with --update-bks, "bks_update" reports the
-    store's action (created, replaced or kept_existing, with "tie" when the
-    stored BKS costs exactly the same) and the BKS path.
+    Prints JSON. "cost" is the reference checker's cost of the routes and
+    "validation" its verdict; "solver_cost" is the solver's own objective in
+    instance units, for information. "status" is the solver's termination
+    (KAYROS: finished / converged / time_limit). With --save-bks --authors,
+    "bks_update" reports the store's action (created, replaced or
+    kept_existing, with "tie" when the stored BKS costs exactly the same).
+    The flags are those of `mamut-routing solve` (--time-limit and
+    --update-bks still work). The JSON is a solution file `mamut-routing
+    check` and `bks submit` read. Exit status 1 when "ok" is false (the
+    solver failed or the checker rejected its routes).
     """
-    if solver == "kayros":
-        try:
-            import kayros
-        except ImportError:
-            typer.echo(
-                "KAYROS is not installed. Install the extra: uv sync --extra kayros "
-                "(or pip install 'mamut-routing-tools[kayros]').",
-                err=True,
-            )
-            raise typer.Exit(code=1) from None
-        if update_bks:
-            typer.echo("--update-bks is not wired for kayros yet; use kayros' own BKS tooling.", err=True)
-            raise typer.Exit(code=1)
-        solution = kayros.solve(instance_path, time_limit=float(time_limit), seed=seed)
-        typer.echo(
-            json.dumps(
-                {
-                    "ok": True,
-                    "method": "kayros",
-                    "objective_function": "Duration",
-                    "cost": solution.duration,
-                    "routes": solution.routes,
-                    "n_routes": solution.num_routes,
-                    "status": solution.status,
-                    "iterations": solution.iterations,
-                    "route_durations": solution.route_durations,
-                },
-                indent=1,
-            )
-        )
-        return
-    if solver != "pyvrp":
-        typer.echo(f"Unknown solver '{solver}'; use pyvrp or kayros.", err=True)
-        raise typer.Exit(code=1)
-
-    from mamut_routing_lib.artifacts import (
-        get_instance_identifier,
-        hydrate_collection_instance,
-        load_benchmark_instance,
-    )
-    from mamut_routing_lib.checker import check_solution
     from mamut_routing_lib.enums import ObjectiveFunction
-    from mamut_routing_lib.models import BenchmarkSolution
-    from mamut_routing_lib.solvers import pyvrp as lib_pyvrp
+    from mamut_routing_lib.solutions import submit_bks
+    from mamut_routing_lib.solvers import (
+        InstanceNotSupportedError,
+        SolverUnavailableError,
+        UnknownSolverError,
+        run_solver,
+    )
+    from mamut_routing_lib.solvers.external.config import SolverConfigError
+    from mamut_routing_lib.solvers.external.process import terminate_all
 
-    instance = load_benchmark_instance(instance_path)
-    objective_function = ObjectiveFunction(objective)
-    kwargs: dict = {"time_limit_s": time_limit, "seed": seed, "objective_function": objective_function}
-    if update_bks:
-        result, bks_update = lib_pyvrp.solve_and_update_bks(
-            instance, instance_path=instance_path, authors="mamut-routing-tools user", **kwargs
+    objective_function = None
+    if objective:
+        try:
+            objective_function = next(
+                member for member in ObjectiveFunction if member.value.lower() == objective.strip().lower()
+            )
+        except StopIteration:
+            typer.echo(f"Unknown objective '{objective}'; use one of {', '.join(m.value for m in ObjectiveFunction)}.", err=True)
+            raise typer.Exit(code=1) from None
+    if update_bks and not (authors and authors.strip()):
+        typer.echo("--save-bks needs --authors (who to credit in the BKS), or $MAMUT_ROUTING_BKS_AUTHORS.", err=True)
+        raise typer.Exit(code=1)
+    workdir = None
+    if keep_artifacts is not None:
+        workdir = keep_artifacts.resolve() / f"{instance_path.stem}-{solver}-seed{seed}"
+    try:
+        solved = run_solver(
+            solver,
+            instance_path,
+            time_limit_s=time_limit,
+            seed=seed,
+            objective_function=objective_function,
+            workdir=workdir,
+            keep_artifacts=workdir is not None,
+            config=solvers_config,
         )
-    else:
-        result, bks_update = lib_pyvrp.solve_instance(instance, instance_path=instance_path, **kwargs), None
-    checked = None
-    if result.routes:
-        checked = check_solution(
-            hydrate_collection_instance(instance, instance_path),
-            BenchmarkSolution(instance_name=get_instance_identifier(instance), routes=result.routes, cost=None),
-        )
-    payload = {
-        "ok": bool(result.solver_is_feasible and checked is not None and checked.is_valid()),
+    except (UnknownSolverError, SolverUnavailableError, InstanceNotSupportedError, SolverConfigError) as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from None
+    except KeyboardInterrupt:
+        terminate_all()
+        typer.echo("Interrupted: the solver was stopped.", err=True)
+        raise typer.Exit(code=130) from None
+
+    result = solved.result
+    payload: dict = {
+        "ok": bool(solved.valid and result.status in ("feasible", "timeout")),
+        "solver": result.solver,
         "method": result.method,
-        "objective_function": result.objective_function,
-        "cost": checked.routing_cost if checked is not None and checked.is_valid() else None,
+        "objective_function": solved.objective.value,
+        "cost": solved.cost,
         "solver_cost": result.solver_cost,
-        "validation": checked.status.value if checked is not None else "no-solution",
+        "validation": solved.validation_status,
+        "status": result.metadata.get("status") or result.status,
         "routes": result.routes,
-        "n_routes": result.route_count,
+        "n_routes": len(result.routes),
         "wall_time": round(result.wall_time, 2),
         "metadata": result.metadata,
+        "provenance": result.provenance,
     }
+    if result.error:
+        payload["error"] = result.error
+    if solved.support_warnings:
+        payload["warnings"] = list(solved.support_warnings)
+    evaluations = getattr(solved.check, "route_evaluations", None)
+    if evaluations:
+        payload["iterations"] = result.metadata.get("iterations")
+        payload["route_durations"] = [evaluation.duration for evaluation in evaluations]
     if update_bks:
-        payload["bks_update"] = (
-            {
-                "action": bks_update.action,
-                "tie": bks_update.tie,
-                "path": str(bks_update.path),
-                "candidate_cost": bks_update.candidate_cost,
+        if solved.valid:
+            update = submit_bks(
+                instance_path,
+                result.routes,
+                authors=str(authors),
+                objective_function=solved.objective,
+                metadata=solved.bks_metadata(),
+                checkable=solved.checkable,
+            )
+            payload["bks_update"] = {
+                "action": update.action,
+                "tie": update.tie,
+                "path": str(update.path),
+                "candidate_cost": update.candidate_cost,
             }
-            if bks_update is not None
-            else {"action": "skipped", "reason": "no feasible, checker-valid solution"}
-        )
-    typer.echo(json.dumps(payload, indent=1))
+        else:
+            payload["bks_update"] = {"action": "skipped", "reason": "no feasible, checker-valid solution"}
+    typer.echo(json.dumps(payload, indent=1, default=str))
+    if not payload["ok"]:
+        raise typer.Exit(code=1)  # scripts must see a failed or invalid solve (the JSON says why)
 
 
 @generate_app.command("materialize-distances")
@@ -673,6 +721,166 @@ def convert_blauth2024_cmd(
             indent=1,
         )
     )
+
+
+
+
+# --------------------------------------------------------------------------- #
+# BKS campaigns
+# --------------------------------------------------------------------------- #
+
+_SPEC_ARG = typer.Argument(help="Campaign spec (TOML); see `mamut_routing_tools.bks_campaign.spec`.")
+_ONLY_OPT = typer.Option("--only", help="Regex on instance ids/names (smoke tests, partial runs).")
+
+
+def _load_campaign(spec_path: Path):  # type: ignore[no-untyped-def]
+    from mamut_routing_tools.bks_campaign import load_spec
+
+    try:
+        return load_spec(spec_path)
+    except (OSError, ValueError) as error:
+        typer.echo(f"Error: {spec_path}: {error}", err=True)
+        raise typer.Exit(code=2) from error
+
+
+def _campaign_plan(spec, spec_path: Path, *, only: str | None, retry_failed: bool = False):  # type: ignore[no-untyped-def]
+    """``build_plan`` with spec mistakes it can only see now (unknown solver, bad --only) as usage errors."""
+    import re
+
+    from mamut_routing_tools.bks_campaign import build_plan
+
+    if only is not None:
+        try:
+            re.compile(only)
+        except re.error as error:
+            raise typer.BadParameter(f"not a regular expression ({error})", param_hint="--only") from error
+    try:
+        return build_plan(spec, only=only, retry_failed=retry_failed)
+    except ValueError as error:  # UnknownSolverError, SolverConfigError, a warm start the solver refuses
+        typer.echo(f"Error: {spec_path}: {error}", err=True)
+        raise typer.Exit(code=2) from error
+
+
+@bks_campaign_app.command("plan")
+def bks_campaign_plan(
+    spec_path: Annotated[Path, _SPEC_ARG],
+    only: Annotated[Optional[str], _ONLY_OPT] = None,
+    retry_failed: Annotated[bool, typer.Option("--retry-failed", help="Count failed / timed-out runs as to do.")] = False,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Dry run: what `run` would do -- runs to do and done, core-hours, makespan, memory, refusals."""
+    spec = _load_campaign(spec_path)
+    plan = _campaign_plan(spec, spec_path, only=only, retry_failed=retry_failed)
+    summary = plan.summary(spec.resources.workers)
+    summary["unsupported_examples"] = [list(item) for item in plan.unsupported[:10]]
+    if as_json:
+        typer.echo(json.dumps(summary, indent=1))
+        return
+    typer.echo(f"campaign {spec.campaign.name} -> {spec.out}")
+    typer.echo(f"to do {summary['todo']} ({', '.join(f'{k} {v}' for k, v in summary['per_kind'].items()) or 'nothing'}), done {summary['done']}")
+    typer.echo(f"core-hours {summary['core_hours']}, makespan >= {summary['makespan_lower_bound_h']} h on {spec.resources.workers} workers, worst-case memory {summary['worst_case_memory_gb']} GB")
+    for solver, reason in plan.unavailable.items():
+        typer.secho(f"unavailable: {solver}: {reason}", fg=typer.colors.YELLOW, err=True)
+    for instance_id, solver, reason in plan.unsupported[:10]:
+        typer.secho(f"unsupported: {instance_id} / {solver}: {reason}", fg=typer.colors.YELLOW, err=True)
+    if len(plan.unsupported) > 10:
+        typer.secho(f"... and {len(plan.unsupported) - 10} more unsupported pairs", fg=typer.colors.YELLOW, err=True)
+
+
+@bks_campaign_app.command("baseline")
+def bks_campaign_baseline(
+    spec_path: Annotated[Path, _SPEC_ARG],
+    force: Annotated[bool, typer.Option("--force", help="Replace an existing baseline.")] = False,
+) -> None:
+    """Freeze the stored BKS of the selected instances (baseline.csv) before the campaign runs."""
+    from mamut_routing_tools.bks_campaign import write_baseline
+
+    spec = _load_campaign(spec_path)
+    try:
+        path = write_baseline(spec, force=force)
+    except FileExistsError as error:
+        typer.echo(f"Error: {error}", err=True)
+        raise typer.Exit(code=1) from error
+    typer.echo(f"baseline written: {path}")
+
+
+@bks_campaign_app.command("run")
+def bks_campaign_run(
+    spec_path: Annotated[Path, _SPEC_ARG],
+    only: Annotated[Optional[str], _ONLY_OPT] = None,
+    workers: Annotated[Optional[int], typer.Option("--workers", min=1, help="Override resources.workers.")] = None,
+    memory_gb: Annotated[Optional[float], typer.Option("--memory-gb", help="Override resources.memory_gb.")] = None,
+    retry_failed: Annotated[bool, typer.Option("--retry-failed", help="Re-run failed / timed-out runs.")] = False,
+    max_tasks: Annotated[Optional[int], typer.Option("--max-tasks", min=1, help="Stop after starting this many runs.")] = None,
+) -> None:
+    """Run the campaign's remaining runs (resumable). Workers never write BKS; `harvest` does.
+
+    First Ctrl-C: no new run starts and the running ones finish. Second: abort
+    (solvers are killed with their process groups). Interrupted runs leave no
+    record and are picked up by the next `run`. A worker that dies (out of
+    memory) gets a failed record (`--retry-failed` runs it again); the
+    other runs carry on.
+    """
+    from mamut_routing_tools.bks_campaign import memory_budget_gb, read_baseline, run_tasks
+
+    spec = _load_campaign(spec_path)
+    plan = _campaign_plan(spec, spec_path, only=only, retry_failed=retry_failed)
+    for solver, reason in plan.unavailable.items():
+        typer.secho(f"unavailable: {solver}: {reason}", fg=typer.colors.YELLOW, err=True)
+    if not read_baseline(spec.out):
+        typer.secho("Warning: no baseline.csv yet -- run `bks-campaign baseline` first to measure gains.", fg=typer.colors.YELLOW, err=True)
+    resolved_workers = workers or spec.resources.workers
+    budget = memory_gb if memory_gb is not None else memory_budget_gb(spec.resources.memory_gb)
+    typer.echo(f"{len(plan.tasks)} run(s) to do, {len(plan.done)} done; {resolved_workers} workers, {budget:.1f} GB memory budget")
+    if not plan.tasks:
+        return
+    summary = run_tasks(
+        plan,
+        out=spec.out,
+        workers=resolved_workers,
+        memory_gb=budget,
+        progress=lambda line: typer.echo(line, err=True),
+        max_tasks=max_tasks,
+    )
+    typer.echo(json.dumps(summary, indent=1))
+    if summary["aborted"]:
+        raise typer.Exit(code=130)
+
+
+@bks_campaign_app.command("harvest")
+def bks_campaign_harvest(
+    spec_path: Annotated[Path, _SPEC_ARG],
+    offer_all: Annotated[bool, typer.Option("--offer-all", help="Offer every instance's best run, even below the baseline.")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Report what the store would do without writing.")] = False,
+    workers: Annotated[int, typer.Option("--workers", min=1, help="Parallel instances (one process each).")] = 1,
+) -> None:
+    """Write improved BKS: each instance's best valid run, unless clearly worse than the baseline (the only writer)."""
+    from mamut_routing_tools.bks_campaign import harvest
+
+    spec = _load_campaign(spec_path)
+    results = harvest(spec, offer_all=offer_all, dry_run=dry_run, workers=workers)
+    counts: dict[str, int] = {}
+    for item in results:
+        counts[item["action"]] = counts.get(item["action"], 0) + 1
+    typer.echo(json.dumps({"counts": counts, "results": results}, indent=1, default=str))
+
+
+@bks_campaign_app.command("report")
+def bks_campaign_report(spec_path: Annotated[Path, _SPEC_ARG]) -> None:
+    """Write ledger.csv (one row per run) and cross-solver.csv (best per kind, gaps, seed spread)."""
+    from mamut_routing_tools.bks_campaign import write_reports
+
+    spec = _load_campaign(spec_path)
+    ledger, compare = write_reports(spec)
+    typer.echo(f"{ledger}\n{compare}")
+
+
+@bks_campaign_app.command("status")
+def bks_campaign_status(spec_path: Annotated[Path, _SPEC_ARG]) -> None:
+    """Runs archived so far, by status, and the last `run` summary."""
+    from mamut_routing_tools.bks_campaign import campaign_status
+
+    typer.echo(json.dumps(campaign_status(_load_campaign(spec_path)), indent=1))
 
 
 if __name__ == "__main__":  # pragma: no cover

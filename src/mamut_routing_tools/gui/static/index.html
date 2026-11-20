@@ -34,7 +34,7 @@
   } catch (error) { /* layout.js missing or storage blocked — CSS defaults stand */ }
 })();
 </script>
-<link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="/static/vendor/maplibre-gl/maplibre-gl.css">
 <link rel="stylesheet" href="/static/nocturne-tokens.css">
 <link rel="stylesheet" href="/static/workbench.css">
 </head>
@@ -398,7 +398,10 @@
       </div>
     </details>
     <div class="fading-rule" style="margin:8px 0"></div>
-    <div class="kicker">Routes · eye to show/hide · row to focus</div>
+    <div class="legend-head">
+      <div class="kicker">Routes · eye to show/hide · row to focus</div>
+      <button id="animate-routes" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden>Animate</button>
+    </div>
     <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
   </section>
 
@@ -416,8 +419,13 @@
         <dt>Euclidean</dt><dd>Arc costs are straight-line distances, ignoring the road network.</dd>
         <dt>MonoCost</dt><dd>Minimise total routing cost.</dd>
         <dt>Hierarchical</dt><dd>Minimise the fleet size first, then the routing cost.</dd>
+        <dt>Solver</dt><dd>PyVRP runs in the workbench; external solvers (FILO2, HGS-CVRP, AILS-II, LKH-3, your own)
+          appear once configured in the solvers config (see <code>mamut-routing solvers list</code>). Every result is
+          checked by the reference checker before it is stored.</dd>
       </dl>
     </div>
+    <label class="field"><span>Solver</span><select id="solve-solver"><option value="pyvrp">PyVRP</option></select></label>
+    <div id="solve-solver-note" class="validation-line" hidden></div>
     <div class="grid-2">
       <label class="field"><span>Metric</span><select id="solve-metric"><option value="fastest">Fastest</option><option value="shortest">Shortest</option><option value="euclidean">Euclidean</option></select></label>
       <label class="field"><span>Objective</span><select id="solve-objective"><option value="MonoCost">MonoCost</option><option value="HierarchicalVehicleCost">Hierarchical vehicle cost</option></select></label>
@@ -427,6 +435,7 @@
     <div class="row">
       <button id="solve" class="btn" type="button">Queue solve</button>
       <button id="import-open" class="btn btn-secondary" type="button">Import solution…</button>
+      <button id="solve-animate" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden title="Play the displayed run's vehicles over time">Animate</button>
     </div>
     <div id="import-panel" class="option-group" hidden>
       <label class="field"><span>Solution file (.sol or .json)</span><input id="import-file" type="file" accept=".sol,.txt,.json"></label>
@@ -450,6 +459,7 @@
     <div class="run-controls">
       <label class="field"><span>Displayed run</span><select id="solution-run"><option value="">Instance only · customer locations</option></select></label>
       <div id="solution-validation" class="validation-line">Solve this instance to create a validated run.</div>
+      <button id="runs-animate" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden title="Play the displayed run's vehicles over time">Animate</button>
       <label class="field"><span>Compare displayed run against</span><select id="comparison-run"><option value="">Select a reference run</option></select></label>
       <button id="compare" class="btn btn-secondary" type="button" disabled>Compare runs</button>
       <pre id="comparison-output" class="mono-output" hidden></pre>
@@ -618,10 +628,13 @@
     </div>
   </div>
 </section>
+<div id="tripsBar" class="trips-bar-host" hidden></div>
 <button id="clear" class="map-clear-btn" type="button">Clear map</button>
 
 <script src="/static/nocturne.js"></script>
-<script src="/static/vendor/leaflet/leaflet.js"></script>
+<script src="/static/vendor/maplibre-gl/maplibre-gl.js"></script>
+<script src="/static/mamut-map.js"></script>
+<script src="/static/mamut-trips.js"></script>
 <script src="/static/workbench.js"></script>
 </body>
 </html>

@@ -51,50 +51,165 @@ html, body {
 
 #map { position: fixed; inset: 0; background: var(--svg); }
 
-/* ── Leaflet chrome, retuned to the Nocturne surface ── */
-.leaflet-control-attribution {
-  background: var(--panel) !important;
-  color: var(--mut) !important;
-  font-size: 10px !important;
-}
-.leaflet-control-attribution a { color: var(--mut) !important; }
-.leaflet-container { font-family: "Inter", system-ui, sans-serif !important; }
-
-.leaflet-control-zoom a,
-.leaflet-control-layers,
-.leaflet-control-scale-line {
-  background: var(--panel) !important;
-  color: var(--ink) !important;
-  border: none !important;
-  box-shadow: 0 0 0 1px var(--div) !important;
+/* ── MapLibre chrome, retuned to the Nocturne surface ── */
+.maplibregl-map { font-family: "Inter", system-ui, sans-serif; }
+.maplibregl-ctrl-group,
+.mamut-basemap-control,
+.maplibregl-ctrl-scale {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--div);
   backdrop-filter: blur(8px);
 }
-.leaflet-control-zoom a:hover { color: var(--acc) !important; }
-.leaflet-control-scale-line {
-  padding: 1px 6px !important;
-  font-size: 10px !important;
-  line-height: 1.5 !important;
+.maplibregl-ctrl-group button + button { border-top-color: var(--div); }
+.maplibregl-ctrl-group button:not(:disabled):hover {
+  background-color: color-mix(in srgb, var(--acc) 14%, var(--panel));
 }
-.leaflet-control-layers-expanded {
-  padding: 8px 10px !important;
-  font-size: 11.5px !important;
-  color: var(--ink) !important;
+/* The control icons are dark SVG backgrounds; invert them on the dark surface. */
+[data-theme="dark"] .maplibregl-ctrl-group button .maplibregl-ctrl-icon,
+[data-theme="dark"] .maplibregl-ctrl-attrib-button { filter: invert(1) hue-rotate(180deg); }
+.maplibregl-ctrl-scale {
+  border: none;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 1.5;
 }
-.leaflet-control-layers-selector { accent-color: var(--acc); }
+.mamut-basemap-control label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 8px;
+  font-size: 11.5px;
+}
+.mamut-basemap-caption { color: var(--mut); }
+.mamut-basemap-control select {
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--div);
+  border-radius: 4px;
+  font: inherit;
+  padding: 2px 4px;
+  accent-color: var(--acc);
+}
+.maplibregl-ctrl-attrib,
+.maplibregl-ctrl-attrib.maplibregl-compact {
+  background: var(--panel);
+  color: var(--mut);
+  font-size: 10px;
+}
+.maplibregl-ctrl-attrib a { color: var(--mut); }
+.maplibregl-popup-content {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--edge, var(--div)), var(--shadow, none);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.maplibregl-popup-anchor-top .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-top-right .maplibregl-popup-tip { border-bottom-color: var(--panel); }
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-left .maplibregl-popup-tip,
+.maplibregl-popup-anchor-bottom-right .maplibregl-popup-tip { border-top-color: var(--panel); }
+.maplibregl-popup-anchor-left .maplibregl-popup-tip { border-right-color: var(--panel); }
+.maplibregl-popup-anchor-right .maplibregl-popup-tip { border-left-color: var(--panel); }
+.map-unavailable {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 360px;
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--mut);
+  box-shadow: 0 0 0 1px var(--div);
+  text-align: center;
+}
 
-/* Keep the Leaflet controls clear of the floating panels. The 10px correction is
-   Leaflet's own control margin. */
-.leaflet-top.leaflet-left {
-  left: calc(var(--wb-panel-inset) + var(--wb-left-panel-width) + var(--wb-panel-gap) - 10px);
+/* Keep the map controls clear of the floating panels. Only the controls move, never
+   the corner containers: the top-left corner also hosts the route-animation canvas,
+   which must stay aligned with the map. */
+.maplibregl-ctrl-top-left .maplibregl-ctrl {
+  margin-left: calc(var(--wb-panel-inset) + var(--wb-left-panel-width) + var(--wb-panel-gap));
 }
-.leaflet-top.leaflet-right {
-  right: calc(var(--wb-panel-inset) + var(--wb-right-panel-width) + var(--wb-panel-gap) - 10px);
+.maplibregl-ctrl-top-right .maplibregl-ctrl {
+  margin-right: calc(var(--wb-panel-inset) + var(--wb-right-panel-width) + var(--wb-panel-gap));
 }
 /* The activity strip now sits inside the left panel's column rather than spanning the
    bottom of the map, so the scale control keeps its own corner. */
-.leaflet-bottom.leaflet-left {
-  left: calc(var(--wb-panel-inset) + var(--wb-left-panel-width) + var(--wb-panel-gap) - 10px);
+.maplibregl-ctrl-bottom-left .maplibregl-ctrl {
+  margin-left: calc(var(--wb-panel-inset) + var(--wb-left-panel-width) + var(--wb-panel-gap));
 }
+
+/* ── Route animation (mamut-trips.js) ── */
+.legend-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.animate-btn {
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--acc);
+  background: transparent;
+  border: 1px solid var(--edge, var(--div));
+  border-radius: 6px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.animate-btn[aria-pressed="true"] { background: color-mix(in srgb, var(--acc) 14%, transparent); }
+.animate-btn:disabled { opacity: 0.6; cursor: progress; }
+.trips-bar-host {
+  position: fixed;
+  left: calc(var(--wb-panel-inset) + var(--wb-left-panel-width) + var(--wb-panel-gap));
+  right: calc(var(--wb-panel-inset) + var(--wb-right-panel-width) + var(--wb-panel-gap));
+  bottom: 40px;
+  z-index: 550;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+.trips-bar-host[hidden] { display: none; }
+.trips-bar,
+.trips-bar-host > .trips-note {
+  pointer-events: auto;
+  max-width: 760px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--div);
+  backdrop-filter: blur(8px);
+}
+.trips-controls { display: flex; align-items: center; gap: 10px; }
+.trips-controls button,
+.trips-controls select {
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--div);
+  border-radius: 6px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.trips-play { min-width: 58px; color: var(--acc) !important; }
+.trips-speed { display: flex; align-items: center; gap: 5px; }
+/* Only the scrubber stretches; the other controls keep their natural width. */
+.trips-controls > :not(.trips-scrub) { flex: none; }
+.trips-speed select { min-width: 70px; }
+.trips-caption, .trips-served, .trips-note { color: var(--mut); font-size: 11px; }
+.trips-scrub { flex: 1 1 auto; min-width: 80px; accent-color: var(--acc); }
+.trips-clock { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; }
+.trips-served { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.trips-close { padding: 1px 8px !important; }
+.trips-note { margin: 6px 0 0; }
 
 /* ── Floating panels ── */
 .panel {
@@ -946,8 +1061,6 @@ details.poi-menu > summary {
   cursor: pointer;
   font-size: 12px;
 }
-.depot-star-marker { background: none; border: none; line-height: 0; }
-.arrow-marker { background: none; border: none; pointer-events: none; }
 
 .fading-rule {
   height: 1px;
@@ -1124,13 +1237,6 @@ details.poi-menu > summary {
 .map-clear-btn:hover { color: var(--cor); box-shadow: 0 0 0 1px var(--cor); }
 
 /* ── Map POI picker ── */
-.poi-marker {
-  border-radius: 50%;
-  border: 2px solid var(--svg);
-  box-sizing: content-box;
-  cursor: pointer;
-}
-.poi-marker.picked { box-shadow: 0 0 0 3px var(--acc); }
 .poi-pick-summary { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
 .poi-pick-summary .count { font-size: 17px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .picked-list {
@@ -1175,9 +1281,9 @@ details.poi-menu > summary {
   /* Pin back to the pre-P1 width: a collapsed width persisted from a wide window
      must not leave a 44px sliver here, where the rail is switched off. */
   .panel-left { width: 300px; }
-  .leaflet-top.leaflet-left,
-  .leaflet-bottom.leaflet-left { left: calc(300px + var(--wb-panel-inset) + var(--wb-panel-gap) - 10px); }
-  .leaflet-top.leaflet-right { right: 0; }
+  .maplibregl-ctrl-top-left .maplibregl-ctrl,
+  .maplibregl-ctrl-bottom-left .maplibregl-ctrl { margin-left: calc(300px + var(--wb-panel-inset) + var(--wb-panel-gap)); }
+  .maplibregl-ctrl-top-right .maplibregl-ctrl { margin-right: 10px; }
 
   .panel-right {
     top: auto;

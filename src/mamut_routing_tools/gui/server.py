@@ -9,11 +9,14 @@ executes jobs and writes files.
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
 import re
+import threading
 import zipfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -32,8 +35,7 @@ from mamut_routing_tools.gui.solutions import (
     compare_solution_records,
     file_sha256,
     instance_id_for,
-    normalize_imported_routes,
-    parse_solution_text,
+    read_imported_solution,
     validate_solution,
 )
 from mamut_routing_tools.workspace import instances_dir, osmdata_dir
@@ -616,6 +618,13 @@ def create_app(workspace: Path, token: str) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):  # type: ignore[no-untyped-def]
         yield
+        # Running solves stop at their next observation; external solvers run in their own
+        # process group and would outlive the server, so their groups are killed outright.
+        for job_id in jobs.active_ids():
+            jobs.cancel(job_id)
+        from mamut_routing_lib.solvers.external.process import terminate_all
+
+        terminate_all()
         jobs.shutdown()
 
     app = FastAPI(
@@ -956,8 +965,39 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         return jobs.submit(submission.kind, payload, runner)
 
     @app.post("/api/jobs")
-    async def create_job(submission: JobSubmission) -> dict[str, Any]:
+    async def create_job(submission: JobSubmission) -> Any:
+        if submission.kind == "solve":
+            from mamut_routing_lib.solvers import UnknownSolverError, get_solver
+            from mamut_routing_lib.solvers.external.config import SolverConfigError
+
+            name = str(submission.payload.get("solver") or "pyvrp")
+            try:
+                solver = get_solver(name)
+            except UnknownSolverError as error:
+                return _payload_error(400, str(error))
+            except SolverConfigError as error:
+                return _payload_error(400, f"solvers config: {error}")
+            availability = solver.availability()
+            if not availability.available:
+                return _payload_error(400, f"Solver {name} is not available: {availability.describe()}")
+            refusal = await asyncio.to_thread(_solve_refusal, workspace, solver, submission.payload)
+            if refusal:
+                return _payload_error(400, refusal)
         return {"ok": True, "job": submit_job(submission)}
+
+    @app.get("/api/solvers")
+    def list_registered_solvers(instance_id: str = "", metric: str = "fastest", objective_function: str = "") -> Any:
+        """Every registered solver, available or not, and whether it can solve the selected variant.
+
+        A plain ``def``: FastAPI runs it in a worker thread, because profiling a large matrix
+        (the symmetry check) would otherwise stall the event loop.
+        """
+        try:
+            return _solvers_payload(workspace, instance_id, metric, objective_function)
+        except KeyError:
+            return _payload_error(404, "Unknown workspace instance")
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
 
     @app.get("/api/jobs")
     async def list_jobs(limit: int = 50) -> dict[str, Any]:
@@ -1020,7 +1060,7 @@ def create_app(workspace: Path, token: str) -> FastAPI:
                 return _payload_error(409, _stale_message(stale))
             instance_path = Path(str(candidate.get("instance_path") or reference.get("instance_path") or ""))
             from mamut_routing_lib.artifacts import load_benchmark_instance
-            from mamut_routing_lib.solvers.pyvrp import hydrate_collection_instance
+            from mamut_routing_lib.artifacts import hydrate_collection_instance
 
             instance = load_benchmark_instance(instance_path)
             checkable = hydrate_collection_instance(instance, instance_path)
@@ -1046,6 +1086,25 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             return _render_routes_payload(
                 {"meta": meta, "routes": solution["routes"], "metric": metric}, workspace
             )
+        except KeyError:
+            return _payload_error(404, "Unknown instance or solution run")
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
+
+    @app.get("/api/instances/{instance_id}/solutions/{run_id}/timeline")
+    async def solution_run_timeline(instance_id: str, run_id: str) -> Any:
+        """Per-stop times of a run for the route animation, clocked by the
+        instance's free-flow ``fastest`` arc costs (seconds) whatever metric the
+        run was solved on: the only travel time the instance defines. When those
+        times cannot clock the run (no ``fastest`` variant, a window missed under
+        them) the answer has no routes and says why: the animation then runs at
+        constant speed, as on the website."""
+        try:
+            record = _workspace_instance(workspace, instance_id)
+            solution = _solution_or_reference(solutions, record, instance_id, run_id)
+            if solution.get("stale"):
+                return _payload_error(409, _stale_message(solution))
+            return await run_in_threadpool(_timeline_payload, record, solution)
         except KeyError:
             return _payload_error(404, "Unknown instance or solution run")
         except Exception as error:  # noqa: BLE001
@@ -1152,8 +1211,7 @@ def _import_solution_payload(
     objective = ObjectiveFunction(str(payload.get("objective_function") or "MonoCost"))
     instance = load_benchmark_instance(instance_path)
 
-    routes, declared_cost = parse_solution_text(text, filename=filename)
-    normalized = normalize_imported_routes(routes, int(instance.num_customers))
+    normalized, declared_cost, solution_format = read_imported_solution(text, instance, filename=filename)
     validation = validate_solution(instance, normalized, instance_path=instance_path)
     if not validation.get("valid"):
         raise SolutionImportError(
@@ -1187,7 +1245,7 @@ def _import_solution_payload(
         time_limit_s=0,
         wall_time_s=0.0,
         validation=validation,
-        metadata={"metric": metric, "imported_from": filename or "pasted", "label": label},
+        metadata={"metric": metric, "imported_from": filename or "pasted", "label": label, "format": solution_format},
         source="imported",
         instance_sha256=instance_sha256,
     )
@@ -1201,53 +1259,108 @@ def _import_solution_payload(
     }
 
 
+def _validation_report(solved: Any) -> dict[str, Any]:
+    if solved.check is None:
+        return {
+            "valid": False,
+            "status": "no_solution",
+            "routing_cost": None,
+            "num_routes": 0,
+            "error_message": solved.result.error or "the solver returned no routes",
+        }
+    return {"valid": solved.valid, **solved.check.model_dump(mode="json")}
+
+
 def _solve_payload(
     payload: dict[str, Any],
     *,
     instance_path: Path | None = None,
     monitor: Any | None = None,
 ) -> dict[str, Any]:
-    """Solve and canonically validate a static CVRP/VRPTW instance.
+    """Solve and canonically validate an instance.
 
-    The compatibility endpoint still accepts inline TSPLIB/JSON.  Persistent
-    jobs pass ``instance_path`` so collection sidecars and provenance remain
-    available to the solver and checker, and a ``SolveMonitor`` so the search
-    reports itself while it runs.
+    Persistent jobs pass ``instance_path``: the payload's ``solver`` (default
+    ``pyvrp``) runs through the lib's ``run_solver``, so collection sidecars and
+    provenance are available and the checker prices the routes; the
+    ``SolveMonitor`` reports progress and carries cancellation (it kills an
+    external solver's process group). The compatibility endpoint still accepts
+    inline TSPLIB/JSON, PyVRP only.
     """
     import tempfile
 
     from mamut_routing_lib.artifacts import load_benchmark_instance
     from mamut_routing_lib.enums import ObjectiveFunction
-    from mamut_routing_lib.solvers.pyvrp import solve_instance
 
     time_limit = float(payload.get("time_limit") or 30.0)
     if not (time_limit > 0):
         raise ValueError("'time_limit' must be a positive number")
     seed = int(payload.get("seed") if payload.get("seed") is not None else 0)
     objective = ObjectiveFunction(str(payload.get("objective_function") or "MonoCost"))
+    solver_name = str(payload.get("solver") or "pyvrp")
+
+    if instance_path is not None:
+        from mamut_routing_lib.solvers import run_solver
+
+        from mamut_routing_lib.artifacts import instance_problem_type
+        from mamut_routing_lib.enums import ProblemType
+
+        instance = load_benchmark_instance(instance_path)
+        if instance_problem_type(instance) is ProblemType.CVRP:
+            objective = ObjectiveFunction.MONO_COST  # CVRP has one objective (the workbench has always forced it)
+        solved = run_solver(
+            solver_name,
+            instance_path,
+            time_limit_s=max(1, int(time_limit)),
+            seed=seed,
+            objective_function=objective,
+            instance=instance,
+            monitor=monitor,
+        )
+        result = solved.result
+        return {
+            "ok": bool(solved.valid and result.status in ("feasible", "timeout")),
+            "solver": result.solver,
+            "status": result.status,
+            "error": result.error,
+            "cost": solved.cost if solved.cost is not None else result.solver_cost,
+            "solver_cost": result.solver_cost,
+            "time": round(result.wall_time, 3),
+            "routes": result.routes,
+            "n_routes": len(result.routes),
+            "dimension": instance.num_customers + 1,
+            "capacity": instance.vehicle_capacity,
+            "input_source": "workspace",
+            "method": result.method,
+            "objective_function": solved.objective.value,
+            "seed": result.seed,
+            "time_limit_s": int(result.time_limit_s),
+            "validation": _validation_report(solved),
+            "metadata": result.metadata,
+            "provenance": result.provenance,
+            "warnings": list(solved.support_warnings),
+        }
+
+    if solver_name != "pyvrp":
+        raise ValueError("Inline instances are solved with PyVRP only; queue a solve job for other solvers")
+    from mamut_routing_lib.solvers.pyvrp import solve_instance
 
     temporary_path: Path | None = None
     try:
-        if instance_path is not None:
-            input_source = "workspace"
-            instance_file = instance_path
+        vrp_json = payload.get("vrp_json")
+        vrp_text = payload.get("vrp_text")
+        if vrp_json is not None:
+            input_source = "vrp_json"
+            with tempfile.NamedTemporaryFile("w", suffix=".vrp.json", delete=False) as handle:
+                json.dump(vrp_json, handle)
+                temporary_path = Path(handle.name)
+            instance_file = temporary_path
             instance = load_benchmark_instance(instance_file)
+        elif vrp_text:
+            input_source = "vrp_text"
+            instance_file = Path("uploaded.vrp.json")
+            instance = _instance_from_vrp_text(str(vrp_text))
         else:
-            vrp_json = payload.get("vrp_json")
-            vrp_text = payload.get("vrp_text")
-            if vrp_json is not None:
-                input_source = "vrp_json"
-                with tempfile.NamedTemporaryFile("w", suffix=".vrp.json", delete=False) as handle:
-                    json.dump(vrp_json, handle)
-                    temporary_path = Path(handle.name)
-                instance_file = temporary_path
-                instance = load_benchmark_instance(instance_file)
-            elif vrp_text:
-                input_source = "vrp_text"
-                instance_file = Path("uploaded.vrp.json")
-                instance = _instance_from_vrp_text(str(vrp_text))
-            else:
-                raise ValueError("Missing required 'vrp_text' or 'vrp_json' field")
+            raise ValueError("Missing required 'vrp_text' or 'vrp_json' field")
 
         result = solve_instance(
             instance,
@@ -1261,6 +1374,7 @@ def _solve_payload(
         canonical_cost = validation.get("routing_cost")
         return {
             "ok": bool(result.solver_is_feasible and validation["valid"]),
+            "solver": "pyvrp",
             "cost": canonical_cost if canonical_cost is not None else result.solver_cost,
             "solver_cost": result.solver_cost,
             "time": round(result.wall_time, 3),
@@ -1296,14 +1410,16 @@ def _solve_monitor(context: JobContext, *, budget_s: int) -> Any:
     phase changes, so a ten-minute solve leaves a convergence trace rather than 600 heartbeats
     (the log endpoint returns the whole file on every poll).
     """
-    from mamut_routing_lib.solvers.pyvrp import SolveMonitor, SolveTick
+    from mamut_routing_lib.solvers import SolveMonitor, SolveTick
 
     seen: dict[str, Any] = {"phase": None, "best": None, "logged_at": -_SOLVE_LOG_HEARTBEAT_S}
 
     def on_tick(tick: SolveTick) -> bool:
         best = "no feasible solution yet" if tick.best_cost is None else f"best {tick.best_cost:,.0f}"
+        # External solvers report elapsed time (and an incumbent when they print one), not iterations.
+        work = f"{tick.iterations:,} iters" if tick.iterations is not None else f"t={tick.elapsed_s:.0f}s"
         context.progress(
-            f"{tick.phase} · {tick.iterations:,} iters · {best}",
+            f"{tick.phase} · {work} · {best}",
             current=min(int(tick.elapsed_s), budget_s),
             total=budget_s,
             unit="s",
@@ -1313,14 +1429,17 @@ def _solve_monitor(context: JobContext, *, budget_s: int) -> Any:
         # for a ten-minute run, which reads as a dead job rather than a converged one.
         heartbeat = tick.elapsed_s - seen["logged_at"] >= _SOLVE_LOG_HEARTBEAT_S
         if improved or heartbeat or tick.phase != seen["phase"]:
-            context.log(f"{tick.phase} · iter {tick.iterations:,} · t={tick.elapsed_s:.0f}s · {best}")
+            iteration = f" · iter {tick.iterations:,}" if tick.iterations is not None else ""
+            context.log(f"{tick.phase}{iteration} · t={tick.elapsed_s:.0f}s · {best}")
             seen["phase"] = tick.phase
             seen["logged_at"] = tick.elapsed_s
             if improved:
                 seen["best"] = tick.best_cost
         return context.cancelled
 
-    return SolveMonitor(on_tick)
+    # The cancel flag is also polled between the solver's own steps (an external solver checks it
+    # before and after writing a large input), not only when a tick is due.
+    return SolveMonitor(on_tick, cancelled=lambda: context.cancelled)
 
 
 def _solve_workspace_payload(
@@ -1346,6 +1465,10 @@ def _solve_workspace_payload(
         # The monitor stops the search by returning True rather than raising, so the
         # cancellation surfaces here — before anything is written to the solution store.
         context.check_cancelled()
+    if not result["routes"]:
+        reason = result.get("error") or result["validation"].get("error_message") or "no routes"
+        raise ValueError(f"{result['solver']} returned no solution ({result.get('status')}): {reason}")
+    if context is not None:
         context.progress("Persisting validated solution")
     solution = store.record(
         instance_id=instance_id,
@@ -1354,17 +1477,140 @@ def _solve_workspace_payload(
         routes=result["routes"],
         cost=result["cost"],
         objective_function=str(result["objective_function"]),
-        solver="pyvrp",
+        solver=str(result.get("solver") or "pyvrp"),
         method=str(result["method"]),
         seed=int(result["seed"]),
         time_limit_s=int(result["time_limit_s"]),
         wall_time_s=float(result["time"]),
         validation=result["validation"],
-        metadata={**(result.get("metadata") or {}), "metric": metric},
+        metadata={
+            **(result.get("metadata") or {}),
+            "metric": metric,
+            "status": result.get("status"),
+            "provenance": result.get("provenance") or {},
+        },
         job_id=context.job_id if context is not None else None,
         instance_sha256=instance_sha256,
     )
     return {**result, "instance_id": instance_id, "metric": metric, "solution": solution}
+
+
+#: (instance path, sha256) -> (profile, instance), newest last; bounded, shared by the request threads.
+_PROFILE_CACHE: "OrderedDict[tuple[str, int, int], Any]" = OrderedDict()
+_PROFILE_CACHE_SIZE = 16
+_PROFILE_LOCK = threading.Lock()
+
+
+def _cached_profile(instance_path: Path) -> tuple[Any, Any]:
+    """(solver-support profile, default objective) of an instance file.
+
+    Only these few facts are kept, never the instance: a workspace instance embeds its full
+    matrix (tens of megabytes at n = 1000), and sixteen of them would stay in memory for a
+    select that is refreshed on every instance or metric change. The key is the file's stat,
+    so a lookup does not read (and hash) the file either.
+    """
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.objectives import default_objective
+    from mamut_routing_lib.solvers import profile_instance
+
+    stat = instance_path.stat()
+    key = (str(instance_path), stat.st_mtime_ns, stat.st_size)
+    with _PROFILE_LOCK:
+        if key in _PROFILE_CACHE:
+            _PROFILE_CACHE.move_to_end(key)
+            return _PROFILE_CACHE[key]
+    instance = load_benchmark_instance(instance_path)
+    entry = (profile_instance(instance, instance_path), default_objective(instance))
+    with _PROFILE_LOCK:
+        _PROFILE_CACHE[key] = entry
+        while len(_PROFILE_CACHE) > _PROFILE_CACHE_SIZE:
+            _PROFILE_CACHE.popitem(last=False)
+    return entry
+
+
+def _solve_refusal(workspace: Path, solver: Any, payload: dict[str, Any]) -> str | None:
+    """Why ``solver`` cannot take the job's instance variant (checked at submit), or ``None``.
+
+    Same reading as the job: the selected metric's file, MonoCost on CVRP whatever the select says.
+    """
+    from mamut_routing_lib.enums import ObjectiveFunction, ProblemType
+
+    instance_id = str(payload.get("instance_id") or "")
+    if not instance_id:
+        return None  # the job reports it
+    try:
+        record = _workspace_instance(workspace, instance_id)
+        instance_path = _instance_variant_path(record, str(payload.get("metric") or "fastest").lower())
+        profile, default = _cached_profile(instance_path)
+    except Exception:  # noqa: BLE001 - an unknown or unreadable instance fails in the job, with its own message
+        return None
+    try:
+        raw = payload.get("objective_function")
+        objective = ObjectiveFunction(str(raw)) if raw else default
+    except ValueError:
+        return None
+    if profile.problem_type is ProblemType.CVRP:
+        objective = ObjectiveFunction.MONO_COST
+    support = solver.supports(profile, objective)
+    if support.supported:
+        return None
+    return f"{solver.label} cannot solve this variant: " + "; ".join(support.reasons)
+
+
+def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_function: str) -> dict[str, Any]:
+    """Registered solvers with availability, and per-solver support for one instance variant."""
+    from mamut_routing_lib.enums import ObjectiveFunction, ProblemType
+    from mamut_routing_lib.solvers import BUILTIN_SOLVERS, list_solvers
+    from mamut_routing_lib.solvers.external.config import SolverConfigError, resolve_config_path
+
+    BUILTIN_ORDER = {name: index for index, name in enumerate(BUILTIN_SOLVERS)}
+
+    profile = None
+    objective = None
+    if instance_id:
+        record = _workspace_instance(workspace, instance_id)
+        instance_path = _instance_variant_path(record, str(metric or "fastest").lower())
+        profile, default = _cached_profile(instance_path)
+        objective = ObjectiveFunction(objective_function) if objective_function else default
+        if profile.problem_type is ProblemType.CVRP:
+            objective = ObjectiveFunction.MONO_COST  # what the solve job runs on CVRP, whatever the select says
+    rows = []
+    try:
+        solvers = list_solvers()
+        config_error = None
+    except SolverConfigError as error:
+        # A broken solvers.toml blocks the external solvers only: PyVRP and KAYROS never read it.
+        from mamut_routing_lib.solvers import IN_PROCESS_SOLVERS, get_solver
+
+        config_error = f"solvers config: {error}"
+        solvers = [get_solver(name) for name in IN_PROCESS_SOLVERS]
+        for name in BUILTIN_SOLVERS:
+            if name not in IN_PROCESS_SOLVERS:
+                rows.append({"name": name, "label": name, "available": False, "reason": config_error, "hint": None,
+                             "version": None, "capabilities": None, "source": None})
+    for solver in solvers:
+        availability = solver.availability()
+        row: dict[str, Any] = {
+            "name": solver.name,
+            "label": solver.label,
+            "available": availability.available,
+            "reason": availability.reason,
+            "hint": availability.hint,
+            "note": availability.note,
+            "version": availability.version,
+            "capabilities": solver.capabilities.to_json(),
+            "source": getattr(getattr(solver, "descriptor", None), "source", "builtin"),
+        }
+        if profile is not None and objective is not None:
+            support = solver.supports(profile, objective)
+            row.update(supported=support.supported, reasons=list(support.reasons), warnings=list(support.warnings))
+        rows.append(row)
+    rows.sort(key=lambda row: BUILTIN_ORDER.get(row["name"], len(BUILTIN_ORDER)))
+    try:
+        config = resolve_config_path()
+    except SolverConfigError:
+        config = None
+    return {"ok": True, "config": str(config) if config else None, "config_error": config_error, "solvers": rows}
 
 
 def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1408,6 +1654,60 @@ def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return references
+
+
+def _schematic_timeline(reason: str) -> dict[str, Any]:
+    """No per-stop times: the animation falls back to a constant speed, and says why."""
+    from mamut_routing_tools.timeline import TIMELINE_START_RULE
+
+    return {
+        "ok": True,
+        "clock": "schematic",
+        "clock_metric": None,
+        "note": f"Constant speed (25 km/h): {reason}",
+        "time_unit": "s",
+        "start_rule": TIMELINE_START_RULE,
+        "routes": [],
+    }
+
+
+def _timeline_payload(record: dict[str, Any], solution: dict[str, Any]) -> dict[str, Any]:
+    from mamut_routing_lib.artifacts import load_benchmark_instance
+    from mamut_routing_lib.artifacts import hydrate_collection_instance
+
+    from mamut_routing_tools.timeline import TimelineError, build_static_timeline
+
+    run_metric = str((solution.get("metadata") or {}).get("metric") or "fastest")
+    try:
+        instance_path = _instance_variant_path(record, "fastest")
+    except (ValueError, FileNotFoundError):
+        return _schematic_timeline("this instance has no fastest variant to take travel times from")
+    instance = hydrate_collection_instance(load_benchmark_instance(instance_path), instance_path)
+    routes = [[int(stop) for stop in route] for route in solution["routes"]]
+    time_windows = getattr(instance, "time_windows", None)
+    try:
+        timeline = build_static_timeline(
+            routes,
+            instance.arc_costs,
+            depot=instance.depot,
+            time_windows=time_windows,
+            service_times=getattr(instance, "service_times", None),
+        )
+    except TimelineError:
+        # A run solved on another metric was checked on that metric's costs, not on these times.
+        return _schematic_timeline(
+            f"this run (solved on the {run_metric} metric) misses a time window under the fastest travel times"
+        )
+    clock, note = "free_flow_fastest", None  # CVRP: travel times only, the animation's default wording
+    if time_windows is not None:
+        if run_metric == "fastest":
+            clock = "checker"  # exactly the schedule the checker validated
+        else:
+            note = (
+                "Free-flow travel times (fastest metric), waiting for windows, service times; "
+                f"the run was solved on the {run_metric} metric"
+            )
+    return {"ok": True, "clock": clock, "clock_metric": "fastest", "note": note, **timeline}
 
 
 def _solution_or_reference(
@@ -1478,11 +1778,7 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
     """Road polylines for arbitrary routes over a workbench meta object:
     cache-first on meta.road_cache, live Dijkstra fill on the meta's OSM
     graph for shortest/fastest, straight lines otherwise."""
-    from mamut_routing_tools.geometry.materialize import (
-        candidate_route_segment,
-        node_coordinates_map,
-        resolve_source_osm_path,
-    )
+    from mamut_routing_tools.geometry.materialize import candidate_route_segment, resolve_source_osm_path
     from mamut_routing_tools.roadgraph.build import road_graph_candidates
 
     metric = str(payload.get("metric") or "shortest")
@@ -1527,6 +1823,10 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
     for route_index, route in enumerate(routes):
         sequence = [depot_id, *route, depot_id]
         coordinates: list[list[float]] = []
+        # Index of each arc's first coordinate in the merged line (arc k spans
+        # coordinates[arc_starts[k] : arc_starts[k + 1] + 1]), so the client can
+        # address single arcs -- depot legs, per-arc animation timing.
+        arc_starts: list[int] = []
         segment_modes: set[str] = set()
         for i in range(len(sequence) - 1):
             from_id, to_id = sequence[i], sequence[i + 1]
@@ -1555,8 +1855,10 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
                 if metric in ("shortest", "fastest"):
                     cache_miss_count += 1
             if coordinates:
+                arc_starts.append(len(coordinates) - 1)
                 coordinates.extend(segment[1:])
             else:
+                arc_starts.append(0)
                 coordinates.extend(segment)
         if segment_modes == {"cached_road"}:
             render_mode = "cached_road"
@@ -1578,6 +1880,7 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
                     "load": load,
                     "metric": metric,
                     "render_mode": render_mode,
+                    "arc_starts": arc_starts,
                 },
             }
         )

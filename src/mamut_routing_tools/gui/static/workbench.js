@@ -55,77 +55,150 @@ const markerColors = () => (isDark()
   ? { depot: "#ff7a6e", poi: "#45e8a5", parametric: "#9d8bff" }
   : { depot: "#e8503f", poi: "#0f9e68", parametric: "#5b43e8" });
 
-function starPoints(centerX, centerY, outerRadius, innerRatio = 0.42, spikes = 5) {
-  const innerRadius = outerRadius * innerRatio;
-  const points = [];
-  for (let index = 0; index < spikes * 2; index += 1) {
-    const radius = index % 2 === 0 ? outerRadius : innerRadius;
-    const angle = -Math.PI / 2 + (index * Math.PI) / spikes;
-    points.push(`${(centerX + radius * Math.cos(angle)).toFixed(2)},${(centerY + radius * Math.sin(angle)).toFixed(2)}`);
-  }
-  return points.join(" ");
-}
-
-function depotStarIcon(color) {
-  const size = 26;
-  const outline = isDark() ? "rgba(12, 14, 32, 0.85)" : "rgba(255, 255, 255, 0.9)";
-  return L.divIcon({
-    className: "depot-star-marker",
-    html: `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><polygon points="${starPoints(12, 12, 11)}" fill="${color}" fill-opacity="0.95" stroke="${outline}" stroke-width="1.4" stroke-linejoin="round" /></svg>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-  });
-}
-
 const el = (id) => document.getElementById(id);
 const status = (text) => { el("status").textContent = text; el("status").title = text; };
 
 /* ── Map ── */
-/* CARTO raster basemaps need the CARTO basemaps API key that the server inlines
-   from MAMUT_BASEMAP_API_KEY (https://carto.com/basemaps/apikey); without it they
-   draw a watermark, so the map then runs on OpenStreetMap only. CARTO's free tier
-   requires CARTO and OpenStreetMap to stay credited on the map. */
-const OSM_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-const CARTO_ATTRIBUTION = `${OSM_ATTRIBUTION} &copy; <a href="https://carto.com/attributions">CARTO</a>`;
+/* MapLibre GL through the shared kit in mamut-map.js (the public website draws with
+   the same file). CARTO vector basemaps need the CARTO basemaps API key that the
+   server inlines from MAMUT_BASEMAP_API_KEY (https://carto.com/basemaps/apikey);
+   without it the map runs on OpenStreetMap only. CARTO's free tier requires CARTO
+   and OpenStreetMap to stay credited on the map; mamut-map.js sets both. */
 const basemapApiKey = window.__MAMUT_BASEMAP_API_KEY__ || "";
-const cartoRasterLayer = (style, key) => L.tileLayer(
-  `https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png?key=${encodeURIComponent(key)}`,
-  { maxZoom: 20, subdomains: "abcd", attribution: CARTO_ATTRIBUTION },
-);
-const map = L.map("map", { zoomControl: true }).setView([46.5, 2.5], 6);
-const positron = basemapApiKey ? cartoRasterLayer("light_all", basemapApiKey) : null;
-const darkMatter = basemapApiKey ? cartoRasterLayer("dark_all", basemapApiKey) : null;
-const openStreetMap = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19, attribution: OSM_ATTRIBUTION,
+const mapController = window.MamutMap.createMap(el("map"), {
+  center: [2.5, 46.5],
+  zoom: 5,
+  apiKey: basemapApiKey,
+  dark: isDark(),
+  scale: true,
+  // Shift-click picks a POI as the depot; MapLibre's shift-drag box zoom would eat it.
+  boxZoom: false,
 });
-if (!basemapApiKey) {
-  console.info("CARTO basemaps disabled: MAMUT_BASEMAP_API_KEY is not set, using OpenStreetMap tiles.");
+const map = mapController?.map || null;
+if (!map) {
+  const notice = document.createElement("p");
+  notice.className = "map-unavailable";
+  notice.textContent = "The map needs WebGL, which this browser does not provide.";
+  el("map").appendChild(notice);
 }
-const themedBase = () => (isDark() ? darkMatter : positron) || openStreetMap;
-let baseLayer = themedBase();
-baseLayer.addTo(map);
-
-L.control.scale({ imperial: false, position: "bottomleft" }).addTo(map);
-L.control.layers(
-  basemapApiKey
-    ? { "Dark Matter": darkMatter, "Positron": positron, "OpenStreetMap": openStreetMap }
-    : { "OpenStreetMap": openStreetMap },
-  {},
-  { position: "topright" },
-).addTo(map);
 
 /* The basemap normally follows the theme. Once the user picks one explicitly that
    link is cut, otherwise flipping the theme would silently undo their choice. */
 let basemapPinned = false;
-map.on("baselayerchange", (event) => {
-  baseLayer = event.layer;
+mapController?.onUserBasemapChoice(() => {
   basemapPinned = true;
 });
 
-const previewLayers = L.layerGroup().addTo(map);
-const instanceNodeLayers = L.layerGroup().addTo(map);
-const poiPickLayers = L.layerGroup().addTo(map);
-let routeLayerGroups = [];
+const solutionLayers = map
+  ? window.MamutMap.createSolutionLayers(map, {
+    interaction: "hover",
+    nodeRadius: 5,
+    depotRadius: 7,
+    nodeStrokeWidth: 2,
+    depotStrokeWidth: 3,
+    nodeFillOpacity: 0.9,
+    describe: describeSolutionFeature,
+  })
+  : null;
+
+/* What the solution layers currently hold; geometry is pushed to the map only when
+   it changes, every view option is feature-state. */
+let solutionData = { key: null, routeLines: [], nodes: [], depot: null, routeMode: "straight_line", hasRoutes: false };
+
+/* Route animation (mamut-trips.js). deck.gl is fetched only when one is first
+   opened; animated paths are thinned to a vertex budget deck redraws at ~60 fps. */
+const DECK_SRC = "/static/vendor/deck.gl/dist.min.js";
+const TRIPS_VERTEX_BUDGET = 500000;
+let routeAnimation = null;
+let routeAnimationLoading = false;
+
+/* The generation preview and the manual POI pool are this GUI's own layers. Their
+   ids start with "mamut-" so basemap swaps slide in underneath them. */
+const toolLayers = { ready: false, preview: null, poi: null };
+if (map) map.once("load", installToolLayers);
+
+function installToolLayers() {
+  const empty = { type: "FeatureCollection", features: [] };
+  map.addSource("mamut-preview", { type: "geojson", data: empty });
+  map.addLayer({
+    id: "mamut-preview-circle",
+    type: "circle",
+    source: "mamut-preview",
+    paint: {
+      "circle-radius": ["case", ["==", ["get", "role"], "depot"], 7, 4],
+      "circle-color": ["to-color", ["get", "color"]],
+      "circle-opacity": 0.85,
+      "circle-stroke-width": ["case", ["==", ["get", "role"], "depot"], 2, 1],
+      "circle-stroke-color": ["to-color", ["get", "color"]],
+    },
+  });
+  map.addSource("mamut-poi", { type: "geojson", data: empty });
+  map.addLayer({
+    id: "mamut-poi-circle",
+    type: "circle",
+    source: "mamut-poi",
+    paint: {
+      "circle-radius": ["coalesce", ["feature-state", "r"], 3.5],
+      "circle-color": ["to-color", ["coalesce", ["feature-state", "c"], "#888888"]],
+      "circle-opacity": ["coalesce", ["feature-state", "fo"], 0.35],
+      "circle-stroke-width": ["coalesce", ["feature-state", "sw"], 1],
+      "circle-stroke-color": ["to-color", ["coalesce", ["feature-state", "c"], "#888888"]],
+    },
+  });
+  const tooltips = window.MamutMap.bindLayerTooltip(map, ["mamut-poi-circle", "mamut-preview-circle"], describeToolFeature);
+  map.on("click", "mamut-poi-circle", (event) => {
+    const feature = event.features?.[0];
+    const poi = feature ? state.poiPool[feature.id] : null;
+    if (!poi) return;
+    const key = poiKey(poi.properties);
+    // Shift-click promotes a POI to the depot instead of toggling it.
+    if (event.originalEvent && event.originalEvent.shiftKey) setManualDepot(key, poi);
+    else toggleManualPick(key, poi);
+    // The tooltip names the pick state; show the new one on the next pointer move.
+    tooltips.refresh();
+  });
+  toolLayers.ready = true;
+  setPreviewFeatures(toolLayers.preview);
+  if (toolLayers.poi) {
+    map.getSource("mamut-poi").setData(toolLayers.poi);
+    applyPoiStates();
+  }
+}
+
+/* Layer handles kept from the Leaflet version: the call sites only ever clear them. */
+const previewLayers = { clearLayers: () => setPreviewFeatures(null) };
+const instanceNodeLayers = {
+  clearLayers: () => {
+    solutionData = { ...solutionData, key: null, nodes: [], depot: null, hasRoutes: false };
+    pushSolution();
+  },
+};
+const poiPickLayers = { clearLayers: () => setPoiFeatures(null) };
+
+function textTooltip(text) {
+  const node = document.createElement("div");
+  node.className = "map-tooltip";
+  node.textContent = text;
+  return node;
+}
+
+function describeToolFeature(feature) {
+  if (feature.layer.id === "mamut-poi-circle") {
+    const poi = state.poiPool[feature.id];
+    if (!poi) return null;
+    const key = poiKey(poi.properties);
+    const suffix = state.manualDepotKey === key ? " · DEPOT" : state.manualPicks.has(key) ? " · picked" : "";
+    return textTooltip(`${poiLabel(poi.properties)}${suffix}`);
+  }
+  const previewFeature = state.previewGeojson?.features?.[feature.id];
+  return previewFeature ? textTooltip(nodeTooltip(previewFeature.properties)) : null;
+}
+
+/* The left and right panels, so a fit keeps the data clear of them. */
+function fitMapTo(bounds) {
+  if (!map) return;
+  window.MamutMap.fitToBounds(map, bounds, [document.querySelector(".panel-left"), document.querySelector(".panel-right")], { base: 40 });
+}
 
 /* ── Preferences ── */
 /* Durable across GUI restarts: localStorage is keyed by origin including the port, and
@@ -143,13 +216,12 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem("mamut-theme", theme); } catch (error) { /* private mode */ }
   savePreferences({ theme });
-  const nextBase = themedBase();
-  if (!basemapPinned && nextBase !== baseLayer) {
-    map.removeLayer(baseLayer);
-    nextBase.addTo(map);
-    baseLayer = nextBase;
+  if (mapController && !basemapPinned) {
+    const themed = window.MamutMap.themedBasemapId(isDark(), basemapApiKey);
+    if (themed !== mapController.basemaps.current) mapController.basemaps.set(themed);
   }
   redrawRoutes();
+  if (state.poiPool.length) applyPoiStates();
 }
 document.querySelectorAll("[data-theme-pick]").forEach((button) => {
   button.addEventListener("click", () => applyTheme(button.dataset.themePick));
@@ -199,6 +271,7 @@ function saveBlob(blob, filename) {
 const state = {
   instances: [],
   selected: null,
+  solvers: [],
   hiddenRoutes: new Set(),
   focusedRoute: null,
   routeView: {
@@ -249,9 +322,8 @@ const layout = window.MamutLayout.initLayout({
   stage: document.documentElement,
   storageKey: window.MamutLayout.STORAGE_KEY,
   defaults: (window.__MAMUT_PREFS__ || {}).layout,
-  /* Leaflet caches the container size; without this the map keeps the old width and
-     the tiles tear or grey out after a drag. */
-  onResize: () => map.invalidateSize({ animate: false }),
+  /* MapLibre caches the container size; resize after a drag so it never draws stale. */
+  onResize: () => map?.resize(),
   onPersist: (state) => savePreferences({ layout: state }),
 });
 
@@ -319,10 +391,6 @@ el("appearance-arrows").addEventListener("change", (event) => {
 el("appearance-depot-star").addEventListener("change", (event) => {
   state.routeView.depotStar = event.target.checked;
   redrawRoutes();
-});
-
-map.on("zoomend", () => {
-  if (state.lastRendered && !state.previewGeojson) redrawRoutes();
 });
 
 /* ── Activity strip ── */
@@ -663,35 +731,80 @@ async function loadCities() {
     : "No OSM extracts yet: fetch a city first.");
 }
 
+/* ── Solvers ── */
+function solverOptionNote(solver) {
+  if (!solver) return "";
+  if (!solver.available) return [solver.reason, solver.hint, solver.note].filter(Boolean).join(" — ");
+  if (solver.supported === false) return (solver.reasons || []).join("; ");
+  return (solver.warnings || []).join("; ");
+}
+
+function syncSolverNote() {
+  const note = el("solve-solver-note");
+  const solver = (state.solvers || []).find((entry) => entry.name === el("solve-solver").value);
+  const text = solverOptionNote(solver);
+  note.hidden = !text;
+  note.textContent = text;
+}
+
+async function loadSolvers() {
+  const select = el("solve-solver");
+  const previous = select.value || "pyvrp";
+  const params = new URLSearchParams();
+  if (state.selected) {
+    params.set("instance_id", state.selected.instance_id);
+    params.set("metric", el("solve-metric").value);
+    params.set("objective_function", el("solve-objective").value);
+  }
+  const query = params.toString();
+  const data = await api(`/api/solvers${query ? `?${query}` : ""}`);
+  state.solvers = data.solvers;
+  select.innerHTML = "";
+  data.solvers.forEach((solver) => {
+    const option = document.createElement("option");
+    const unsupported = solver.supported === false;
+    option.value = solver.name;
+    option.textContent = `${solver.label}${solver.version ? ` ${solver.version}` : ""}`
+      + (!solver.available ? " — not installed" : unsupported ? " — not for this variant" : "");
+    option.disabled = !solver.available || unsupported;
+    option.title = solverOptionNote(solver);
+    select.append(option);
+  });
+  const options = [...select.options];
+  const keep = options.find((option) => option.value === previous && !option.disabled);
+  select.value = keep ? previous : (options.find((option) => !option.disabled)?.value || "pyvrp");
+  syncSolverNote();
+}
+
 /* ── Map drawing ── */
 function clearRouteLayers() {
-  routeLayerGroups.forEach((group) => map.removeLayer(group));
-  routeLayerGroups = [];
+  solutionData = { ...solutionData, key: null, routeLines: [], routeMode: "straight_line", hasRoutes: false };
+  pushSolution();
+}
+
+function setPreviewFeatures(features) {
+  toolLayers.preview = features;
+  if (!toolLayers.ready) return;
+  map.getSource("mamut-preview").setData({ type: "FeatureCollection", features: features || [] });
 }
 
 function drawPreview(geojson) {
   state.previewGeojson = geojson;
-  clearRouteLayers();
-  instanceNodeLayers.clearLayers();
-  previewLayers.clearLayers();
+  solutionData = { key: null, routeLines: [], nodes: [], depot: null, routeMode: "straight_line", hasRoutes: false };
+  pushSolution();
   const colors = markerColors();
-  const bounds = [];
-  geojson.features.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
-    bounds.push([lat, lon]);
+  const points = [];
+  // The colour is data here (not feature-state): a preview is small, and a theme
+  // change simply redraws it.
+  setPreviewFeatures(geojson.features.map((feature, index) => {
+    points.push(feature.geometry.coordinates);
     const tag = String(feature.properties.source_tag || "");
     const role = feature.properties.role === "depot"
       ? "depot"
       : (tag.startsWith("poi") ? "poi" : "parametric");
-    L.circleMarker([lat, lon], {
-      radius: role === "depot" ? 7 : 4,
-      color: colors[role],
-      fillColor: colors[role],
-      fillOpacity: 0.85,
-      weight: role === "depot" ? 2 : 1,
-    }).bindTooltip(nodeTooltip(feature.properties)).addTo(previewLayers);
-  });
-  if (bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
+    return { type: "Feature", id: index, properties: { role, color: colors[role] }, geometry: feature.geometry };
+  }));
+  if (points.length) fitMapTo(window.MamutMap.boundsOf(points));
 }
 
 /* What a merged amenity reads as: its name, or its category when unnamed, and
@@ -742,6 +855,12 @@ function clearPoiPool() {
   state.poiPoolCity = null;
 }
 
+function setPoiFeatures(collection) {
+  toolLayers.poi = collection;
+  if (!toolLayers.ready) return;
+  map.getSource("mamut-poi").setData(collection || { type: "FeatureCollection", features: [] });
+}
+
 async function loadPoiPool() {
   const city = el("city").value;
   if (!city) throw new Error("Select a city first.");
@@ -774,33 +893,39 @@ function poiKey(properties) {
   return `${properties.osm_type || "node"}/${properties.osm_id}`;
 }
 
-function renderPoiMarkers(fit = false) {
-  poiPickLayers.clearLayers();
+function poiStyle(key, colors) {
+  const picked = state.manualPicks.has(key);
+  const isDepot = state.manualDepotKey === key;
+  return {
+    r: isDepot ? 7 : picked ? 5.5 : 3.5,
+    c: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
+    fo: picked || isDepot ? 0.9 : 0.35,
+    sw: picked || isDepot ? 2 : 1,
+  };
+}
+
+/* Picks restyle the pool through feature-state: a click on one of 20 000 POIs no
+   longer rebuilds every marker. */
+function applyPoiStates() {
+  if (!toolLayers.ready || !toolLayers.poi) return;
   const colors = markerColors();
-  const bounds = [];
-  state.poiPool.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
-    const key = poiKey(feature.properties);
-    const picked = state.manualPicks.has(key);
-    const isDepot = state.manualDepotKey === key;
-    bounds.push([lat, lon]);
-    const marker = L.circleMarker([lat, lon], {
-      radius: isDepot ? 7 : picked ? 5.5 : 3.5,
-      color: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
-      fillColor: isDepot ? colors.depot : picked ? colors.poi : colors.parametric,
-      fillOpacity: picked || isDepot ? 0.9 : 0.35,
-      weight: picked || isDepot ? 2 : 1,
-    });
-    const suffix = isDepot ? " · DEPOT" : picked ? " · picked" : "";
-    marker.bindTooltip(`${poiLabel(feature.properties)}${suffix}`);
-    marker.on("click", (event) => {
-      // Shift-click promotes a POI to the depot instead of toggling it.
-      if (event.originalEvent && event.originalEvent.shiftKey) setManualDepot(key, feature);
-      else toggleManualPick(key, feature);
-    });
-    marker.addTo(poiPickLayers);
+  state.poiPool.forEach((feature, index) => {
+    map.setFeatureState({ source: "mamut-poi", id: index }, poiStyle(poiKey(feature.properties), colors));
   });
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [50, 50] });
+}
+
+function renderPoiMarkers(fit = false) {
+  if (toolLayers.poi?.pool !== state.poiPool) {
+    const collection = {
+      type: "FeatureCollection",
+      features: state.poiPool.map((feature, index) => ({ type: "Feature", id: index, properties: {}, geometry: feature.geometry })),
+    };
+    // Remembered so the source is only replaced when the pool itself changes.
+    Object.defineProperty(collection, "pool", { value: state.poiPool, enumerable: false });
+    setPoiFeatures(collection);
+  }
+  applyPoiStates();
+  if (fit && state.poiPool.length) fitMapTo(window.MamutMap.boundsOf(state.poiPool.map((feature) => feature.geometry.coordinates)));
   renderManualPicks();
 }
 
@@ -924,59 +1049,177 @@ function customerMarkerOpacity(routeIndex) {
   return 1;
 }
 
-function drawInstanceNodes(routes = null, fit = false) {
-  instanceNodeLayers.clearLayers();
-  const mapData = state.selected?.mapData;
-  if (!mapData?.geojson?.features) return [];
+function instanceNodeData(routes) {
+  const features = state.selected?.mapData?.geojson?.features;
+  if (!features) return { nodes: [], depot: null };
   const assignments = new Map();
   (routes || []).forEach((route, routeIndex) => {
     route.forEach((modelNodeId) => assignments.set(Number(modelNodeId), routeIndex));
   });
-  const colors = markerColors();
-  const bounds = [];
-  mapData.geojson.features.forEach((feature) => {
-    const [lon, lat] = feature.geometry.coordinates;
+  const nodes = [];
+  let depot = null;
+  features.forEach((feature) => {
     const properties = feature.properties || {};
-    const isDepot = properties.role === "depot";
-    const routeIndex = assignments.get(Number(properties.model_node_id));
-    const opacity = isDepot ? 1 : customerMarkerOpacity(routeIndex);
-    if (opacity <= 0) return;
-    const color = isDepot
-      ? colors.depot
-      : (routeIndex == null
-        ? (String(properties.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric)
-        : routeColor(routeIndex));
-    const marker = isDepot && state.routeView.depotStar && Array.isArray(routes) && routes.length > 0
-      ? L.marker([lat, lon], { icon: depotStarIcon(color), interactive: true, keyboard: false })
-      : L.circleMarker([lat, lon], {
-        radius: isDepot ? 7 : 5,
-        color,
-        fillColor: color,
-        opacity,
-        fillOpacity: 0.9 * opacity,
-        weight: isDepot ? 3 : 2,
-      });
-    const label = isDepot ? "Depot" : `Customer ${properties.model_node_id}`;
-    const named = properties.poi_name ? ` · ${properties.poi_name}` : "";
-    // The amenities that collapsed onto this same road point, so a node holding
-    // several places does not read as one arbitrary winner.
-    const merged = properties.poi_merged || [];
-    const alsoHere = merged.length
-      ? ` · +${merged.length} here: ${merged.map(mergedPoiLabel).join(", ")}`
-      : "";
-    // Non-zero when the amenity was snapped to a routable point rather than
-    // sitting on one, so the node is not exactly where the place is.
-    const snapped = properties.snap_distance_m > 1
-      ? ` · snapped ${Math.round(properties.snap_distance_m)} m`
-      : "";
-    marker.bindTooltip(
-      `${label}${named} · demand ${properties.demand} · ${properties.source_tag}`
-      + `${snapped}${alsoHere}`);
-    marker.addTo(instanceNodeLayers);
-    bounds.push([lat, lon]);
+    const index = Number(properties.model_node_id);
+    const coord = feature.geometry.coordinates;
+    if (properties.role === "depot") {
+      depot = { index, coord, properties };
+    } else {
+      nodes.push({ index, coord, routeIndex: assignments.get(index), properties });
+    }
   });
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
-  return bounds;
+  return { nodes, depot };
+}
+
+function pushSolution() {
+  // New geometry: an open animation would keep showing the old routes.
+  closeRouteAnimation();
+  if (!solutionLayers) return;
+  solutionLayers.setData({ routeLines: solutionData.routeLines, nodes: solutionData.nodes, depot: solutionData.depot });
+  applySolutionView();
+}
+
+/* Every appearance option is feature-state on data the map already holds. */
+function applySolutionView() {
+  if (!solutionLayers) return;
+  const routes = state.selected?.solved?.routes || [];
+  const visibleRoutes = new Set();
+  routes.forEach((_, index) => {
+    if (!state.hiddenRoutes.has(index)) visibleRoutes.add(index);
+  });
+  const colors = markerColors();
+  solutionLayers.applyView({
+    visibleRoutes,
+    focusedRoute: state.focusedRoute,
+    fadedOpacity: state.routeView.fadedOpacity,
+    depotLegOpacity: state.routeView.depotLegOpacity,
+    routeMode: solutionData.routeMode,
+    roadOpacity: 0.9,
+    customerOpacity: customerMarkerOpacity,
+    arrowsEnabled: state.routeView.arrowsEnabled,
+    depotStar: state.routeView.depotStar && solutionData.hasRoutes,
+    palette: window.MamutNocturne.routeColors(),
+    depotColor: colors.depot,
+    unassignedColor: (node) => (String(node.properties?.source_tag || "").startsWith("poi") ? colors.poi : colors.parametric),
+    dark: isDark(),
+    dim: animationPlaying() ? 0.35 : 1,
+  });
+  routeAnimation?.setView({ palette: window.MamutNocturne.routeColors(), visibleRoutes, focusedRoute: state.focusedRoute });
+  syncAnimateButton();
+}
+
+/* One Animate button per panel (Instance legend, Solve, Runs): the run is displayed whichever tab is open. */
+function syncAnimateButton() {
+  const shown = Boolean(map && state.selected?.solved && state.lastRendered && state.selectedRunId);
+  for (const button of document.querySelectorAll("[data-animate-routes]")) {
+    button.hidden = !shown;
+    button.disabled = routeAnimationLoading;
+    button.textContent = routeAnimationLoading ? "Loading…" : animationPlaying() ? "Stop animation" : "Animate";
+    button.setAttribute("aria-pressed", String(animationPlaying()));
+  }
+}
+
+/* routeAnimation also holds the "needs WebGL2" notice, so that it closes with the run; only
+   a real animation dims the routes and turns the buttons into "Stop animation". */
+function animationPlaying() {
+  return Boolean(routeAnimation && !routeAnimation.unavailable);
+}
+
+function closeRouteAnimation() {
+  const animation = routeAnimation;
+  routeAnimation = null;
+  animation?.close();
+}
+
+/* Times come from the run's /timeline: the checker's accounting on the instance's
+   free-flow fastest arc costs. When that cannot clock the run, the timeline has no
+   routes and a note, and the animation runs at constant speed. */
+async function toggleRouteAnimation() {
+  if (routeAnimation) {
+    closeRouteAnimation();
+    applySolutionView();
+    return;
+  }
+  const instance = state.selected;
+  const runId = state.selectedRunId;
+  if (!map || !instance || !runId || routeAnimationLoading) return;
+  routeAnimationLoading = true;
+  syncAnimateButton();
+  const key = solutionData.key;
+  try {
+    let timeline = null;
+    let clockLabels;
+    try {
+      timeline = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/${encodeURIComponent(runId)}/timeline`);
+      // The server words the clock when the default does not fit (why it is constant speed, say).
+      if (timeline.note) clockLabels = { [timeline.clock]: timeline.note };
+    } catch (error) {
+      // No schedule for this run: the vehicles still drive, at constant speed.
+      clockLabels = { schematic: `Constant speed (25 km/h): no schedule for this run (${error.message})` };
+    }
+    if (state.selected !== instance || solutionData.key !== key) return;
+    const ranked = window.MamutMap.rankRouteLines(solutionData.routeLines, { minTolerance: 0.5 });
+    const routes = state.selected?.solved?.routes || [];
+    const visibleRoutes = new Set(routes.map((_, index) => index).filter((index) => !state.hiddenRoutes.has(index)));
+    const animation = await window.MamutTrips.openAnimation(map, el("tripsBar"), {
+      deckSrc: DECK_SRC,
+      routeLines: window.MamutMap.thinRouteLines(ranked, TRIPS_VERTEX_BUDGET).routeLines,
+      timeline,
+      clockLabels,
+      palette: window.MamutNocturne.routeColors(),
+      visibleRoutes,
+      focusedRoute: state.focusedRoute,
+      onClose: () => {
+        routeAnimation = null;
+        applySolutionView();
+      },
+    });
+    if (animation && (state.selected !== instance || solutionData.key !== key)) {
+      animation.close();
+      return;
+    }
+    routeAnimation = animation;
+  } catch (error) {
+    status(`Route animation unavailable: ${error.message}`);
+  } finally {
+    routeAnimationLoading = false;
+    applySolutionView();
+  }
+}
+
+
+/* Tooltip text, built as a text node: OSM names are data, never markup. */
+function describeSolutionFeature(info) {
+  if (info.kind === "route") {
+    const routeLine = solutionData.routeLines[info.routeIndex];
+    const properties = routeLine?.properties || {};
+    return textTooltip(`R${properties.route_index ?? info.routeIndex + 1}: ${properties.stops ?? "?"} stops, load ${properties.load ?? "?"} (${solutionData.routeMode})`);
+  }
+  const node = info.kind === "depot" ? solutionData.depot : solutionData.nodes.find((candidate) => candidate.index === info.nodeIndex);
+  if (!node) return null;
+  const properties = node.properties || {};
+  const label = info.kind === "depot" ? "Depot" : `Customer ${properties.model_node_id}`;
+  const named = properties.poi_name ? ` · ${properties.poi_name}` : "";
+  // The amenities that collapsed onto this same road point, so a node holding
+  // several places does not read as one arbitrary winner.
+  const merged = properties.poi_merged || [];
+  const alsoHere = merged.length
+    ? ` · +${merged.length} here: ${merged.map(mergedPoiLabel).join(", ")}`
+    : "";
+  // Non-zero when the amenity was snapped to a routable point rather than
+  // sitting on one, so the node is not exactly where the place is.
+  const snapped = properties.snap_distance_m > 1
+    ? ` · snapped ${Math.round(properties.snap_distance_m)} m`
+    : "";
+  return textTooltip(`${label}${named} · demand ${properties.demand} · ${properties.source_tag}${snapped}${alsoHere}`);
+}
+
+function drawInstanceNodes(routes = null, fit = false) {
+  const { nodes, depot } = instanceNodeData(routes);
+  solutionData = { ...solutionData, key: null, nodes, depot, hasRoutes: Array.isArray(routes) && routes.length > 0 };
+  if (!routes) solutionData.routeLines = [];
+  pushSolution();
+  if (fit) fitMapTo(solutionLayers?.bounds());
 }
 
 function straightRouteLines(rendered) {
@@ -996,11 +1239,27 @@ function straightRouteLines(rendered) {
     const properties = rendered?.geojson?.features?.[routeIndex]?.properties || {};
     return {
       routeIndex,
+      sequence,
       segments,
       coordinates: segments.flatMap((segment, segmentIndex) => segmentIndex === 0 ? segment : segment.slice(1)),
       properties: { ...properties, render_mode: "straight_line" },
     };
   });
+}
+
+/* Per-arc segments of a server-rendered road route: arc k spans coordinates
+   arc_starts[k] .. arc_starts[k + 1] (sharing the joint point). A payload without
+   arc_starts (an older server) stays one merged segment, with no separable legs. */
+function roadSegments(feature) {
+  const coordinates = feature.geometry?.coordinates || [];
+  const starts = feature.properties?.arc_starts;
+  if (!Array.isArray(starts) || starts.length === 0) return [coordinates];
+  return starts.map((start, arc) => coordinates.slice(start, arc + 1 < starts.length ? starts[arc + 1] + 1 : coordinates.length));
+}
+
+function depotModelId() {
+  const features = state.selected?.mapData?.geojson?.features || [];
+  return Number(features.find((feature) => feature.properties?.role === "depot")?.properties?.model_node_id ?? 0);
 }
 
 function activeRouteGeometry(rendered) {
@@ -1009,8 +1268,10 @@ function activeRouteGeometry(rendered) {
       routeMode: rendered.summary.render_mode,
       routeLines: rendered.geojson.features.map((feature, routeIndex) => ({
         routeIndex,
+        // Model ids, as the timeline's stops name them.
+        sequence: [depotModelId(), ...(state.selected?.solved?.routes?.[routeIndex] || []).map(Number), depotModelId()],
         coordinates: feature.geometry?.coordinates || [],
-        segments: [feature.geometry?.coordinates || []],
+        segments: roadSegments(feature),
         properties: feature.properties || {},
       })),
     };
@@ -1018,87 +1279,31 @@ function activeRouteGeometry(rendered) {
   return { routeMode: "straight_line", routeLines: straightRouteLines(rendered) };
 }
 
-function calculateBearing(from, to) {
-  const lat1 = (from.lat * Math.PI) / 180;
-  const lat2 = (to.lat * Math.PI) / 180;
-  const dLon = ((to.lng - from.lng) * Math.PI) / 180;
-  const y = Math.sin(dLon) * Math.cos(lat2);
-  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
-  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
-}
-
-function arrowSpacing() {
-  const zoom = map.getZoom();
-  if (zoom >= 16) return 150;
-  if (zoom >= 14) return 300;
-  if (zoom >= 12) return 600;
-  if (zoom >= 10) return 1200;
-  return 2500;
-}
-
-function addArrowsToPolyline(polyline, color, opacity, group) {
-  const latlngs = polyline.getLatLngs();
-  let distance = 0;
-  for (let index = 1; index < latlngs.length; index += 1) {
-    const from = latlngs[index - 1];
-    const to = latlngs[index];
-    const segmentDistance = map.distance(from, to);
-    if (segmentDistance < 3) continue;
-    distance += segmentDistance;
-    if (distance < arrowSpacing()) continue;
-    const overshoot = distance - arrowSpacing();
-    const ratio = Math.max(0, Math.min(1, (segmentDistance - overshoot) / segmentDistance));
-    const point = L.latLng(from.lat + (to.lat - from.lat) * ratio, from.lng + (to.lng - from.lng) * ratio);
-    const bearing = calculateBearing(from, to);
-    const icon = L.divIcon({
-      className: "arrow-marker",
-      html: `<div style="transform:rotate(${bearing - 90}deg);font-size:10px;line-height:10px;color:${color};font-weight:700;opacity:${Math.min(0.95, opacity).toFixed(3)}">▶</div>`,
-      iconSize: [10, 10],
-    });
-    L.marker(point, { icon, interactive: false, keyboard: false }).addTo(group);
-    distance = 0;
-  }
-}
-
 function drawRoutes(rendered, fit) {
-  clearRouteLayers();
   previewLayers.clearLayers();
-  const bounds = [];
-  const geometry = activeRouteGeometry(rendered);
-  const hasFocus = state.focusedRoute !== null && !state.hiddenRoutes.has(state.focusedRoute);
-  geometry.routeLines.forEach((routeLine, index) => {
-    const group = L.layerGroup();
-    const focused = hasFocus && state.focusedRoute === index;
-    const baseOpacity = hasFocus && !focused
-      ? state.routeView.fadedOpacity
-      : geometry.routeMode === "straight_line" ? 0.78 : 0.9;
-    routeLine.segments.forEach((segment, segmentIndex) => {
-      const line = segment
-        .filter((point) => Array.isArray(point) && point.length >= 2)
-        .map(([lon, lat]) => [Number(lat), Number(lon)]);
-      bounds.push(...line);
-      const isDepotLeg = geometry.routeMode === "straight_line"
-        && routeLine.segments.length > 1
-        && (segmentIndex === 0 || segmentIndex === routeLine.segments.length - 1);
-      const opacity = isDepotLeg ? Math.min(baseOpacity, state.routeView.depotLegOpacity) : baseOpacity;
-      if (line.length < 2 || opacity <= 0) return;
-      const properties = routeLine.properties;
-      const polyline = L.polyline(line, {
-        color: routeColor(index),
-        weight: focused ? 5 : 3,
-        opacity,
-        lineCap: "round",
-        lineJoin: "round",
-      })
-        .bindTooltip(`R${properties.route_index ?? index + 1}: ${properties.stops ?? "?"} stops, load ${properties.load ?? "?"} (${geometry.routeMode})`)
-        .addTo(group);
-      if (state.routeView.arrowsEnabled) addArrowsToPolyline(polyline, routeColor(index), opacity, group);
-    });
-    routeLayerGroups.push(group);
-    if (!state.hiddenRoutes.has(index)) group.addTo(map);
-  });
-  bounds.push(...drawInstanceNodes(state.selected?.solved?.routes || [], false));
-  if (fit && bounds.length) map.fitBounds(bounds, { padding: [60, 60] });
+  const routes = state.selected?.solved?.routes || [];
+  // Geometry is rebuilt (and handed to MapLibre) only when the rendered solution,
+  // its instance or the render mode changes; sliders and focus reuse it.
+  const key = [rendered, state.selected?.mapData, routes, state.routeView.renderMode];
+  const same = Array.isArray(solutionData.key) && solutionData.key.every((value, index) => value === key[index]);
+  if (same) {
+    applySolutionView();
+  } else {
+    // Only the render mode changed (the same solution, now on roads or straight lines):
+    // an open animation is reopened on the new geometry instead of just closing.
+    const reopen = animationPlaying() && Array.isArray(solutionData.key)
+      && key.slice(0, 3).every((value, index) => value === solutionData.key[index]);
+    const geometry = activeRouteGeometry(rendered);
+    const { nodes, depot } = instanceNodeData(routes);
+    solutionData = { key, routeLines: geometry.routeLines, nodes, depot, routeMode: geometry.routeMode, hasRoutes: routes.length > 0 };
+    pushSolution();
+    if (reopen) {
+      setTimeout(() => {
+        if (!routeAnimation && solutionData.key === key) toggleRouteAnimation();
+      }, 0);
+    }
+  }
+  if (fit) fitMapTo(solutionLayers?.bounds());
   syncAppearanceControls();
 }
 
@@ -1227,7 +1432,7 @@ function renderSelected() {
     el("selObjLabel").textContent =
       `${metric} · ${instance.solved.objective_function || "MonoCost"} · ${runSourceLabel(instance.solved)}`;
     el("selCost").textContent = String(instance.solved.cost);
-    el("selMethod").textContent = instance.solved.method || "pyvrp";
+    el("selMethod").textContent = instance.solved.method || instance.solved.solver || "pyvrp";
   } else {
     el("selObjective").hidden = true;
   }
@@ -1304,6 +1509,7 @@ function selectInstance(index, preferredRunId = null) {
   el("import-panel").hidden = true;
   renderInstanceList();
   renderSelected();
+  loadSolvers().catch((error) => console.warn("Unable to list solvers", error));
   return loadSolutionRuns(preferredRunId).catch((error) => {
     status(`Cannot load saved solutions: ${error.message}`);
   });
@@ -1357,7 +1563,8 @@ function runMetric(run) {
 function runSourceLabel(run) {
   if (run.source === "bks") return "BKS";
   if (run.source === "imported") return `imported${run.solver && run.solver !== "external" ? ` · ${run.solver}` : ""}`;
-  return run.created_at ? new Date(run.created_at).toLocaleString() : "saved run";
+  const when = run.created_at ? new Date(run.created_at).toLocaleString() : "saved run";
+  return run.solver ? `${run.solver} · ${when}` : when;
 }
 
 function solvedVariantFile(instance) {
@@ -1439,7 +1646,12 @@ async function displaySolutionRun(runId, fit = true) {
   state.selectedRunId = runId;
   instance.solved = run;
   const metric = run.metadata?.metric || el("solve-metric").value || "fastest";
-  el("solve-metric").value = metric;
+  if (el("solve-metric").value !== metric) {
+    el("solve-metric").value = metric;
+    // Setting a select's value fires no change event: do what its listeners would.
+    syncVrpExportControls();
+    loadSolvers().catch(() => {});
+  }
   const rendered = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/${encodeURIComponent(runId)}/render?metric=${encodeURIComponent(metric)}`, {});
   if (state.selected !== instance) return;
   instance.rendered = rendered;
@@ -1872,7 +2084,7 @@ async function handleFinishedJob(job) {
     }
     if (!selectedByHandler) await loadSolutionRuns(preferredRunId);
     activateTab("visualize");
-    status(`Solved ${result.solution?.instance_name || "instance"}: cost ${result.cost}; checker ${result.validation?.status}.`);
+    status(`Solved ${result.solution?.instance_name || "instance"} with ${result.solver || "pyvrp"}: cost ${result.cost}; checker ${result.validation?.status}.`);
   }
 }
 
@@ -1999,6 +2211,9 @@ function syncVrpExportControls() {
 }
 
 el("solve-metric").addEventListener("change", syncVrpExportControls);
+el("solve-metric").addEventListener("change", () => loadSolvers().catch(() => {}));
+el("solve-objective").addEventListener("change", () => loadSolvers().catch(() => {}));
+el("solve-solver").addEventListener("change", syncSolverNote);
 syncVrpExportControls();
 
 el("download-vrp").addEventListener("click", async () => {
@@ -2023,14 +2238,16 @@ el("solve").addEventListener("click", async () => {
   if (!instance) return;
   try {
     const budget = Math.max(1, Number(el("solve-budget").value) || 30);
+    const solver = el("solve-solver").value || "pyvrp";
     const job = await submitJob("solve", {
       instance_id: instance.instance_id,
       metric: el("solve-metric").value,
       objective_function: el("solve-objective").value,
       seed: Number(el("solve-seed").value) || 0,
       time_limit: budget,
+      solver,
     });
-    status(`Solve queued as job ${job.job_id.slice(0, 8)} (${budget} s budget).`);
+    status(`Solve queued as job ${job.job_id.slice(0, 8)} (${solver}, ${budget} s budget).`);
   } catch (error) { status(`Cannot queue solve: ${error.message}`); }
 });
 
@@ -2569,15 +2786,22 @@ el("bulk-download").addEventListener("click", async () => {
   } catch (error) { status(`Download failed: ${error.message}`); }
 });
 
+for (const button of document.querySelectorAll("[data-animate-routes]")) {
+  button.addEventListener("click", () => {
+    void toggleRouteAnimation();
+  });
+}
+
 el("clear").addEventListener("click", () => {
   previewLayers.clearLayers();
-  instanceNodeLayers.clearLayers();
   poiPickLayers.clearLayers();
-  clearRouteLayers();
+  solutionData = { key: null, routeLines: [], nodes: [], depot: null, routeMode: "straight_line", hasRoutes: false };
+  pushSolution();
   state.previewGeojson = null;
   state.lastRendered = null;
   if (state.selected) state.selected.rendered = null;
   renderLegend();
+  syncAnimateButton();  // nothing is drawn any more: no Animate (pushSolution ran before lastRendered was cleared)
   status("Map cleared.");
 });
 
@@ -2652,6 +2876,7 @@ renderPoiCategories();
 updateHybridShare();
 updateGenerationControls();
 loadCities().catch((error) => status(`Cannot reach the local server: ${error.message}`));
+loadSolvers().catch((error) => console.warn("Unable to list solvers", error));
 loadInstances().catch((error) => console.warn("Unable to list workspace instances", error));
 refreshJobs().catch((error) => console.warn("Unable to list workbench jobs", error));
 setInterval(() => refreshJobs().catch(() => {}), 1000);
