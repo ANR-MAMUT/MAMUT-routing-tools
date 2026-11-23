@@ -5,7 +5,7 @@ import random
 import pytest
 
 from mamut_routing_lib.checker import SolutionCheckStatus, check_solution
-from mamut_routing_lib.models import BenchmarkInstance, BenchmarkSolution
+from mamut_routing_lib.models import BenchmarkInstanceVRPTW, BenchmarkSolution
 from mamut_routing_tools.timeline import TimelineError, build_static_timeline
 
 ARC_COSTS = [
@@ -64,7 +64,7 @@ def test_a_missed_window_raises(time_windows: list[tuple[int, int]]) -> None:
         build_static_timeline([[1, 2]], ARC_COSTS, time_windows=time_windows, service_times=[0, 2, 2])
 
 
-def _random_instance(rng: random.Random, n: int, slack: int, tighten: bool) -> tuple[BenchmarkInstance, list[list[int]]]:
+def _random_instance(rng: random.Random, n: int, slack: int, tighten: bool) -> tuple[BenchmarkInstanceVRPTW, list[list[int]]]:
     points = [(rng.uniform(0, 100), rng.uniform(0, 100)) for _ in range(n + 1)]
     arc_costs = [[0 if i == j else round(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5) + 1 for j, b in enumerate(points)] for i, a in enumerate(points)]
     service_times = [0] + [rng.randint(0, 10) for _ in range(n)]
@@ -87,7 +87,7 @@ def _random_instance(rng: random.Random, n: int, slack: int, tighten: bool) -> t
         victim = routes[0][-1]
         ready, _ = time_windows[victim]
         time_windows[victim] = (max(0, ready - 40), max(0, ready - 30))
-    instance = BenchmarkInstance(
+    instance = BenchmarkInstanceVRPTW(
         instance_name="poryos-n8-timeline",
         instance_origin="OsmCvrpGen",
         benchmark_name="Poryos2026",

@@ -11,7 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mamut_routing_lib.sidecars import CollectionMarker, save_collection_marker
-from mamut_routing_lib.models import BenchmarkInstance
+from mamut_routing_lib.models import BenchmarkInstanceVRPTW
 from mamut_routing_tools.bks_campaign import (
     build_plan,
     harvest,
@@ -38,8 +38,8 @@ argv = ["{python}", "-m", "mamut_routing_lib.solvers.external._fake_solver", "--
 """
 
 
-def _instance(name: str, shift: int) -> BenchmarkInstance:
-    return BenchmarkInstance(
+def _instance(name: str, shift: int) -> BenchmarkInstanceVRPTW:
+    return BenchmarkInstanceVRPTW(
         instance_name=name,
         instance_origin="Solomon1987",
         benchmark_name="Dimacs2021",

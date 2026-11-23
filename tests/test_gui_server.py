@@ -1387,7 +1387,7 @@ def test_animate_is_offered_on_the_solve_and_runs_tabs_too(client: TestClient) -
 
 def _timeline_record(tmp_path: Path, *, time_windows: list | None, fastest: bool = True) -> dict:
     """A workspace record whose fastest variant is a three-customer line, 10 s between neighbours."""
-    from mamut_routing_lib.models import BenchmarkInstance, BenchmarkInstanceCVRP
+    from mamut_routing_lib.models import BenchmarkInstanceVRPTW, BenchmarkInstanceCVRP
 
     common = dict(
         instance_name="line",
@@ -1404,7 +1404,7 @@ def _timeline_record(tmp_path: Path, *, time_windows: list | None, fastest: bool
     if time_windows is None:
         instance = BenchmarkInstanceCVRP(**common)
     else:
-        instance = BenchmarkInstance(**common, service_times=[0, 5, 5, 5], time_windows=time_windows)
+        instance = BenchmarkInstanceVRPTW(**common, service_times=[0, 5, 5, 5], time_windows=time_windows)
     (tmp_path / "line_fastest.vrp.json").write_text(json.dumps(instance.model_dump(mode="json")))
     return {"folder": str(tmp_path), "files": {"vrp_json": {"fastest": "line_fastest.vrp.json"} if fastest else {"euclidean": "x"}}}
 
