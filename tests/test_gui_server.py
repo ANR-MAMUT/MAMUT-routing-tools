@@ -1467,10 +1467,12 @@ def test_the_timeline_names_its_clock_and_falls_back_to_constant_speed(tmp_path:
     assert cvrp["clock"] == "free_flow_fastest" and cvrp["note"] is None  # travel times only: the default wording
     assert cvrp["routes"][0]["stops"] == [[1, 10.0, 10.0, 10.0], [2, 20.0, 20.0, 20.0], [3, 30.0, 30.0, 30.0]]
 
-    loose = [(0, 1000), (0, 1000), (0, 1000), (0, 1000)]
+    loose = [(10, 1000), (0, 1000), (0, 1000), (0, 1000)]
     checked = timeline(_timeline_record(tmp_path, time_windows=loose), [[1, 2, 3]], "fastest")
     assert checked["clock"] == "checker" and checked["note"] is None  # the schedule the checker validated
-    assert checked["routes"][0]["stops"][1] == [2, 25.0, 25.0, 30.0]  # service times are applied
+    assert checked["start_rule"] == "depot_opening"
+    assert checked["routes"][0]["departure"] == 10
+    assert checked["routes"][0]["stops"][1] == [2, 35.0, 35.0, 40.0]
     other = timeline(_timeline_record(tmp_path, time_windows=loose), [[1, 2, 3]], "euclidean")
     assert other["clock"] == "free_flow_fastest" and other["routes"] == checked["routes"]
     assert "service times" in other["note"] and "euclidean metric" in other["note"]  # not "no service times"

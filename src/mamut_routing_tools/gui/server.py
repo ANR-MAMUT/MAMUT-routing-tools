@@ -1050,7 +1050,7 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             return _payload_error(400, str(error))
 
     @app.post("/api/instances/{instance_id}/solutions/compare")
-    async def compare_solution_runs(instance_id: str, request: SolutionComparisonRequest) -> Any:
+    def compare_solution_runs(instance_id: str, request: SolutionComparisonRequest) -> Any:
         try:
             record = _workspace_instance(workspace, instance_id)
             candidate = _solution_or_reference(solutions, record, instance_id, request.candidate_run_id)
@@ -1058,13 +1058,12 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             stale = next((run for run in (candidate, reference) if run.get("stale")), None)
             if stale is not None:
                 return _payload_error(409, _stale_message(stale))
-            instance_path = Path(str(candidate.get("instance_path") or reference.get("instance_path") or ""))
             from mamut_routing_lib.artifacts import load_benchmark_instance
-            from mamut_routing_lib.artifacts import hydrate_collection_instance
 
+            metric = str((candidate.get("metadata") or {}).get("metric") or "fastest")
+            instance_path = _instance_variant_path(record, metric)
             instance = load_benchmark_instance(instance_path)
-            checkable = hydrate_collection_instance(instance, instance_path)
-            comparison = compare_solution_records(checkable, candidate, reference)
+            comparison = compare_solution_records(instance, candidate, reference, instance_path=instance_path)
             return {"ok": True, "comparison": comparison}
         except KeyError:
             return _payload_error(404, "Unknown instance or solution run")
@@ -1642,7 +1641,11 @@ def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
             if not path.is_file():
                 continue
             bks = load_bks(path)
-            validation = validate_solution(instance, bks.routes, instance_path=instance_path)
+            marked = "standard" in bks.metadata or "exact_evaluation" in bks.metadata
+            validation = validate_solution(
+                instance, bks.routes, instance_path=instance_path, objective_function=objective,
+                marked_input=bks if marked else None,
+            )
             references.append(
                 {
                     "schema_version": 1,
@@ -1706,11 +1709,8 @@ def _timeline_payload(record: dict[str, Any], solution: dict[str, Any]) -> dict[
             time_windows=time_windows,
             service_times=getattr(instance, "service_times", None),
         )
-    except TimelineError:
-        # A run solved on another metric was checked on that metric's costs, not on these times.
-        return _schematic_timeline(
-            f"this run (solved on the {run_metric} metric) misses a time window under the fastest travel times"
-        )
+    except TimelineError as error:
+        return _schematic_timeline(f"the run on the {run_metric} metric has no fastest-clock timeline ({error})")
     clock, note = "free_flow_fastest", None  # CVRP: travel times only, the animation's default wording
     if time_windows is not None:
         if run_metric == "fastest":

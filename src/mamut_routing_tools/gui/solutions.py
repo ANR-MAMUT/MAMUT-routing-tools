@@ -16,6 +16,7 @@ import json
 import string
 import uuid
 from datetime import UTC, datetime
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -280,11 +281,13 @@ def compare_solution_records(
     instance: Any,
     candidate: dict[str, Any],
     reference: dict[str, Any],
+    *,
+    instance_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Compare objective value, fleet, loads, edges and route partition."""
-
-    from mamut_routing_lib.checker import get_objective_tuple
+    """Reprice both route sets on the same instance and compare their exact objective keys."""
     from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.exact import prepare_exact
+    from mamut_routing_lib.manifests import adjacent_manifest
 
     candidate_objective = str(candidate["objective_function"])
     reference_objective = str(reference["objective_function"])
@@ -300,16 +303,38 @@ def compare_solution_records(
             "select runs for the same metric."
         )
     objective = ObjectiveFunction(candidate_objective)
-    candidate_cost = candidate.get("cost")
-    reference_cost = reference.get("cost")
-    if candidate_cost is None or reference_cost is None:
-        raise ValueError("Both solution runs need a cost before they can be compared.")
-    candidate_routes = [[int(node) for node in route] for route in candidate["routes"]]
-    reference_routes = [[int(node) for node in route] for route in reference["routes"]]
-    candidate_tuple = get_objective_tuple(candidate_routes, candidate_cost, objective)
-    reference_tuple = get_objective_tuple(reference_routes, reference_cost, objective)
-    cost_delta = candidate_cost - reference_cost
-    relative_gap = None if reference_cost == 0 else (cost_delta / abs(reference_cost)) * 100.0
+    candidate_routes = candidate["routes"]
+    reference_routes = reference["routes"]
+    manifest = None
+    if instance_path is not None:
+        for record in (candidate, reference):
+            recorded_path = record.get("instance_path")
+            if recorded_path and Path(recorded_path).resolve() != instance_path.resolve():
+                raise ValueError("The solution runs must refer to the same current instance file.")
+        manifest = adjacent_manifest(instance_path, objective, routes=[*candidate_routes, *reference_routes])
+    for record in (candidate, reference):
+        if record.get("source") == "bks" and (record.get("validation") or {}).get("valid") is False:
+            raise ValueError("The published BKS failed validation against the current instance.")
+        standard = (record.get("metadata") or {}).get("standard")
+        if standard is not None and (manifest is None or standard.get("manifest_sha256") != manifest.manifest_sha256):
+            raise ValueError("The certified BKS belongs to a different or unavailable instance edition.")
+    source = manifest.checkable if manifest is not None else instance_path or instance
+    prepared = prepare_exact(source, objective_function=objective)
+    candidate_eval = prepared.evaluate(candidate_routes)
+    reference_eval = prepared.evaluate(reference_routes)
+    cost_delta = candidate_eval.cost - reference_eval.cost
+    if candidate_eval.objective_key == reference_eval.objective_key:
+        ordering = "equal"
+    else:
+        ordering = "better" if candidate_eval.objective_key < reference_eval.objective_key else "worse"
+
+    def display(value: Fraction) -> float | None:
+        try:
+            return float(value)
+        except OverflowError:
+            return None
+
+    relative_gap = None if reference_eval.cost == 0 else display(100 * cost_delta / reference_eval.cost)
 
     def route_loads(routes: list[list[int]]) -> list[int]:
         return [sum(int(instance.demands[node]) for node in route) for route in routes]
@@ -323,21 +348,24 @@ def compare_solution_records(
         "reference_run_id": reference.get("run_id"),
         "objective_function": candidate_objective,
         "metric": candidate_metric,
-        "ordering": "better" if candidate_tuple < reference_tuple else "equal" if candidate_tuple == reference_tuple else "worse",
-        "cost_delta": cost_delta,
+        "profile": candidate_eval.profile,
+        "ordering": ordering,
+        "cost_delta": display(cost_delta),
         "relative_gap_percent": relative_gap,
         "route_count_delta": len(candidate_routes) - len(reference_routes),
         "candidate": {
-            "cost": candidate_cost,
+            "cost": candidate_eval.display_cost,
+            "authoritative_cost": candidate_eval.as_dict()["authoritative_cost"],
             "num_routes": len(candidate_routes),
             "route_loads": route_loads(candidate_routes),
-            "valid": bool(candidate.get("validation", {}).get("valid")),
+            "valid": True,
         },
         "reference": {
-            "cost": reference_cost,
+            "cost": reference_eval.display_cost,
+            "authoritative_cost": reference_eval.as_dict()["authoritative_cost"],
             "num_routes": len(reference_routes),
             "route_loads": route_loads(reference_routes),
-            "valid": bool(reference.get("validation", {}).get("valid")),
+            "valid": True,
         },
         "route_difference": {
             "directed_edges_added": len(candidate_edges - reference_edges),

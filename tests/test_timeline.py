@@ -24,7 +24,7 @@ def test_vehicle_waits_for_the_window_then_serves() -> None:
     )
     assert timeline == {
         "time_unit": "s",
-        "start_rule": "depot_at_zero",
+        "start_rule": "depot_opening",
         "routes": [
             {
                 "departure": 0,
@@ -39,17 +39,44 @@ def test_vehicle_waits_for_the_window_then_serves() -> None:
 
 def test_capacity_only_routes_are_clocked_by_the_arc_costs() -> None:
     timeline = build_static_timeline([[2, 1], [1]], ARC_COSTS)
+    assert timeline["start_rule"] == "depot_at_zero"
     assert timeline["routes"] == [
         {"departure": 0, "return_arrival": 14.0, "stops": [[2, 6.0, 6.0, 6.0], [1, 9.0, 9.0, 9.0]]},
         {"departure": 0, "return_arrival": 10.0, "stops": [[1, 5.0, 5.0, 5.0]]},
     ]
 
 
-def test_return_is_clamped_to_the_depot_ready_time_like_the_checker() -> None:
+def test_depot_opening_governs_departure_and_all_events() -> None:
     timeline = build_static_timeline(
         [[1]], ARC_COSTS, time_windows=[(30, 100), (0, 50), (0, 50)], service_times=[0, 0, 0]
     )
-    assert timeline["routes"][0]["return_arrival"] == 30.0
+    assert timeline["start_rule"] == "depot_opening"
+    assert timeline["routes"] == [{"departure": 30.0, "return_arrival": 40.0, "stops": [[1, 35.0, 35.0, 35.0]]}]
+
+
+def test_fractional_excess_over_depot_deadline() -> None:
+    deadline = 2**53
+    with pytest.raises(TimelineError, match="returning to depot"):
+        build_static_timeline([[1]], [[0, deadline], [0.5, 0]], time_windows=[(0, deadline)] * 2)
+
+
+def test_times_are_projected_once_after_exact_accumulation() -> None:
+    # Each separate half-unit would round away when added in binary64 at 2**52.
+    first = 2**52
+    matrix = [[0, first, 0], [0, 0, 0.5], [0.5, 0, 0]]
+    route = build_static_timeline([[1, 2]], matrix)["routes"][0]
+    assert route["stops"][1][1] == first
+    assert route["return_arrival"] == first + 1
+    tiny = build_static_timeline([[1]], [[0, 0.0001], [0, 0]])
+    assert tiny["routes"][0]["stops"][0][1] == 0.0001
+
+
+def test_unrepresentable_clock_falls_back_at_display() -> None:
+    import sys
+
+    longest = sys.float_info.max
+    with pytest.raises(TimelineError, match="display range"):
+        build_static_timeline([[1]], [[0, longest], [longest, 0]])
 
 
 @pytest.mark.parametrize(

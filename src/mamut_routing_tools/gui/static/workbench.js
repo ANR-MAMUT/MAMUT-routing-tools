@@ -1705,8 +1705,8 @@ el("compare").addEventListener("click", async () => {
     const gap = value.relative_gap_percent == null ? "n/a" : `${value.relative_gap_percent.toFixed(3)}%`;
     el("comparison-output").hidden = false;
     el("comparison-output").textContent = [
-      `Result: ${value.ordering}`,
-      `Cost delta: ${value.cost_delta} (gap ${gap})`,
+      `Result: ${value.ordering} (${value.profile})`,
+      `Cost delta: ${value.cost_delta ?? "outside binary64 range"} (gap ${gap})`,
       `Route-count delta: ${value.route_count_delta}`,
       `Candidate loads: ${value.candidate.route_loads.join(", ")}`,
       `Reference loads: ${value.reference.route_loads.join(", ")}`,
