@@ -110,3 +110,20 @@ def test_unknown_or_unsuitable_solvers_are_errors(tmp_path: Path, fixture_osm_pa
     assert unknown.exit_code == 1 and "unknown solver 'nope'" in unknown.stderr
     kayros = CliRunner().invoke(app, ["solve", str(instance), "--solver", "kayros"])
     assert kayros.exit_code == 1 and "kayros" in kayros.stderr
+
+
+def test_termination_signal_during_solve(tmp_path, monkeypatch):
+    import os
+    import signal
+
+    if os.name != "posix":
+        pytest.skip("POSIX termination signals")
+    def interrupted(*args, **kwargs):
+        signal.raise_signal(signal.SIGTERM)
+
+    monkeypatch.setattr("mamut_routing_lib.solvers.run_solver", interrupted)
+    path = tmp_path / "toy.vrp.json"
+    path.write_text("{}")
+    result = CliRunner().invoke(app, ["solve", str(path), "--save-bks", "--authors", "Tester"])
+    assert result.exit_code == 143 and "SIGTERM" in result.output
+    assert not list(tmp_path.glob("*.bks.*.json"))
