@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -141,11 +143,19 @@ def select_instances(spec: CampaignSpec) -> list[Any]:
     return chosen
 
 
-def objective_rank(objective: str, cost: float, num_routes: int) -> tuple:
+def archived_cost(record: dict[str, Any]) -> Fraction | int | float | None:
+    """Recorded checker cost. Older campaign records kept only its display."""
+    rational = record.get("authoritative_cost")
+    if rational is None:
+        return record.get("validated_cost")
+    return Fraction(int(Decimal(rational["numerator"])), int(Decimal(rational["denominator"])))
+
+
+def objective_rank(objective: str, cost: Fraction | int | float, num_routes: int) -> tuple:
     """Sort key of a solution under ``objective``: fleet first for ``HierarchicalVehicleCost``."""
     if objective == "HierarchicalVehicleCost":
-        return (int(num_routes), float(cost))
-    return (float(cost),)
+        return (int(num_routes), cost)
+    return (cost,)
 
 
 ArchiveIndex = dict[tuple[str, str], list[dict[str, Any]]]
@@ -157,7 +167,7 @@ def _valid_runs_by_group(spec: CampaignSpec) -> ArchiveIndex:
 
     index: ArchiveIndex = {}
     for record in iter_runs(spec.out):
-        if not record.get("valid") or record.get("validated_cost") is None or not record.get("routes"):
+        if not record.get("valid") or archived_cost(record) is None or not record.get("routes"):
             continue
         index.setdefault((record.get("instance_id"), record.get("objective_function")), []).append(record)
     return index
@@ -185,7 +195,7 @@ def best_known_routes(
         records = [
             record
             for record in group_runs(out, instance_id, objective.value)
-            if record.get("valid") and record.get("validated_cost") is not None and record.get("routes")
+            if record.get("valid") and archived_cost(record) is not None and record.get("routes")
         ]
     else:
         records = archive.get((instance_id, objective.value), [])
@@ -193,14 +203,16 @@ def best_known_routes(
     for record in records:
         if instance_sha256 and record.get("instance_sha256") not in (None, instance_sha256):
             continue
-        rank = objective_rank(objective.value, record["validated_cost"], len(record["routes"]))
+        rank = objective_rank(objective.value, archived_cost(record), len(record["routes"]))
         if best is None or rank < best[0]:
             best = (rank, record["routes"], f"run:{record['key']}")
     bks_path = get_bks_path_for_instance(instance_path, objective)
     if bks_path.is_file():
         bks = load_bks(bks_path)
-        if bks.cost is not None:
-            rank = objective_rank(objective.value, bks.cost, len(bks.routes))
+        evaluation = bks.metadata.get("standard") or bks.metadata.get("exact_evaluation") or {}
+        cost = archived_cost({**evaluation, "validated_cost": bks.cost})
+        if cost is not None:
+            rank = objective_rank(objective.value, cost, len(bks.routes))
             if best is None or rank < best[0]:
                 best = (rank, bks.routes, f"bks:{bks.metadata.get('method') or 'stored'}")
     if best is None:

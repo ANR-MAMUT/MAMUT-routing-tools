@@ -6,19 +6,16 @@
 - ``harvest`` is the only step that writes BKS files, and it records what the
   store did even when it does not finish (a store error, a store process that
   died, Ctrl-C): BKS written before the failure are in the history. It sets aside the runs
-  whose instance file changed since (``instance_sha256``), takes the best valid
-  remaining run per (instance, objective) (fewer routes first under
-  ``HierarchicalVehicleCost``), and offers it to the BKS store unless it is
-  worse than the baseline by more than float noise (``--offer-all`` offers
-  every best run), one process per instance, credited to ``campaign.authors``.
-  Ties and near-ties are the store's call: it re-validates, compares exact
-  decimal costs and keeps the incumbent on a tie. Every harvest is kept in
+  whose instance file changed. For each instance and objective, it reprices the distinct archived routes under the current exact profile, including routes checked by an earlier release.
+  With a verified manifest it retains the TD arcs used by those routes. The lowest exact objective wins, with the first run key breaking ties.
+  If the frozen baseline BKS bytes remain available, harvest also reprices its routes and offers a winner that matches or beats it. Otherwise it offers the winner directly. ``--offer-all`` skips the baseline filter.
+  The store re-validates the selected routes, compares exact binary64 costs and keeps the incumbent on a tie. Every harvest is kept in
   ``harvests/<NNNN>-<time>.json``; ``harvest.json`` is the latest one.
 - ``write_reports`` writes ``ledger.csv`` (one row per run; ``bks_action`` is
   what the store did with the run in any harvest, ``created`` over a later
   ``kept_existing``) and
   ``cross-solver.csv`` (per instance: best per kind, gap to the best, seed
-  spread), ranking by the objective like the harvest.
+  spread), ranked by the checker cost recorded at run time.
 """
 
 from __future__ import annotations
@@ -26,13 +23,15 @@ from __future__ import annotations
 import csv
 import json
 import statistics
+from collections.abc import Iterable
 from concurrent.futures import ProcessPoolExecutor
 from datetime import UTC, datetime
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
-from mamut_routing_tools.bks_campaign.archive import atomic_write_json, load_runs
-from mamut_routing_tools.bks_campaign.plan import objective_rank
+from mamut_routing_tools.bks_campaign.archive import atomic_write_json, iter_runs, load_runs
+from mamut_routing_tools.bks_campaign.plan import archived_cost, objective_rank
 from mamut_routing_tools.bks_campaign.spec import CampaignSpec
 
 __all__ = ["BASELINE_FIELDS", "LEDGER_FIELDS", "harvest", "harvest_history", "read_baseline", "write_baseline", "write_reports"]
@@ -106,7 +105,7 @@ def _best_runs(runs: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, An
     """Lowest checker cost per (instance, objective) among valid runs (ties: the first key)."""
     best: dict[tuple[str, str], dict[str, Any]] = {}
     for record in sorted(runs, key=lambda item: item.get("key", "")):
-        if not record.get("valid") or record.get("validated_cost") is None:
+        if not record.get("valid") or archived_cost(record) is None:
             continue
         group = (record["instance_id"], record["objective_function"])
         current = best.get(group)
@@ -116,16 +115,17 @@ def _best_runs(runs: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, An
 
 
 def _objective_key(record: dict[str, Any]) -> tuple:
-    return objective_rank(str(record.get("objective_function")), record["validated_cost"], int(record.get("num_routes") or 0))
+    return objective_rank(str(record.get("objective_function")), archived_cost(record), int(record.get("num_routes") or 0))
 
 
-def _current_runs(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _current_runs(runs: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """(runs of the instance files as they are now, runs of a file that changed since)."""
     from mamut_routing_lib.solvers.provenance import file_sha256
 
     shas: dict[str, str | None] = {}
     current, stale = [], []
     for record in runs:
+        record.pop("trajectory", None)  # harvesting needs the routes and solver identity
         path = record.get("instance_path")
         if path and path not in shas:
             shas[path] = file_sha256(path) if Path(path).is_file() else None
@@ -134,24 +134,59 @@ def _current_runs(runs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], lis
     return current, stale
 
 
-#: Relative margin of the baseline pre-filter. A float total depends on the order and the arithmetic
-#: that summed the arcs (by at most about n * 2**-53 of the cost, 5e-13 at n = 4000), and the
-#: baseline may have been priced by another checker release than the runs; the store compares exact
-#: decimal costs. So the pre-filter only drops runs that are worse by more than this margin and
-#: leaves ties and near-ties to the store.
-BASELINE_MARGIN = 1e-10
+def _select_for_store(records: list[dict], baseline: dict | None) -> tuple[dict, str | None, str | None]:
+    """Reprice every distinct candidate on the same current materialization."""
+    from mamut_routing_lib.artifacts import get_bks_path_for_instance, load_benchmark_instance, load_bks
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.exact import prepare_exact
+    from mamut_routing_lib.exact_store import verify_stored
+    from mamut_routing_lib.exact_types import ExactRouteError
+    from mamut_routing_lib.manifests import adjacent_manifest
+    from mamut_routing_lib.solvers.provenance import file_sha256
 
+    first = records[0]
+    path = Path(first["instance_path"]).resolve()
+    if any(Path(record["instance_path"]).resolve() != path for record in records):
+        raise ValueError("The archived instance ID names multiple current descriptors")
+    objective = ObjectiveFunction(first["objective_function"])
+    metadata = load_benchmark_instance(path).metadata
+    lower = metadata.get("num_vehicles_lb") if isinstance(metadata, dict) else getattr(metadata, "num_vehicles_lb", None)
+    candidates = {}
+    for record in sorted(records, key=lambda item: item["key"]):
+        routes = record["routes"]
+        if not all(isinstance(route, list) and all(type(stop) is int for stop in route) for route in routes):
+            continue
+        if lower and len(routes) < int(lower):
+            continue
+        candidates.setdefault(tuple(sorted(tuple(route) for route in routes)), record)
+    if not candidates:
+        return first, "skipped", "no archived routes meet the instance requirements"
 
-def _may_beat_baseline(record: dict[str, Any], baseline: dict[str, Any] | None) -> bool:
-    """False only when the run is worse than the baseline beyond float noise (``BASELINE_MARGIN``)."""
-    if baseline is None or baseline.get("cost") in ("", None):
-        return True
-    if record.get("objective_function") == "HierarchicalVehicleCost":
-        routes, reference_routes = int(record.get("num_routes") or 0), int(baseline.get("num_routes") or 0)
-        if routes != reference_routes:
-            return routes < reference_routes
-    cost, reference = float(record["validated_cost"]), float(baseline["cost"])
-    return cost - reference <= BASELINE_MARGIN * max(1.0, abs(reference))
+    incumbent = None
+    bks_path = get_bks_path_for_instance(path, objective)
+    if baseline and bks_path.is_file() and baseline.get("bks_sha256") == file_sha256(bks_path):
+        incumbent = load_bks(bks_path)
+    routes = chain.from_iterable(candidates)
+    if incumbent is not None:
+        routes = chain(routes, incumbent.routes)
+    manifest = adjacent_manifest(path, objective, routes=routes)
+    prepared = prepare_exact(manifest.checkable if manifest else path, objective_function=objective)
+    winner = best = None
+    for route_set, record in candidates.items():
+        try:
+            evaluation = prepared.evaluate(route_set)
+        except ExactRouteError:
+            continue
+        if best is None or evaluation.objective_key < best:
+            best, winner = evaluation.objective_key, record
+    if winner is None:
+        return first, "skipped", "no archived route set is feasible under the current exact profile"
+    if incumbent is not None:
+        evaluation = prepared.evaluate(incumbent.routes)
+        verify_stored(incumbent, evaluation, manifest)
+        if best > evaluation.objective_key:
+            return winner, "not_offered", "worse than the exact cost of the frozen baseline routes"
+    return winner, None, None
 
 
 def _submit_one(job: dict[str, Any]) -> dict[str, Any]:
@@ -159,8 +194,11 @@ def _submit_one(job: dict[str, Any]) -> dict[str, Any]:
     from mamut_routing_lib.enums import ObjectiveFunction
     from mamut_routing_lib.solutions import preview_bks_update, submit_bks
 
-    record = job["record"]
+    record = job["records"][0]
     try:
+        record, action, reason = _select_for_store(job["records"], job["baseline"])
+        if action is not None:
+            return {"key": record["key"], "instance_id": record["instance_id"], "action": action, "reason": reason}
         objective = ObjectiveFunction(record["objective_function"])
         if job["dry_run"]:
             preview = preview_bks_update(record["instance_path"], record["routes"], objective_function=objective)
@@ -171,7 +209,7 @@ def _submit_one(job: dict[str, Any]) -> dict[str, Any]:
             record["routes"],
             authors=job["authors"],
             objective_function=objective,
-            metadata=job["metadata"],
+            metadata=_bks_metadata(job["campaign"], record),
         )
     except ValueError as error:  # the store's own refusals: an invalid solution, an invalid stored BKS
         return _store_error(record, str(error))
@@ -185,10 +223,10 @@ def _store_error(record: dict[str, Any], message: str) -> dict[str, Any]:
     return {"key": record["key"], "instance_id": record["instance_id"], "action": "error", "error": message}
 
 
-def _bks_metadata(spec: CampaignSpec, record: dict[str, Any]) -> dict[str, Any]:
+def _bks_metadata(campaign: str, record: dict[str, Any]) -> dict[str, Any]:
     provenance = record.get("provenance") or {}
     metadata = {
-        "campaign": spec.campaign.name,
+        "campaign": campaign,
         "method": record.get("method") or record.get("solver"),
         "solver": record.get("solver"),
         "solver_version": record.get("solver_version"),
@@ -213,30 +251,22 @@ def harvest(
     workers: int = 1,
 ) -> list[dict[str, Any]]:
     """Offer each instance's best run to the BKS store (the campaign's only writer)."""
-    from mamut_routing_lib.artifacts import load_benchmark_instance
-
-    runs, stale = _current_runs(load_runs(spec.out, with_routes=True))
+    runs, stale = _current_runs(iter_runs(spec.out))
     baseline = read_baseline(spec.out)
     results: list[dict[str, Any]] = []
-    jobs = []
-    best = _best_runs(runs)
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for record in runs:
+        if record.get("routes"):
+            groups.setdefault((record["instance_id"], record["objective_function"]), []).append(record)
     for group, record in sorted(_best_runs(stale).items()):
-        if group not in best:  # only runs of an older instance file: nothing current to offer
+        if group not in groups:
             results.append({"key": record["key"], "instance_id": group[0], "action": "skipped",
                             "reason": "the instance file changed after the run (plan runs it again)"})
-    for group, record in sorted(best.items()):
-        if not offer_all and not _may_beat_baseline(record, baseline.get(group)):
-            results.append({"key": record["key"], "instance_id": group[0], "action": "not_offered",
-                            "reason": "worse than the baseline"})
-            continue
-        instance = load_benchmark_instance(record["instance_path"])
-        metadata = getattr(instance, "metadata", None)
-        lower = metadata.get("num_vehicles_lb") if isinstance(metadata, dict) else getattr(metadata, "num_vehicles_lb", None)
-        if lower and int(record.get("num_routes") or 0) < int(lower):
-            results.append({"key": record["key"], "instance_id": group[0], "action": "skipped",
-                            "reason": f"{record.get('num_routes')} routes < published lower bound {lower}"})
-            continue
-        jobs.append({"record": record, "authors": spec.campaign.authors, "metadata": _bks_metadata(spec, record), "dry_run": dry_run})
+    jobs = [
+        {"records": records, "authors": spec.campaign.authors, "campaign": spec.campaign.name,
+         "baseline": None if offer_all else baseline.get(group), "dry_run": dry_run}
+        for group, records in sorted(groups.items())
+    ]
     try:
         if workers > 1 and len(jobs) > 1:
             import multiprocessing as mp
@@ -249,7 +279,7 @@ def harvest(
                     except Exception as error:  # noqa: BLE001 - the store process died (out of memory, killed)
                         results.append(
                             _store_error(
-                                job["record"],
+                                job["records"][0],
                                 f"the store process failed ({type(error).__name__}: {error}); check the BKS file before harvesting again",
                             )
                         )
@@ -359,7 +389,7 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for group, records in sorted(groups.items()):
-            valid = [record for record in records if record.get("valid") and record.get("validated_cost") is not None]
+            valid = [record for record in records if record.get("valid") and archived_cost(record) is not None]
             overall = min(valid, key=_objective_key, default=None)
             row: dict[str, Any] = {
                 "instance_id": group[0],
@@ -373,14 +403,14 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
                 if not kind_runs:
                     row[f"{kind}_valid_runs"] = 0
                     continue
-                costs = [float(record["validated_cost"]) for record in kind_runs]
+                costs = [record["validated_cost"] for record in kind_runs if record["validated_cost"] is not None]
                 kind_best_run = min(kind_runs, key=_objective_key)
-                kind_best = float(kind_best_run["validated_cost"])
+                kind_best = kind_best_run["validated_cost"]
                 row[f"{kind}_best"] = kind_best
                 row[f"{kind}_routes"] = kind_best_run.get("num_routes")
-                row[f"{kind}_gap_pct"] = round(100.0 * (kind_best - float(overall["validated_cost"])) / float(overall["validated_cost"]), 4) if overall and float(overall["validated_cost"]) else None
-                row[f"{kind}_spread_pct"] = round(100.0 * (max(costs) - kind_best) / kind_best, 4) if kind_best else None
-                row[f"{kind}_valid_runs"] = len(costs)
+                row[f"{kind}_gap_pct"] = round(100.0 * (kind_best - float(overall["validated_cost"])) / float(overall["validated_cost"]), 4) if overall and overall["validated_cost"] and kind_best is not None else None
+                row[f"{kind}_spread_pct"] = round(100.0 * (max(costs) - kind_best) / kind_best, 4) if costs and kind_best else None
+                row[f"{kind}_valid_runs"] = len(kind_runs)
             writer.writerow(row)
     return ledger, compare
 

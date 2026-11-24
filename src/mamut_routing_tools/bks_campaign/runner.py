@@ -189,6 +189,9 @@ def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
             config=task.solvers_config,
         )
         result = solved.result
+        if solved.valid:
+            evaluation = solved.check.exact_evaluation
+            record.update(check_profile=evaluation["profile"], authoritative_cost=evaluation["authoritative_cost"])
         record.update(
             method=result.method,
             solver_version=result.solver_version,

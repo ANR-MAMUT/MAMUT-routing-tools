@@ -166,6 +166,8 @@ def test_run_resume_baseline_harvest_and_reports(campaign: Path) -> None:
     assert len(runs) == 4 and all(run["valid"] and run["schema_version"] == 1 for run in runs)
     record = runs[0]
     assert record["solver"] == "fake" and record["host"] and record["machine"]
+    assert record["check_profile"] == "binary64-exact-v1"
+    assert record["authoritative_cost"] == {"numerator": str(int(record["validated_cost"])), "denominator": "1"}
     assert record["provenance"]["scale"]["exact"] is True
     assert not (spec.out / "raw" / record["key"] / "problem.vrp").exists()  # inputs are not kept
     assert (spec.out / "raw" / record["key"] / "solver.log").is_file()
@@ -198,22 +200,83 @@ def test_run_resume_baseline_harvest_and_reports(campaign: Path) -> None:
     assert len(table) == 2 and table[0]["winner"] == "fake-seed" and table[0]["fake-seed_valid_runs"] == "2"
 
 
-def test_baseline_pre_filter_only_drops_runs_clearly_worse() -> None:
-    from mamut_routing_tools.bks_campaign.harvest import _may_beat_baseline
+@pytest.mark.parametrize("objective", ["MonoCost", "HierarchicalVehicleCost"])
+def test_harvest_reprices_legacy_and_repeated_routes_on_a_display_tie(campaign: Path, objective: str) -> None:
+    from mamut_routing_lib.artifacts import get_bks_path_for_instance, load_bks
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.solvers.provenance import file_sha256
 
-    def run(cost: float, routes: int = 10, objective: str = "MonoCost") -> dict:
-        return {"objective_function": objective, "validated_cost": cost, "num_routes": routes}
+    spec = load_spec(campaign)
+    path = next((campaign.parent / "benchmarks").rglob("A1.vrp.json"))
+    instance = json.loads(path.read_text())
+    costs = [[0] * 4 for _ in range(4)]
+    costs[0][1], costs[1][2] = 1, 2**-55
+    instance["arc_costs"] = costs
+    path.write_text(json.dumps(instance))
+    folder = spec.out / "runs"
+    folder.mkdir(parents=True)
+    base = dict(instance_id="A1", instance_path=str(path), instance_sha256=file_sha256(path),
+                objective_function=objective, kind="demo", valid=True, validated_cost=1.0, num_routes=1)
 
-    baseline = {"cost": "1547830.702", "num_routes": "39"}
-    assert _may_beat_baseline(run(1547659.77), baseline)
-    assert _may_beat_baseline(run(1547830.702), baseline)  # a tie: the store compares exact costs
-    assert _may_beat_baseline(run(1547830.702 + 2e-9), baseline)  # the same routes summed in another order
-    assert not _may_beat_baseline(run(1547830.703), baseline)  # one unit of the last decimal worse
-    assert _may_beat_baseline(run(5.0), {"cost": "", "num_routes": ""})  # no BKS yet
-    hierarchical = {"cost": "828.94", "num_routes": "10"}
-    assert _may_beat_baseline(run(900.0, 9, "HierarchicalVehicleCost"), hierarchical)
-    assert not _may_beat_baseline(run(800.0, 11, "HierarchicalVehicleCost"), hierarchical)
-    assert not _may_beat_baseline(run(829.0, 10, "HierarchicalVehicleCost"), hierarchical)
+    def write(key, routes, **fields):
+        (folder / (key + ".json")).write_text(json.dumps({**base, "key": key, "routes": routes, **fields}))
+
+    write("bad", [[1, 2]])  # an incomplete answer previously marked valid
+    write("a", [[1, 2, 3]])  # exact 1 + 2**-55, displayed as 1.0
+    write("b", [[1, 2, 3]], check_profile="legacy", validated_cost=0.5)
+    write("z", [[1, 3, 2]])  # exact 1, ranked after a by the old float tie-breaker
+    write("zz", [[1, 3, 2]], authoritative_cost={"numerator": "1", "denominator": "1"})
+    if objective == "HierarchicalVehicleCost":
+        write("cheaper", [[2, 1], [3]], validated_cost=0.0, num_routes=2)
+
+    selected, = harvest(spec)
+    assert (selected["key"], selected["action"]) == ("z", "created")
+    bks_path = get_bks_path_for_instance(path, ObjectiveFunction(objective))
+    assert load_bks(bks_path).routes == [[1, 3, 2]]
+    assert harvest(spec)[0]["tie"]
+
+    # The file digest identifies the frozen baseline routes even when its historical display is wrong.
+    baseline = spec.out / "baseline.csv"
+    with baseline.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["instance_id", "objective_function", "cost", "bks_sha256"])
+        writer.writeheader()
+        writer.writerow(dict(instance_id="A1", objective_function=objective, cost=-100, bks_sha256=file_sha256(bks_path)))
+    assert harvest(spec)[0]["tie"]
+    for key in ("z", "zz"):
+        (folder / (key + ".json")).unlink()
+    assert harvest(spec, dry_run=True)[0]["action"] == "not_offered"
+    assert harvest(spec, offer_all=True)[0]["action"] == "kept_existing"
+    bks_path.unlink()  # the frozen route bytes are unavailable
+    assert harvest(spec)[0]["action"] == "created"
+
+
+def test_harvest_verifies_current_manifest_before_ranking_archived_costs(campaign: Path) -> None:
+    import shutil
+
+    from mamut_routing_lib.artifacts import get_bks_path_for_instance
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.manifests import manifest_path_for
+    from mamut_routing_tools.static_manifest import stage_static
+
+    spec = load_spec(campaign)
+    run_tasks(build_plan(spec, only="A1"), out=spec.out, workers=1, memory_gb=8, progress=lambda line: None)
+    assert harvest(spec)[0]["action"] == "created"
+    root = campaign.parent / "benchmarks" / "Dimacs2021"
+    path = next(root.rglob("A1.vrp.json"))
+    stage = campaign.parent / "stage"
+    stage_static(root, path.relative_to(root), stage, recipes={}, revision="r1")
+    manifest = manifest_path_for(path)
+    staged_manifest = stage / manifest.relative_to(root)
+    shutil.copyfile(staged_manifest, manifest)
+    bks = get_bks_path_for_instance(path, ObjectiveFunction.MONO_COST)
+    bks.unlink()
+    assert harvest(spec)[0]["action"] == "created"
+    assert json.loads(bks.read_text())["metadata"]["standard"]["benchmark_revision"] == "r1"
+    changed = json.loads(manifest.read_text())
+    changed["materialization"]["matrix_sha256"] = "0" * 64
+    manifest.write_text(json.dumps(changed))
+    result, = harvest(spec)
+    assert result["action"] == "error" and "matrix_sha256" in result["error"]
 
 
 def test_harvest_skips_runs_of_a_changed_instance(campaign: Path) -> None:
@@ -258,6 +321,11 @@ def test_hierarchical_rankings_put_fewer_routes_first(campaign: Path) -> None:
     assert _best_runs(runs)[("A1", "HierarchicalVehicleCost")]["key"] == "b"
     assert objective_rank("HierarchicalVehicleCost", 950.0, 10) < objective_rank("HierarchicalVehicleCost", 900.0, 11)
     assert objective_rank("MonoCost", 900.0, 11) < objective_rank("MonoCost", 950.0, 10)
+
+    high, low = run("a", 1.0, 1), run("z", 1.0, 1)
+    high["authoritative_cost"] = {"numerator": str(2**55 + 1), "denominator": str(2**55)}
+    low["authoritative_cost"] = {"numerator": "1", "denominator": "1"}
+    assert _best_runs([high, low])[("A1", "HierarchicalVehicleCost")]["key"] == "z"
 
 
 POLISH = '''
