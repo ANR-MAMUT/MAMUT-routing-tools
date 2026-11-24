@@ -301,7 +301,7 @@ def solve_cmd(
         run_solver,
     )
     from mamut_routing_lib.solvers.external.config import SolverConfigError
-    from mamut_routing_lib.solvers.external.process import terminate_all
+    from mamut_routing_lib.solvers.external.process import TerminationSignal, interrupt_on_termination, terminate_all
 
     objective_function = None
     if objective:
@@ -319,22 +319,26 @@ def solve_cmd(
     if keep_artifacts is not None:
         workdir = keep_artifacts.resolve() / f"{instance_path.stem}-{solver}-seed{seed}"
     try:
-        solved = run_solver(
-            solver,
-            instance_path,
-            time_limit_s=time_limit,
-            seed=seed,
-            objective_function=objective_function,
-            workdir=workdir,
-            keep_artifacts=workdir is not None,
-            config=solvers_config,
-        )
+        with interrupt_on_termination():
+            solved = run_solver(
+                solver,
+                instance_path,
+                time_limit_s=time_limit,
+                seed=seed,
+                objective_function=objective_function,
+                workdir=workdir,
+                keep_artifacts=workdir is not None,
+                config=solvers_config,
+            )
     except (UnknownSolverError, SolverUnavailableError, InstanceNotSupportedError, SolverConfigError) as error:
         typer.echo(f"Error: {error}", err=True)
         raise typer.Exit(code=1) from None
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as stop:
         terminate_all()
-        typer.echo("Interrupted: the solver was stopped.", err=True)
+        if isinstance(stop, TerminationSignal):
+            typer.echo(f"Stopped by {stop.name}.", err=True)
+            raise typer.Exit(code=128 + stop.signum) from None
+        typer.echo("Interrupted.", err=True)
         raise typer.Exit(code=130) from None
 
     result = solved.result
