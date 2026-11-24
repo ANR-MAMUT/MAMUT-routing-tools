@@ -786,6 +786,8 @@ def test_importing_an_external_solution_validates_before_storing(client: TestCli
     run = accepted["solution"]
     assert run["source"] == "imported" and run["metadata"]["metric"] == "fastest"
     assert run["validation"]["valid"] and run["num_routes"] == 2
+    assert run["metadata"]["solver_report"] == {"objective": "unspecified", "value": "999", "encoding": "integer"}
+    assert "solver_cost" not in run["metadata"]
     # The declared cost was wrong, so the checked value is stored and flagged.
     assert accepted["warning"] and run["cost"] == run["validation"]["routing_cost"]
 
@@ -808,6 +810,48 @@ def test_importing_an_lkh3_solution_file_is_accepted(client: TestClient) -> None
     run = response["solution"]
     assert run["routes"] == [[1, 2], [3, 4]] and run["metadata"]["format"] == "lkh-mtsp"
     assert run["solver"] == "LKH-3"
+    assert run["metadata"]["solver_report"] == {"objective": "total-arc-cost", "value": "1234", "encoding": "integer"}
+    assert "solver_cost" not in run["metadata"]
+
+
+def test_import_uses_marked_objective_and_rejects_a_conflicting_selection(client: TestClient) -> None:
+    from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.solutions import submit_bks
+
+    instance = _generate_for_import(client)
+    path = Path(instance["folder"]) / instance["files"]["vrp_json"]["fastest"]
+    objective = ObjectiveFunction.HIERARCHICAL_VEHICLE_COST
+    record = submit_bks(path, [[1, 2], [3, 4]], authors="Finder", objective_function=objective)
+    endpoint = f"/api/instances/{instance['instance_id']}/solutions/import"
+    upload = {"filename": "routes.json", "text": record.path.read_text(), "metric": "fastest"}
+    imported = client.post(endpoint, json=upload)
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["solution"]["objective_function"] == objective.value
+    conflict = client.post(endpoint, json={**upload, "objective_function": "MonoCost"})
+    assert conflict.status_code == 400 and "different instance or objective" in conflict.text
+
+
+def test_importing_structured_solver_reports_preserves_attribution(client: TestClient) -> None:
+    instance = _generate_for_import(client)
+    endpoint = f"/api/instances/{instance['instance_id']}/solutions/import"
+    report = {"objective": "total-arc-cost", "encoding": "decimal-text", "value": "2.5000E+01",
+              "family_units_per_solver_unit": {"numerator": "1", "denominator": "10"}}
+    data = {"routes": [[1, 2], [3, 4]], "cost": 299, "metadata": {"bks_metadata": {
+        "solver": "test-solver", "method": "test-method", "solver_version": "1", "solver_report": report,
+    }}}
+    uploaded = {"filename": "external.json", "metric": "fastest", "label": "replication", "text": json.dumps(data)}
+    response = client.post(endpoint, json=uploaded)
+    assert response.status_code == 200, response.text
+    run = response.json()["solution"]
+    assert run["solver"] == "test-solver" and run["method"] == "test-method"
+    assert run["metadata"]["solver_version"] == "1" and run["metadata"]["label"] == "replication"
+    assert run["metadata"]["solver_report"] == report and run["metadata"]["solver_cost"] == 2.5
+    assert run["cost"] == run["validation"]["routing_cost"]
+    data["metadata"]["bks_metadata"]["solver_cost"] = 29
+    invalid = client.post(endpoint, json={**uploaded, "text": json.dumps(data)})
+    assert invalid.status_code == 400 and "differs" in invalid.text
+    assert len(client.get(f"/api/instances/{instance['instance_id']}/solutions").json()["runs"]) == 1
+
 
 
 @pytest.mark.parametrize(

@@ -2807,6 +2807,7 @@ el("clear").addEventListener("click", () => {
 
 /* ── Import an externally found solution ── */
 function resetImportPanel() {
+  el("import-objective").value = "";
   el("import-text").value = "";
   el("import-file").value = "";
   el("import-label").value = "";
@@ -2841,7 +2842,7 @@ el("import-run").addEventListener("click", async () => {
       `/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/import`,
       {
         metric,
-        objective_function: el("solve-objective").value,
+        objective_function: el("import-objective").value || undefined,
         text: el("import-text").value,
         filename: el("import-file").files?.[0]?.name || "",
         label: el("import-label").value,

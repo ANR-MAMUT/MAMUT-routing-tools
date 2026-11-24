@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from mamut_routing_lib.solutions import SolutionFormatError
+from mamut_routing_lib.solutions import ParsedSolution, SolutionFormatError
 
 from mamut_routing_tools.workspace import solutions_dir
 
@@ -94,18 +94,26 @@ def read_imported_solution(text: str, instance: Any, *, filename: str = "") -> t
 
     CVRPLIB ``.sol``, JSON routes and LKH-3 MTSP solution files are recognised.
     """
+    parsed = parse_imported_solution(text, instance, filename=filename)
+    return parsed.routes, parsed.declared_cost, parsed.format
+
+
+def parse_imported_solution(
+    text: str, instance: Any, *, filename: str = "", preserve_solver_report: bool = False,
+) -> ParsedSolution:
+    """Read routes and any numeric provenance supplied by the imported file."""
     from mamut_routing_lib.solutions import read_solution_text
 
     try:
-        parsed = read_solution_text(
+        return read_solution_text(
             text,
             int(instance.num_customers),
             filename=filename,
             depot=int(getattr(instance, "depot", 0) or 0),
+            preserve_solver_report=preserve_solver_report,
         )
     except SolutionFormatError as error:
         raise SolutionImportError(str(error)) from error
-    return parsed.routes, parsed.declared_cost, parsed.format
 
 
 def validate_solution(
@@ -113,11 +121,13 @@ def validate_solution(
     routes: list[list[int]],
     *,
     instance_path: Path,
+    objective_function=None,
+    marked_input=None,
 ) -> dict[str, Any]:
     """Run the canonical library checker (static or TD) and return a JSON-friendly report."""
     from mamut_routing_lib.solutions import check_routes
 
-    checked = check_routes(instance, instance_path, routes)
+    checked = check_routes(instance, instance_path, routes, objective_function, marked_input=marked_input)
     return {
         "valid": checked.is_valid(),
         **checked.model_dump(mode="json"),

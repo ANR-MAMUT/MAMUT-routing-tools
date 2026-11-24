@@ -35,7 +35,7 @@ from mamut_routing_tools.gui.solutions import (
     compare_solution_records,
     file_sha256,
     instance_id_for,
-    read_imported_solution,
+    parse_imported_solution,
     validate_solution,
 )
 from mamut_routing_tools.workspace import instances_dir, osmdata_dir
@@ -1199,6 +1199,8 @@ def _import_solution_payload(
     """Parse, check and persist an externally found solution."""
     from mamut_routing_lib.artifacts import load_benchmark_instance
     from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.objectives import base_objective, require_supported_objective
+    from mamut_routing_lib.solutions import solver_submission_metadata
 
     text = str(payload.get("text") or "")
     filename = str(payload.get("filename") or "")
@@ -1208,11 +1210,20 @@ def _import_solution_payload(
     metric = str(payload.get("metric") or "fastest").lower()
     instance_path = _instance_variant_path(record, metric)
     instance_sha256 = file_sha256(instance_path)
-    objective = ObjectiveFunction(str(payload.get("objective_function") or "MonoCost"))
     instance = load_benchmark_instance(instance_path)
 
-    normalized, declared_cost, solution_format = read_imported_solution(text, instance, filename=filename)
-    validation = validate_solution(instance, normalized, instance_path=instance_path)
+    parsed = parse_imported_solution(text, instance, filename=filename, preserve_solver_report=True)
+    requested = payload.get("objective_function")
+    if requested:
+        objective = require_supported_objective(instance, ObjectiveFunction(requested))
+    elif parsed.marked_input is not None:
+        objective = parsed.marked_input.objective_function
+    else:
+        objective = base_objective(instance)
+    reported = solver_submission_metadata(parsed)
+    validation = validate_solution(
+        instance, parsed.routes, instance_path=instance_path, objective_function=objective, marked_input=parsed.marked_input,
+    )
     if not validation.get("valid"):
         raise SolutionImportError(
             validation.get("error_message")
@@ -1220,15 +1231,14 @@ def _import_solution_payload(
             or "The checker rejected this solution."
         )
 
-    # The checker's own cost is authoritative; a mismatching declared cost is
-    # surfaced rather than stored, because it usually means a different metric.
     canonical_cost = validation.get("routing_cost")
     warning = None
-    if declared_cost is not None and canonical_cost is not None:
-        if abs(float(declared_cost) - float(canonical_cost)) > 1e-6:
+    comparison = reported.get("solver_cost", parsed.declared_cost)
+    if comparison is not None and canonical_cost is not None:
+        if abs(comparison - float(canonical_cost)) > 1e-6:
             warning = (
-                f"The file declares cost {declared_cost} but this instance's "
-                f"{metric} variant gives {canonical_cost}; the checked value was stored."
+                f"The file gives {comparison} and this instance's "
+                f"{metric} variant gives {canonical_cost}. The run stores the checked value."
             )
 
     label = str(payload.get("label") or "").strip()
@@ -1236,16 +1246,16 @@ def _import_solution_payload(
         instance_id=instance_id,
         instance_name=str(record["base_name"]),
         instance_path=instance_path,
-        routes=normalized,
+        routes=parsed.routes,
         cost=canonical_cost,
         objective_function=objective.value,
-        solver=label or "external",
-        method="imported",
+        solver=reported.get("solver") or label or "external",
+        method=reported.get("method") or "imported",
         seed=-1,
         time_limit_s=0,
         wall_time_s=0.0,
         validation=validation,
-        metadata={"metric": metric, "imported_from": filename or "pasted", "label": label, "format": solution_format},
+        metadata={**reported, "metric": metric, "imported_from": filename or "pasted", "label": label, "format": parsed.format},
         source="imported",
         instance_sha256=instance_sha256,
     )
@@ -1254,7 +1264,7 @@ def _import_solution_payload(
         "instance_id": instance_id,
         "metric": metric,
         "warning": warning,
-        "declared_cost": declared_cost,
+        "declared_cost": parsed.declared_cost,
         "solution": solution,
     }
 
