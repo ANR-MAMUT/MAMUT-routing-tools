@@ -2,7 +2,7 @@
 
 Layout under ``campaign.out``::
 
-    runs/<key>.json      one record per finished run (winner or not), schema_version 1
+    runs/<key>.json      one record per finished run (winner or not), schema_version 2
     raw/<key>/           the solver's log and solution file (external solvers)
     baseline.csv         the stored BKS before the campaign (``baseline``)
     ledger.csv           one row per run (``report``)
@@ -37,7 +37,7 @@ __all__ = [
     "runs_dir",
 ]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _UNSAFE = re.compile(r"[^A-Za-z0-9._=-]+")
 
 

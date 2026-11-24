@@ -1290,6 +1290,7 @@ def _solve_payload(
 
     from mamut_routing_lib.artifacts import load_benchmark_instance
     from mamut_routing_lib.enums import ObjectiveFunction
+    from mamut_routing_lib.solvers.report import solver_report_metadata
 
     time_limit = float(payload.get("time_limit") or 30.0)
     if not (time_limit > 0):
@@ -1322,8 +1323,8 @@ def _solve_payload(
             "solver": result.solver,
             "status": result.status,
             "error": result.error,
-            "cost": solved.cost if solved.cost is not None else result.solver_cost,
-            "solver_cost": result.solver_cost,
+            "cost": solved.cost,
+            **solver_report_metadata(result.solver_report),
             "time": round(result.wall_time, 3),
             "routes": result.routes,
             "n_routes": len(result.routes),
@@ -1343,6 +1344,7 @@ def _solve_payload(
     if solver_name != "pyvrp":
         raise ValueError("Inline instances are solved with PyVRP only; queue a solve job for other solvers")
     from mamut_routing_lib.solvers.pyvrp import solve_instance
+    from mamut_routing_lib.solvers.pyvrp_adapter import method_result_to_solve_result
 
     temporary_path: Path | None = None
     try:
@@ -1362,7 +1364,7 @@ def _solve_payload(
         else:
             raise ValueError("Missing required 'vrp_text' or 'vrp_json' field")
 
-        result = solve_instance(
+        method_result = solve_instance(
             instance,
             time_limit_s=max(1, int(time_limit)),
             seed=seed,
@@ -1370,16 +1372,16 @@ def _solve_payload(
             instance_path=instance_file if input_source != "vrp_text" else None,
             monitor=monitor,
         )
+        result = method_result_to_solve_result(method_result)
         validation = validate_solution(instance, result.routes, instance_path=instance_file)
-        canonical_cost = validation.get("routing_cost")
         return {
-            "ok": bool(result.solver_is_feasible and validation["valid"]),
+            "ok": bool(method_result.solver_is_feasible and validation["valid"]),
             "solver": "pyvrp",
-            "cost": canonical_cost if canonical_cost is not None else result.solver_cost,
-            "solver_cost": result.solver_cost,
+            "cost": validation.get("routing_cost") if validation["valid"] else None,
+            **solver_report_metadata(result.solver_report),
             "time": round(result.wall_time, 3),
             "routes": result.routes,
-            "n_routes": result.route_count,
+            "n_routes": len(result.routes),
             "dimension": instance.num_customers + 1,
             "capacity": instance.vehicle_capacity,
             "input_source": input_source,
@@ -1485,6 +1487,7 @@ def _solve_workspace_payload(
         validation=result["validation"],
         metadata={
             **(result.get("metadata") or {}),
+            **{key: result[key] for key in ("solver_report", "solver_cost") if key in result},
             "metric": metric,
             "status": result.get("status"),
             "provenance": result.get("provenance") or {},

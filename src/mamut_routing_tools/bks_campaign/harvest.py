@@ -40,7 +40,7 @@ BASELINE_FIELDS = ["instance_id", "objective_function", "cost", "num_routes", "m
 LEDGER_FIELDS = [
     "instance_id", "objective_function", "n", "kind", "solver", "method", "solver_version", "seed", "time_limit_s",
     "wall_time", "status", "valid", "validated_cost", "num_routes", "baseline_cost", "vs_baseline_pct", "is_best",
-    "bks_action", "bks_action_at", "cost_exact", "check_error", "error", "host", "machine", "key",
+    "bks_action", "bks_action_at", "solver_cost", "check_error", "error", "host", "machine", "key",
 ]
 
 
@@ -224,6 +224,8 @@ def _store_error(record: dict[str, Any], message: str) -> dict[str, Any]:
 
 
 def _bks_metadata(campaign: str, record: dict[str, Any]) -> dict[str, Any]:
+    from mamut_routing_lib.solvers.report import solver_report_metadata
+
     provenance = record.get("provenance") or {}
     metadata = {
         "campaign": campaign,
@@ -235,10 +237,10 @@ def _bks_metadata(campaign: str, record: dict[str, Any]) -> dict[str, Any]:
         "wall_time": record.get("wall_time"),
         "run_key": record.get("key"),
         "machine": record.get("machine"),
-        "cost_exact": record.get("cost_exact"),
         "executable_sha256": provenance.get("executable_sha256"),
         "input_sha256": provenance.get("input_sha256"),
         "warm_start": record.get("warm_start_key"),
+        **solver_report_metadata(record.get("solver_report")),
     }
     return {key: value for key, value in metadata.items() if value is not None}
 
@@ -350,6 +352,8 @@ def _harvested_actions(out: Path) -> dict[str, tuple[str, str | None]]:
 
 def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
     """``ledger.csv`` (one row per run) and ``cross-solver.csv`` (per instance and objective)."""
+    from mamut_routing_lib.solvers.report import solver_report_metadata
+
     spec.out.mkdir(parents=True, exist_ok=True)  # before any `run`: empty reports, not a traceback
     runs = load_runs(spec.out)
     current, _stale = _current_runs(runs)
@@ -370,6 +374,7 @@ def write_reports(spec: CampaignSpec) -> tuple[Path, Path]:
                 gap = round(100.0 * (float(cost) - float(reference)) / float(reference), 4) if float(reference) else None
             writer.writerow({
                 **record,
+                "solver_cost": solver_report_metadata(record.get("solver_report")).get("solver_cost"),
                 "baseline_cost": reference,
                 "vs_baseline_pct": gap,
                 "is_best": best.get(group) == record.get("key"),

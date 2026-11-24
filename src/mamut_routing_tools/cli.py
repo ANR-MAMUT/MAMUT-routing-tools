@@ -282,8 +282,9 @@ def solve_cmd(
     """Solve an instance with any registered solver and check the result.
 
     Prints JSON. "cost" is the reference checker's cost of the routes and
-    "validation" its verdict; "solver_cost" is the solver's own objective in
-    instance units, for information. "status" is the solver's termination
+    "validation" gives its verdict. The optional "solver_report" preserves
+    the objective and units the solver reported. "solver_cost" displays its
+    comparable routing cost in family units when available. "status" is the solver's termination
     (KAYROS: finished / converged / time_limit). With --save-bks --authors,
     "bks_update" reports the store's action (created, replaced or
     kept_existing, with "tie" when the stored BKS costs exactly the same).
@@ -301,6 +302,7 @@ def solve_cmd(
         run_solver,
     )
     from mamut_routing_lib.solvers.external.config import SolverConfigError
+    from mamut_routing_lib.solvers.report import solver_report_metadata
     from mamut_routing_lib.solvers.external.process import TerminationSignal, interrupt_on_termination, terminate_all
 
     objective_function = None
@@ -342,19 +344,20 @@ def solve_cmd(
         raise typer.Exit(code=130) from None
 
     result = solved.result
+    bks_metadata = solved.bks_metadata()
     payload: dict = {
         "ok": bool(solved.valid and result.status in ("feasible", "timeout")),
         "solver": result.solver,
         "method": result.method,
         "objective_function": solved.objective.value,
         "cost": solved.cost,
-        "solver_cost": result.solver_cost,
+        **solver_report_metadata(result.solver_report),
         "validation": solved.validation_status,
         "status": result.metadata.get("status") or result.status,
         "routes": result.routes,
         "n_routes": len(result.routes),
         "wall_time": round(result.wall_time, 2),
-        "metadata": result.metadata,
+        "metadata": {**result.metadata, "bks_metadata": bks_metadata},
         "provenance": result.provenance,
     }
     if result.error:
@@ -372,7 +375,7 @@ def solve_cmd(
                 result.routes,
                 authors=str(authors),
                 objective_function=solved.objective,
-                metadata=solved.bks_metadata(),
+                metadata=bks_metadata,
                 checkable=solved.checkable,
             )
             payload["bks_update"] = {

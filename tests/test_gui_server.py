@@ -352,6 +352,7 @@ def test_preview_generate_solve_render_round_trip(client: TestClient) -> None:
     ).json()
     solved = client.post("/api/workbench/solve", json={"vrp_json": vrp_json, "time_limit": 1}).json()
     assert solved["ok"] and solved["n_routes"] >= 1 and solved["input_source"] == "vrp_json"
+    assert solved["solver_report"]["objective"] == "total-arc-cost"
     assert sorted(stop for route in solved["routes"] for stop in route) == [1, 2, 3, 4]
 
     meta = client.get("/instances-file", params={"path": f"{folder}/{single['files']['meta']}"}).json()
@@ -1280,6 +1281,8 @@ def test_an_external_solve_job_records_the_solver_and_its_provenance(client: Tes
     assert run["validation"]["valid"]
     assert run["metadata"]["provenance"]["scale"]["exact"] is True
     assert job["result"]["cost"] == pytest.approx(job["result"]["solver_cost"])
+    assert job["result"]["solver_report"] == run["metadata"]["solver_report"]
+    assert job["result"]["solver_cost"] == run["metadata"]["solver_cost"]
 
 
 def test_an_unknown_or_unavailable_solver_is_refused_at_submission(client: TestClient, monkeypatch) -> None:

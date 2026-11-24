@@ -163,12 +163,15 @@ def test_run_resume_baseline_harvest_and_reports(campaign: Path) -> None:
     assert (spec.out / "run.DONE").is_file()
 
     runs = load_runs(spec.out)
-    assert len(runs) == 4 and all(run["valid"] and run["schema_version"] == 1 for run in runs)
+    assert len(runs) == 4 and all(run["valid"] and run["schema_version"] == 2 for run in runs)
     record = runs[0]
     assert record["solver"] == "fake" and record["host"] and record["machine"]
     assert record["check_profile"] == "binary64-exact-v1"
     assert record["authoritative_cost"] == {"numerator": str(int(record["validated_cost"])), "denominator": "1"}
     assert record["provenance"]["scale"]["exact"] is True
+    assert record["solver_report"]["objective"] == "total-arc-cost"
+    assert record["solver_report"]["value"] == str(int(record["solver_cost"]))
+    assert "cost_exact" not in record and "solver_cost_raw" not in record
     assert not (spec.out / "raw" / record["key"] / "problem.vrp").exists()  # inputs are not kept
     assert (spec.out / "raw" / record["key"] / "solver.log").is_file()
 
@@ -185,6 +188,10 @@ def test_run_resume_baseline_harvest_and_reports(campaign: Path) -> None:
     assert stored["metadata"]["authors"] == "Campaign Tester"
     assert stored["metadata"]["campaign"] == "toy-campaign" and stored["metadata"]["solver"] == "fake"
     assert "host" not in stored["metadata"] and stored["metadata"]["machine"]
+    winner = next(run for run in runs if run["key"] == stored["metadata"]["run_key"])
+    assert stored["metadata"]["solver_report"] == winner["solver_report"]
+    assert stored["metadata"]["solver_cost"] == winner["solver_cost"]
+    assert "reported_cost_matches_exported_model" not in stored["metadata"]
 
     again = harvest(spec)  # the baseline had no BKS, so the best runs are offered again: ties keep the incumbent
     assert {item["action"] for item in again} == {"kept_existing"} and all(item["tie"] for item in again)
@@ -195,6 +202,7 @@ def test_run_resume_baseline_harvest_and_reports(campaign: Path) -> None:
     ledger, compare = write_reports(spec)
     rows = list(csv.DictReader(ledger.open()))
     assert len(rows) == 4 and {row["kind"] for row in rows} == {"fake-seed"}
+    assert float(rows[0]["solver_cost"]) == record["solver_cost"] and "cost_exact" not in rows[0]
     assert sum(row["is_best"] == "True" for row in rows) == 2
     table = list(csv.DictReader(compare.open()))
     assert len(table) == 2 and table[0]["winner"] == "fake-seed" and table[0]["fake-seed_valid_runs"] == "2"
@@ -224,7 +232,8 @@ def test_harvest_reprices_legacy_and_repeated_routes_on_a_display_tie(campaign: 
     write("bad", [[1, 2]])  # an incomplete answer previously marked valid
     write("a", [[1, 2, 3]])  # exact 1 + 2**-55, displayed as 1.0
     write("b", [[1, 2, 3]], check_profile="legacy", validated_cost=0.5)
-    write("z", [[1, 3, 2]])  # exact 1, ranked after a by the old float tie-breaker
+    # Schema 1 used solver_cost for two different units. Preserve the source and recheck its routes.
+    write("z", [[1, 3, 2]], schema_version=1, solver_cost=999, solver_cost_raw=999, cost_exact=True)
     write("zz", [[1, 3, 2]], authoritative_cost={"numerator": "1", "denominator": "1"})
     if objective == "HierarchicalVehicleCost":
         write("cheaper", [[2, 1], [3]], validated_cost=0.0, num_routes=2)
@@ -232,7 +241,14 @@ def test_harvest_reprices_legacy_and_repeated_routes_on_a_display_tie(campaign: 
     selected, = harvest(spec)
     assert (selected["key"], selected["action"]) == ("z", "created")
     bks_path = get_bks_path_for_instance(path, ObjectiveFunction(objective))
-    assert load_bks(bks_path).routes == [[1, 3, 2]]
+    bks = load_bks(bks_path)
+    assert bks.routes == [[1, 3, 2]]
+    assert {"solver_report", "solver_cost", "cost_exact"}.isdisjoint(bks.metadata)
+    assert json.loads((folder / "z.json").read_text())["solver_cost"] == 999
+    ledger, _ = write_reports(spec)
+    with ledger.open() as handle:
+        legacy = next(row for row in csv.DictReader(handle) if row["key"] == "z")
+    assert legacy["solver_cost"] == ""
     assert harvest(spec)[0]["tie"]
 
     # The file digest identifies the frozen baseline routes even when its historical display is wrong.

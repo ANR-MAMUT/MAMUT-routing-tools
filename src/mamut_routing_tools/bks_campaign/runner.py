@@ -145,6 +145,7 @@ def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
 
     from mamut_routing_lib.enums import ObjectiveFunction
     from mamut_routing_lib.solvers import SolveMonitor, run_solver
+    from mamut_routing_lib.solvers.report import solver_report_metadata
 
     task = Task(**payload)
     out = Path(task.out)
@@ -203,14 +204,12 @@ def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
             num_routes=len(result.routes) if result.routes else 0,
             check_status=solved.validation_status,
             check_error=(solved.check.error_message or None) if solved.check is not None else None,
-            solver_cost=result.solver_cost,
-            solver_cost_raw=result.solver_cost_raw,
             cost_scale=result.cost_scale,
-            cost_exact=result.cost_exact,
             iterations=monitor.iterations or result.metadata.get("iterations"),
             trajectory=[list(point) for point in monitor.trajectory],
             routes=result.routes,
             provenance={key: value for key, value in result.provenance.items() if key not in ("host",)},
+            **solver_report_metadata(result.solver_report),
         )
     except Exception as error:  # noqa: BLE001 - one bad run must not take the pool down
         import traceback
