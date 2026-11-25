@@ -44,7 +44,7 @@ def test_td_staging_writes_manifest_and_tied_departure(tmp_path):
 
 def test_td_staging_refuses_an_incumbent_with_a_claim(tmp_path):
     pytest.importorskip("mamut_routing_lib._td_exact")
-    claim = {"proven": True, "prover": "test solver", "certificate": "historical certificate", "date": "2026-08-06"}
+    claim = {"status": "solver-reported-optimal", "target_profile": "td-binary64-exact-v1", "solver": "test solver"}
     root, desc, path, record = _toy_family(tmp_path, {"authors": "Test", "optimality": claim})
     out = tmp_path / "release"
     with pytest.raises(ValueError, match="optimality claim"):
