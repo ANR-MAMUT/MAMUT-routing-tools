@@ -239,7 +239,7 @@ def gui_run_cmd(
 
 
 SOLVER_HELP = (
-    "Solver: pyvrp (CVRP/VRPTW), kayros (TDVRP/TDVRPTW Duration), or an external executable "
+    "Solver: pyvrp (CVRP/VRPTW), kayros (TDVRP/TDVRPTW, Duration or FleetCostDuration), or an external executable "
     "-- filo2, hgs-cvrp, ails2, lkh3, or one of yours -- from the solvers config. "
     "`mamut-routing solvers list` shows what is available."
 )
@@ -254,7 +254,7 @@ def solve_cmd(
         Optional[str],
         typer.Option(
             "--objective",
-            help="MonoCost, HierarchicalVehicleCost (VRPTW), Duration (TD). Default: MonoCost, or Duration for TD instances.",
+            help="MonoCost or HierarchicalVehicleCost for static routing, Duration or FleetCostDuration for TD routing. Defaults to MonoCost for static routing and Duration for TD routing.",
         ),
     ] = None,
     solver: Annotated[str, typer.Option("--solver", help=SOLVER_HELP)] = "pyvrp",
