@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
+from uuid import uuid4
 
 from mamut_routing_tools.bks_campaign.archive import SCHEMA_VERSION, atomic_write_json, raw_dir, run_path
 from mamut_routing_tools.bks_campaign.plan import CampaignPlan, Task, best_known_routes
@@ -46,8 +47,7 @@ __all__ = ["RUN_MARKER_ENV", "execute_task", "memory_budget_gb", "run_tasks"]
 
 #: Solver input files are large for big explicit matrices (130 MB at n = 4000); keep only outputs.
 _INPUT_FILES = ("problem.vrp", "problem.par")
-#: A worker sets this to its run key before it solves; its solver's whole process tree inherits it,
-#: which is how the solver of a worker that died is told apart from any other process.
+#: A solver and its descendants inherit this worker attempt's marker.
 RUN_MARKER_ENV = "MAMUT_BKS_CAMPAIGN_RUN"
 
 
@@ -223,10 +223,10 @@ def execute_task(payload: dict[str, Any]) -> dict[str, Any]:
     return _summary(record)
 
 
-def _task_main(payload: dict[str, Any], nice: int | None, connection: Any) -> None:
+def _task_main(payload: dict[str, Any], nice: int | None, connection: Any, marker: str) -> None:
     """Worker process entry: ignore Ctrl-C, run the task, send its summary back."""
     _worker_init(nice)
-    os.environ[RUN_MARKER_ENV] = str(payload["key"])  # inherited by the solver's process tree
+    os.environ[RUN_MARKER_ENV] = marker
     summary = execute_task(payload)
     try:
         connection.send(summary)
@@ -246,24 +246,19 @@ def _death_reason(exitcode: int | None) -> str:
     return f"the worker exited with code {exitcode} before recording the run"
 
 
-def _kill_orphans(key: str) -> int:
-    """Kill the process groups the worker of run ``key`` left behind (its solver); Linux only.
-
-    Only processes that carry the worker's mark in their environment (``RUN_MARKER_ENV``) are
-    touched: the solver and whatever it spawned. Working in the run's directory is not enough --
-    a shell following ``solver.log`` there is none of our business.
-    """
+def _kill_orphans(marker: str) -> int:
+    """Clean up solver groups belonging to the tracked worker attempt (Linux only)."""
     proc = Path("/proc")
     if not proc.is_dir():  # pragma: no cover - not Linux
         return 0
-    marker = f"{RUN_MARKER_ENV}={key}".encode()
+    entry_marker = f"{RUN_MARKER_ENV}={marker}".encode()
     own_group = os.getpgid(0)
     groups: set[int] = set()
     for entry in proc.iterdir():
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
             continue
         try:
-            if marker not in (entry / "environ").read_bytes().split(b"\0"):
+            if entry_marker not in (entry / "environ").read_bytes().split(b"\0"):
                 continue
             group = os.getpgid(int(entry.name))
         except (OSError, ValueError):
@@ -281,6 +276,7 @@ def _kill_orphans(key: str) -> int:
 @dataclass
 class _Worker:
     task: Task
+    marker: str
     process: Any
     connection: Any
 
@@ -338,13 +334,15 @@ def run_tasks(
 
     def _start(task: Task) -> None:
         receiver, sender = context.Pipe(duplex=False)
+        # Run keys also occur in other campaigns and retries. Only this launch owns its descendants.
+        marker = f"{uuid4().hex}:{task.key}"
         process = context.Process(
-            target=_task_main, args=(task.to_payload(), nice, sender), name=f"bks-campaign {task.key}"
+            target=_task_main, args=(task.to_payload(), nice, sender, marker), name=f"bks-campaign {task.key}"
         )
         with _signals_blocked():
             process.start()
         sender.close()
-        running[process.sentinel] = _Worker(task=task, process=process, connection=receiver)
+        running[process.sentinel] = _Worker(task=task, marker=marker, process=process, connection=receiver)
         progress(f"start {task.key} ({task.time_limit_s}s, ~{task.memory_gb:.1f} GB)")
 
     def _finish(worker: _Worker) -> None:
@@ -355,7 +353,7 @@ def run_tasks(
         if task.warm_start != "best":
             cold_open[task.group] -= 1  # whatever its outcome, nobody waits for it any more
         if summary is None:
-            killed = _kill_orphans(task.key)
+            killed = _kill_orphans(worker.marker)
             terminated = worker.process.exitcode in (-signal.SIGTERM, 128 + signal.SIGTERM)
             if state["abort"] or terminated:
                 # An aborted or terminated run (SIGTERM to the whole group: systemd, a scheduler)
@@ -408,7 +406,7 @@ def run_tasks(
                 if worker.process.is_alive():
                     worker.process.kill()
                     worker.process.join()
-                _kill_orphans(worker.task.key)
+                _kill_orphans(worker.marker)
                 worker.connection.close()
         for sig, handler in previous.items():
             signal.signal(sig, handler)

@@ -398,32 +398,81 @@ def test_a_warm_start_whose_runs_all_failed_is_a_failed_run(campaign: Path, monk
     assert len(build_plan(spec, only="A1", retry_failed=True).tasks) == 3
 
 
-def test_orphan_kill_only_touches_the_runs_own_processes(tmp_path: Path) -> None:
-    """A shell following the log in the run's directory is not the dead worker's solver."""
-    import os
-    import subprocess
-    import time
+def test_orphan_cleanup_selects_only_the_tracked_attempt(tmp_path: Path, monkeypatch) -> None:
+    from mamut_routing_tools.bks_campaign import runner
 
-    from mamut_routing_tools.bks_campaign.runner import RUN_MARKER_ENV, _kill_orphans
+    # A private proc fixture and a signal recorder keep the selection test independent of the host.
+    marker = "attempt-a:same-key"
+    environments = {101: marker, 102: marker, 103: "attempt-b:same-key", 104: "same-key", 105: None}
+    for pid, value in environments.items():
+        entry = tmp_path / str(pid)
+        entry.mkdir()
+        env = [b"OTHER=1"]
+        if value is not None:
+            env.append(f"{runner.RUN_MARKER_ENV}={value}".encode())
+        (entry / "environ").write_bytes(b"\0".join(env) + b"\0")
+    monkeypatch.setattr(runner, "Path", lambda _: tmp_path)
+    monkeypatch.setattr(runner.os, "getpid", lambda: 200)
+    monkeypatch.setattr(runner.os, "getpgid", lambda pid: 101 if pid == 102 else pid)
+    signals = []
+    monkeypatch.setattr(runner.os, "killpg", lambda group, sig: signals.append((group, sig)))
+    assert runner._kill_orphans(marker) == 1
+    assert signals == [(101, runner.signal.SIGKILL)]
 
-    if not Path("/proc").is_dir():
-        pytest.skip("needs /proc")
-    raw = tmp_path / "raw" / "run-key"
-    raw.mkdir(parents=True)
-    sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
-    bystander = subprocess.Popen(sleep, cwd=raw, start_new_session=True)  # someone working in the directory
-    other_run = subprocess.Popen(sleep, cwd=raw, start_new_session=True, env={**os.environ, RUN_MARKER_ENV: "run-key-2"})
-    solver = subprocess.Popen(sleep, cwd=tmp_path, start_new_session=True, env={**os.environ, RUN_MARKER_ENV: "run-key"})
-    try:
-        assert _kill_orphans("run-key") == 1
-        assert solver.wait(timeout=10) < 0  # killed, wherever it was working
-        time.sleep(0.2)
-        assert bystander.poll() is None and other_run.poll() is None
-    finally:
-        for process in (bystander, other_run, solver):
-            if process.poll() is None:
-                process.kill()
-            process.wait()
+
+def test_cli_resumes_legacy_archive_and_marks_each_launch(campaign: Path) -> None:
+    import shutil
+
+    from mamut_routing_tools.bks_campaign.runner import RUN_MARKER_ENV
+
+    # Have the normal external solver record the value it inherited on startup.
+    wrapper = campaign.parent / "observed_solver.py"
+    wrapper.write_text(
+        "import os, runpy\nfrom pathlib import Path\n"
+        f"Path('attempt.txt').write_text(os.environ[{RUN_MARKER_ENV!r}])\n"
+        "runpy.run_module('mamut_routing_lib.solvers.external._fake_solver', run_name='__main__')\n"
+    )
+    config = campaign.parent / "solvers.toml"
+    config.write_text(config.read_text().replace('"-m", "mamut_routing_lib.solvers.external._fake_solver"', json.dumps(str(wrapper))))
+
+    spec = load_spec(campaign)
+    done, pending = build_plan(spec, only="A1").tasks
+    runs = spec.out / "runs"
+    runs.mkdir(parents=True)
+    old = runs / f"{done.key}.json"
+    old.write_text(json.dumps({"schema_version": 1, "key": done.key, "status": "feasible", "valid": True}))
+    old_bytes = old.read_bytes()
+
+    def resume(spec_path: Path, *flags: str) -> str:
+        result = CliRunner().invoke(app, ["bks-campaign", "run", str(spec_path), "--only", "A1", *flags])
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    assert "1 run(s) to do, 1 done" in resume(campaign)
+    assert json.loads((runs / f"{pending.key}.json").read_bytes())["valid"]
+    first = (spec.out / "raw" / pending.key / "attempt.txt").read_text()
+    assert old.read_bytes() == old_bytes
+    assert "0 run(s) to do, 2 done" in resume(campaign)
+
+    # Resume an independent copy with the same campaign name, keys and raw files, but no finished record.
+    copied = campaign.parent / "copy"
+    shutil.copytree(spec.out, copied)
+    (copied / "runs" / f"{pending.key}.json").unlink()
+    copy_spec = campaign.with_name("copy.toml")
+    copy_spec.write_text(campaign.read_text().replace('out = "out"', 'out = "copy"'))
+    assert "1 run(s) to do, 1 done" in resume(copy_spec)
+    second = (copied / "raw" / pending.key / "attempt.txt").read_text()
+    assert (copied / "runs" / old.name).read_bytes() == old_bytes
+    assert (spec.out / "raw" / pending.key / "attempt.txt").read_text() == first
+
+    # A failed record in the same archive is only retried on request, with a fresh attempt.
+    record = runs / f"{pending.key}.json"
+    record.write_text(json.dumps({**json.loads(record.read_bytes()), "status": "failed", "valid": False}))
+    assert "0 run(s) to do, 2 done" in resume(campaign)
+    assert "1 run(s) to do, 1 done" in resume(campaign, "--retry-failed")
+    retry = (spec.out / "raw" / pending.key / "attempt.txt").read_text()
+    assert len({first, second, retry, pending.key}) == 4
+    assert old.read_bytes() == old_bytes
 
 
 def test_a_store_error_fails_one_instance_and_the_harvest_is_still_recorded(campaign: Path, monkeypatch) -> None:
