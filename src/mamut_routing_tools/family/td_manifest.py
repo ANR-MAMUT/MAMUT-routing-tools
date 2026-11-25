@@ -19,7 +19,7 @@ from mamut_routing_lib.objectives import base_objective
 from mamut_routing_lib.sidecars import validate_relative_sidecar_path
 from mamut_routing_lib.td.artifacts import load_td_benchmark_instance
 from mamut_routing_lib.td.manifest_stream import stream_td_materialization
-from mamut_routing_lib.td.reprice import route_arcs
+from mamut_routing_lib.td.selected_arcs import route_arcs
 
 IGP = "mamut_routing_lib.td.igp.materialize_instance_atfs"
 ROAD = "mamut_routing_lib.td.roadgraph.materialize_instance_atfs_roadgraph"
