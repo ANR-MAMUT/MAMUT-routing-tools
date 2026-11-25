@@ -824,7 +824,8 @@ def bks_campaign_run(
 
     First Ctrl-C: no new run starts and the running ones finish. Second: abort
     (solvers are killed with their process groups). Interrupted runs leave no
-    record and are picked up by the next `run`. A worker that dies (out of
+    record. The next `run` starts them in fresh workers and skips completed
+    records, including those from older campaigns. A worker that dies (out of
     memory) gets a failed record (`--retry-failed` runs it again); the
     other runs carry on.
     """
