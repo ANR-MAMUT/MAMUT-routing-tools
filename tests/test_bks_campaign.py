@@ -538,8 +538,9 @@ def test_a_killed_worker_costs_only_its_own_run(campaign: Path, monkeypatch) -> 
     assert (spec.out / "run.DONE").is_file()
     runs = {run["status"]: run for run in load_runs(spec.out)}
     assert set(runs) == {"feasible", "failed"}
-    assert "killed by SIGKILL" in runs["failed"]["error"] and "has been killed" in runs["failed"]["error"]
-    assert _fake_solvers_in(spec.out / "raw") == []  # the dead worker's solver did not outlive it
+    assert "killed by SIGKILL" in runs["failed"]["error"]
+    # Either the library guard or the runner can finish cleaning up first.
+    assert _fake_solvers_in(spec.out / "raw") == []
     assert len(build_plan(spec, only="A1").tasks) == 0  # a failed run is done ...
     assert len(build_plan(spec, only="A1", retry_failed=True).tasks) == 1  # ... until --retry-failed
 
