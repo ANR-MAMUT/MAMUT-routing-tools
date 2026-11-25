@@ -14,7 +14,7 @@ from mamut_routing_lib.exact_td import prepare_td
 from mamut_routing_lib.exact_types import TD_PROFILE
 from mamut_routing_lib.json_utils import strict_json_loads
 from mamut_routing_lib.manifests import SPECIFICATION, file_sha256, manifest_bytes, manifest_path_for
-from mamut_routing_lib.models import BenchmarkBKS, SolverReportedOptimality
+from mamut_routing_lib.models import BenchmarkBKS
 from mamut_routing_lib.objectives import base_objective
 from mamut_routing_lib.sidecars import validate_relative_sidecar_path
 from mamut_routing_lib.td.artifacts import load_td_benchmark_instance
@@ -105,31 +105,6 @@ def _manifest(root, relative, instance, proof, catalog, upstream_root):
             "sidecars": sidecars, "materialization": material}
 
 
-def _historical_claim(bks, current_claim, raw, archive, target_profile):
-    if raw is None or target_profile != "td-fold/1":
-        raise ValueError("Historical solver claim requires original BKS bytes and the reviewed td-fold/1 target")
-    historical = strict_json_loads(raw)
-    if (historical["instance_name"] != bks.instance_name or historical["objective_function"] != bks.objective_function.value
-            or sorted(historical["routes"]) != sorted(bks.routes)):
-        raise ValueError("Historical BKS does not identify the same instance, objective and routes")
-    initial = historical["metadata"]["optimality"]
-    if initial.get("proven") is not True or any(initial.get(k) != current_claim.get(k) for k in
-                                               ("prover", "certificate", "campaign", "date")):
-        raise ValueError("Historical optimality evidence does not match the incumbent")
-    checksum = sha256(raw).hexdigest()
-    relative = f".mamut/history/{checksum}.bks.json"
-    record = {k: initial[k] for k in ("certificate", "arithmetic", "date", "campaign", "wall_time_s", "time_limit_s")
-              if k in initial}
-    record.update(status="solver-reported-optimal", solver=initial["prover"], target_profile=target_profile,
-                  reported_primal=initial["proven_optimum"], reported_dual=initial["dual_bound"],
-                  evidence={"path": relative, "sha256": checksum, "scope": "file"})
-    SolverReportedOptimality.model_validate(record)
-    path = archive / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(raw)
-    return record
-
-
 def _display(rational):
     value = read_result_fraction(rational)
     try:
@@ -138,7 +113,7 @@ def _display(rational):
         return None
 
 
-def _write_stage(root, relative, output, proof, recipes, upstream_root, original_claim, original_claim_target):
+def _write_stage(root, relative, output, proof, recipes, upstream_root):
     """Write a trusted internal dual-backend checkpoint after verifying its input identities."""
     if output.resolve().is_relative_to(root.resolve()):
         raise ValueError("A release must be staged outside its input collection")
@@ -164,9 +139,8 @@ def _write_stage(root, relative, output, proof, recipes, upstream_root, original
             raise ValueError("Expected a pre-r1 incumbent, found an existing exact record")
     metadata.pop("repriced", None)
     if "optimality" in metadata:
-        metadata["optimality"] = _historical_claim(bks, metadata["optimality"], original_claim, output, original_claim_target)
-    elif original_claim is not None or original_claim_target is not None:
-        raise ValueError("Found historical claim bytes for a record without a claim")
+        raise ValueError("Incumbent carries an optimality claim. Stage the unclaimed record and record "
+                         "a solver claim under the TD profile afterwards.")
     witnesses = standard["route_evaluations"]
     if len(witnesses) != len(bks.routes) or len(bks.routes) != standard["num_routes"]:
         raise ValueError("Incomplete per-route witness vector")
@@ -181,12 +155,11 @@ def _write_stage(root, relative, output, proof, recipes, upstream_root, original
     output_bks = output / bks_path.relative_to(root)
     write_bks_file(current, output_bks)
     return {"manifest_sha256": digest, "certified_bks_sha256": file_sha256(output_bks),
-            "routes": len(current.routes), "historical_claim": "optimality" in metadata}
+            "routes": len(current.routes)}
 
 
 def stage_td(root: Path, descriptor: Path, output: Path, *, recipes: dict, upstream_root: Path | None = None,
-             atf_cache_root: Path | None = None, original_claim: bytes | None = None,
-             original_claim_target: str | None = None):
+             atf_cache_root: Path | None = None):
     """Verify all arcs, compare both exact backends, and stage one manifest and incumbent."""
     path = root / validate_relative_sidecar_path(descriptor.as_posix())
     instance_sha = file_sha256(path)
@@ -203,7 +176,7 @@ def stage_td(root: Path, descriptor: Path, output: Path, *, recipes: dict, upstr
     proof = dict(instance_sha256=instance_sha, incumbent_sha256=bks_sha,
                  atf_stream_sha256=checked.atf_stream_sha256, canonical_atf_sha256=checked.canonical_sha256,
                  sidecars=checked.sidecars, standard=standard_metadata(native), display_cost=native.display_cost)
-    return _write_stage(root, descriptor, output, proof, recipes, upstream_root, original_claim, original_claim_target)
+    return _write_stage(root, descriptor, output, proof, recipes, upstream_root)
 
 
 def main():
@@ -214,13 +187,9 @@ def main():
     parser.add_argument("--recipes", type=Path, required=True)
     parser.add_argument("--upstream-root", type=Path, help="Blauth source directory containing instances/")
     parser.add_argument("--atf-cache-root", type=Path, help="Directory with checked regenerated ATFs")
-    parser.add_argument("--original-claim-bks", type=Path, help="Original solver-target BKS file")
-    parser.add_argument("--original-claim-target", choices=["td-fold/1"], help="Independently reviewed historical target")
     args = parser.parse_args()
     result = stage_td(args.family_root, args.descriptor, args.output, recipes=json.loads(args.recipes.read_bytes()),
-                      upstream_root=args.upstream_root, atf_cache_root=args.atf_cache_root,
-                      original_claim=args.original_claim_bks.read_bytes() if args.original_claim_bks else None,
-                      original_claim_target=args.original_claim_target)
+                      upstream_root=args.upstream_root, atf_cache_root=args.atf_cache_root)
     print(json.dumps(result))
 
 
