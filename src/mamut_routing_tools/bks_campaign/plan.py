@@ -21,11 +21,11 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass, field
-from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from mamut_routing_lib.exact_store import read_result_fraction
 from mamut_routing_tools.bks_campaign.archive import group_runs, run_key, run_path
 from mamut_routing_tools.bks_campaign.spec import CampaignSpec
 
@@ -148,7 +148,7 @@ def archived_cost(record: dict[str, Any]) -> Fraction | int | float | None:
     rational = record.get("authoritative_cost")
     if rational is None:
         return record.get("validated_cost")
-    return Fraction(int(Decimal(rational["numerator"])), int(Decimal(rational["denominator"])))
+    return read_result_fraction(rational)
 
 
 def objective_rank(objective: str, cost: Fraction | int | float, num_routes: int) -> tuple:

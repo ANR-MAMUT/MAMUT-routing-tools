@@ -628,3 +628,15 @@ def test_sigterm_aborts_the_running_tasks_at_once(campaign: Path, monkeypatch) -
     assert any(line.startswith("SIGTERM: aborting") for line in lines)
     assert _fake_solvers_in(spec.out / "raw") == []
     assert len(build_plan(spec).tasks) == 4  # the next run redoes them
+
+
+def test_archived_checker_cost_requires_canonical_fractions():
+    from fractions import Fraction
+    from mamut_routing_tools.bks_campaign.plan import archived_cost
+
+    record = {"validated_cost": 0.5, "authoritative_cost": {"numerator": "2", "denominator": "4"}}
+    with pytest.raises(ValueError, match="canonical result fraction"):
+        archived_cost(record)
+    record["authoritative_cost"] = {"numerator": "1", "denominator": "2"}
+    assert archived_cost(record) == Fraction(1, 2)
+    assert archived_cost({"validated_cost": 0.5}) == 0.5

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
-from decimal import Decimal
-from fractions import Fraction
 from hashlib import sha256
 import json
 from pathlib import Path
 
 from mamut_routing_lib.artifacts import get_bks_path_for_instance, instance_problem_type, load_bks, write_bks_file
-from mamut_routing_lib.exact_store import standard_metadata
+from mamut_routing_lib.exact_store import read_result_fraction, standard_metadata
 from mamut_routing_lib.exact_td import prepare_td
 from mamut_routing_lib.exact_types import TD_PROFILE
 from mamut_routing_lib.json_utils import strict_json_loads
@@ -133,7 +131,7 @@ def _historical_claim(bks, current_claim, raw, archive, target_profile):
 
 
 def _display(rational):
-    value = Fraction(int(Decimal(rational["numerator"])), int(Decimal(rational["denominator"])))
+    value = read_result_fraction(rational)
     try:
         return float(value)
     except OverflowError:
