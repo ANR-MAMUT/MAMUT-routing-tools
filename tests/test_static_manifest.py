@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from mamut_routing_lib.manifests import manifest_bytes
 from mamut_routing_tools.static_manifest import stage_static
 
 
@@ -48,6 +49,34 @@ def test_stages_repriced_incumbent_and_complete_embedded_matrix(tmp_path):
     assert (root / incumbent).read_bytes() == original
     with pytest.raises(ValueError, match="outside"):
         stage_static(root, desc, root, recipes={}, revision="r1")
+
+    # Reissue the old, byte-bound pair and replay the resulting pair.
+    prior = stage / "previous"
+    prior.mkdir()
+    prior_manifest = (root / desc).with_name(manifest.name)
+    old = manifest_bytes(dict(published, cost_is_travel_time=True))
+    prior_manifest.write_bytes(old)
+    standard["manifest_sha256"] = hashlib.sha256(old).hexdigest()
+    (root / incumbent).write_text(json.dumps(record))
+    reissued = stage_static(root, desc, prior, recipes={}, revision="r1")
+    assert reissued["manifest_sha256"] == receipt["manifest_sha256"]
+    assert (prior / incumbent).read_bytes() == (stage / incumbent).read_bytes()
+
+    # A mismatched claim and a different, even correctly pinned, unit both fail.
+    standard["manifest_sha256"] = reissued["manifest_sha256"]
+    (root / incumbent).write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="manifest_sha256"):
+        stage_static(root, desc, prior, recipes={}, revision="r1")
+    changed_unit = manifest_bytes(dict(published, cost_is_travel_time=True, units={"cost": "metre"}))
+    prior_manifest.write_bytes(changed_unit)
+    standard["manifest_sha256"] = hashlib.sha256(changed_unit).hexdigest()
+    (root / incumbent).write_text(json.dumps(record))
+    with pytest.raises(ValueError, match="Source manifest"):
+        stage_static(root, desc, prior, recipes={}, revision="r1")
+    prior_manifest.write_bytes(manifest.read_bytes())
+    (root / incumbent).write_bytes((stage / incumbent).read_bytes())
+    assert stage_static(root, desc, prior, recipes={}, revision="r1")["manifest_sha256"] == receipt["manifest_sha256"]
+    (root / incumbent).write_bytes(original)
 
     # The incumbent traverses neither 1 -> 2 nor 2 -> 1. The entire matrix
     # still identifies the edition, even when the exact solution cost is equal.

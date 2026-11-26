@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from mamut_routing_lib.artifacts import (
@@ -96,6 +97,20 @@ def _materialization(instance, root, recipes, *, regenerated_distances):
     return sidecars, materialization
 
 
+def _source_manifest(path, bks, manifest, encoded, verified):
+    """Bind a certified input to its original bytes before issuing a new pin."""
+    source = manifest_path_for(path)
+    if "standard" not in bks.metadata or not source.is_file():
+        return verified
+    original = source.read_bytes()
+    if original == encoded:
+        return verified
+    legacy = dict(manifest, cost_is_travel_time=manifest["problem"] == "VRPTW" or manifest["units"]["cost"] == "second")
+    if original != manifest_bytes(legacy):
+        raise ValueError(f"Source manifest differs from the staged edition: {source}")
+    return replace(verified, manifest_sha256=hashlib.sha256(original).hexdigest())
+
+
 def stage_static(root: Path, descriptor: Path, output: Path, *, recipes: dict,
                  revision: str, regenerated_distances: bool = False) -> dict:
     """Stage the edition manifest/BKS pair after two independent exact route evaluations.
@@ -150,7 +165,7 @@ def stage_static(root: Path, descriptor: Path, output: Path, *, recipes: dict,
     encoded = manifest_bytes(manifest)
     manifest_hash = hashlib.sha256(encoded).hexdigest()
     verified = VerifiedManifest(SPECIFICATION, revision, manifest_hash, objective, hydrated)
-    verify_stored(bks, native, verified)
+    verify_stored(bks, native, _source_manifest(path, bks, manifest, encoded, verified))
     metadata = dict(bks.metadata)
     metadata.pop("exact_evaluation", None)
     metadata.update(evaluation_metadata(native, verified))
