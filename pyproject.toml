@@ -56,7 +56,7 @@ dependencies = [
 
 [project.optional-dependencies]
 kayros = [
-    "kayros>=1.1.2",
+    "kayros>=2.0.0.dev0",
 ]
 
 [project.urls]
@@ -79,6 +79,7 @@ dev = [
 # the code was written for. The published wheel is unaffected: it keeps the PyPI
 # requirement declared in [project.dependencies] above.
 mamut-routing-lib = { path = "MAMUT-routing-lib", editable = true }
+kayros = { git = "https://github.com/0nyr/kayros.git", rev = "2680fed267efd2a71c047b4191a1590d6d491ed2" }
 
 [build-system]
 requires = ["hatchling"]

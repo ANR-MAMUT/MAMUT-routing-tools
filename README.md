@@ -74,6 +74,25 @@ uv run pytest
 
 The two variants differ in where the `MAMUT-routing-lib` contract library comes from. A PyPI install resolves it from PyPI. A source checkout builds it from the vendored submodule, at the exact commit this repository pins, because the tools regularly use library features that are not released yet. That is why the clone must be recursive, and why the submodule has to be up to date before `uv sync`.
 
+### Optional Kayros solver
+
+The `kayros` extra requires Kayros 2.0.0.dev0 or later for the current TD checker. The source checkout pins the Kayros revision in `uv.lock`. The development build supports CPython 3.11 to 3.14 on Linux x86-64 and requires a C++23 compiler, Boost.Graph and the GMP development files. From a recursive checkout, build the pinned MAMUT library for the same interpreter so Kayros can find it in its isolated build environment:
+
+```bash
+wheelhouse=$(mktemp -d)
+uv build --python 3.12 --wheel --out-dir "$wheelhouse" MAMUT-routing-lib
+UV_FIND_LINKS="$wheelhouse" uv sync --locked --python 3.12 --extra kayros
+.venv/bin/mamut-tools solve path/to/instance.vrp.json --solver kayros
+```
+
+To install the development wheels before the joint PyPI release, put the matching CPython wheels from the [library build](https://github.com/ANR-MAMUT/MAMUT-routing-lib/actions/runs/45740127553) and the [Kayros build](https://github.com/0nyr/kayros/actions/runs/45757149169) in a directory. With that directory assigned to `wheelhouse`, build the tools wheel from this checkout and install the extra in a fresh environment:
+
+```bash
+uv build --wheel --out-dir "$wheelhouse" .
+python -m pip install --find-links "$wheelhouse" 'mamut-routing-tools[kayros]==0.7.0.dev0'
+python -m pip check
+```
+
 ## Onboarding: discovering the CLI
 
 Everything in this suite is reachable from the single `mamut-tools` entry point, and **every level of the command tree answers `--help`**. You do not need to hunt through this README for a flag: ask the CLI directly.
