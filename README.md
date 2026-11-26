@@ -1,5 +1,7 @@
 # MAMUT-routing-tools
 
+[![PyPI](https://img.shields.io/pypi/v/mamut-routing-tools)](https://pypi.org/project/mamut-routing-tools/)
+
 Local generation tool suite for the [MAMUT-routing](https://github.com/ANR-MAMUT/MAMUT-routing) benchmark project: OSM city acquisition, a road-graph engine, BKS route-geometry materialization, and interactive CVRP / VRPTW / time-dependent (TDVRP, TDVRPTW) instance generation. The public MAMUT-routing website is fully static; everything compute-heavy lives here and runs on your own machine.
 
 Part of the [ANR MAMUT project](https://anr.fr/Projet-ANR-22-CE22-0016).
