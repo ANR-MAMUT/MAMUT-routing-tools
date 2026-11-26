@@ -42,7 +42,7 @@ The traffic models (`bpr` commuter simulation, `wave` rush-hour dip) and the roa
 
 ## Install
 
-Requires Python >= 3.11. Two variants:
+Requires Python 3.11 or later. PyPI tools 0.6.0 provide their published command-line interface. For edition `r1` generation, materialization and solver commands documented in this checkout, install the source revision pinned by the collection.
 
 ### Option A — from PyPI (recommended for users)
 
