@@ -85,13 +85,15 @@ UV_FIND_LINKS="$wheelhouse" uv sync --locked --python 3.12 --extra kayros
 .venv/bin/mamut-tools solve path/to/instance.vrp.json --solver kayros
 ```
 
-To install the development wheels before the joint PyPI release, put the matching CPython wheels from the [library build](https://github.com/ANR-MAMUT/MAMUT-routing-lib/actions/runs/45740127553) and the [Kayros build](https://github.com/0nyr/kayros/actions/runs/45757149169) in a directory. With that directory assigned to `wheelhouse`, build the tools wheel from this checkout and install the extra in a fresh environment:
+To install Kayros 2.0 from a development wheel, put the matching CPython wheel in the directory assigned to `wheelhouse` above. The command below installs the tools from this checkout, library 0.13.0 and the compatible Kayros development wheel. [Kayros wheel build](https://github.com/0nyr/kayros/actions/runs/45757149169)
 
 ```bash
 uv build --wheel --out-dir "$wheelhouse" .
-python -m pip install --find-links "$wheelhouse" 'mamut-routing-tools[kayros]==0.7.0.dev0'
+python -m pip install --find-links "$wheelhouse" 'mamut-routing-lib==0.13.0' 'mamut-routing-tools[kayros]==0.7.0.dev0'
 python -m pip check
 ```
+
+A base tools checkout can generate instances, materialize sidecars and verify routes without Kayros. The compatible Kayros 2.0 release has its own publication schedule. For an experiment using Kayros 1.7.1, install its historical library dependency in a separate environment.
 
 ## Rebuild a published distance matrix
 
