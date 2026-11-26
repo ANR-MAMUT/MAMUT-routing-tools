@@ -31,6 +31,12 @@ def test_stages_repriced_incumbent_and_complete_embedded_matrix(tmp_path):
     original = (root / incumbent).read_bytes()
     receipt = stage_static(root, desc, stage, recipes={}, revision="r1")
     manifest = stage / desc.with_name("example.manifest.json")
+    published = json.loads(manifest.read_bytes())
+    assert "cost_is_travel_time" not in published
+    assert published["units"] == {
+        "cost": "Solomon/Homberger benchmark unit",
+        "time": "Solomon/Homberger benchmark unit",
+    }
     record = json.loads((stage / incumbent).read_bytes())
     standard = record["metadata"]["standard"]
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == standard["manifest_sha256"]

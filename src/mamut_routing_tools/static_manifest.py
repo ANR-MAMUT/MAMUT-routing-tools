@@ -31,7 +31,7 @@ EUCLIDEAN = "mamut_routing_lib.artifacts.resolve_arc_costs"
 ROAD_DISTANCES = "mamut_routing_tools.family.materialize_distances"
 
 
-def _units(family, instance):
+def _units(family, instance, problem):
     if family == "Sintef2008":
         unit = "Solomon/Homberger benchmark unit"
     elif family == "Dimacs2021":
@@ -46,10 +46,9 @@ def _units(family, instance):
     else:
         raise ValueError(f"No published static units for family {family}")
     units = {"cost": unit}
-    has_windows = instance_problem_type(instance).value == "VRPTW"
-    if has_windows:
+    if problem == "VRPTW":
         units["time"] = unit
-    return units, has_windows or unit == "second"
+    return units
 
 
 def _recipe(name, parameters, recipes, root):
@@ -137,7 +136,6 @@ def stage_static(root: Path, descriptor: Path, output: Path, *, recipes: dict,
     del native_result["backend"], reference_result["backend"]
     if native_result != reference_result:
         raise ValueError(f"Native and Fraction evaluation disagree: {path}")
-    units, is_travel_time = _units(family, instance)
     features = ["single-depot", "homogeneous-capacity", "mandatory-visits"]
     if problem == "VRPTW":
         features.append("service-start-windows")
@@ -145,7 +143,7 @@ def stage_static(root: Path, descriptor: Path, output: Path, *, recipes: dict,
         "specification": SPECIFICATION, "family": family,
         "benchmark_revision": revision, "instance_name": instance.instance_name,
         "problem": problem, "objective": objective.value, "default_profile": STATIC_PROFILE,
-        "units": units, "cost_is_travel_time": is_travel_time, "features": features,
+        "units": _units(family, instance, problem), "features": features,
         "instance": {"path": relative.as_posix(), "sha256": file_sha256(path)},
         "sidecars": sidecars, "materialization": materialization,
     }
