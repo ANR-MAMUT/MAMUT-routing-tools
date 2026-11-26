@@ -65,9 +65,9 @@ uv add mamut-routing-tools
 Clone the repository and use the project environment:
 
 ```bash
-git clone --recurse-submodules https://github.com/ANR-MAMUT/MAMUT-routing-tools.git
+git -c url.https://github.com/.insteadOf=git@github.com: clone --recurse-submodules https://github.com/ANR-MAMUT/MAMUT-routing-tools.git
 cd MAMUT-routing-tools
-uv sync
+uv sync --locked
 uv run mamut-tools --help
 uv run pytest
 ```
@@ -92,6 +92,16 @@ uv build --wheel --out-dir "$wheelhouse" .
 python -m pip install --find-links "$wheelhouse" 'mamut-routing-tools[kayros]==0.7.0.dev0'
 python -m pip check
 ```
+
+## Rebuild a published distance matrix
+
+From the root of a collection checkout with the Mamut2026 family initialized, pass a descriptor or a directory to the installed tools. This example uses the 156-customer Amiens instance.
+
+```bash
+mamut-tools generate materialize-distances benchmarks/Mamut2026/CVRP/fastest/amiens/n=156
+```
+
+A missing matrix is rebuilt from the published road sidecar. The command checks the result against the descriptor's SHA-256 before writing it (`written`). An existing matrix yields `kept`. To verify the full set of inputs, use the library's `mamut-routing verify-manifest` on the descriptor.
 
 ## Onboarding: discovering the CLI
 
