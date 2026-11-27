@@ -5,12 +5,15 @@ description = "Local generation tool suite for MAMUT-routing: OSM acquisition, r
 readme = "README.md"
 authors = [
     { name = "Adrien Pichon" },
-    { name = "Florian Rascoussier", email = "onyr.maintainer@gmail.com" },
+    { name = "Florian Rascoussier" },
     { name = "Romain Billot" },
     { name = "Lina Fahed" },
     { name = "Alexandru-Liviu Olteanu" },
     { name = "Marc Sevaux" },
     { name = "Christine Solnon" },
+]
+maintainers = [
+    { name = "Florian Rascoussier", email = "onyr.maintainer@gmail.com" },
 ]
 license = "MIT"
 license-files = ["LICENSE"]
