@@ -304,6 +304,10 @@ const state = {
   bulkNextId: 1,
   // The last run comparison: { instanceId, candidateId, html }.
   comparison: null,
+  // Published instances: the listing, the family/problem scope shown, and the panel objects by id.
+  instanceSource: "workspace",
+  benchmarks: { loaded: false, loading: false, instances: [], hint: null, root: null, scope: null },
+  benchmarkObjects: new Map(),
 };
 
 /* ── Tabs ── */
@@ -719,7 +723,7 @@ async function loadInstances(selectBase) {
   if (selectBase) {
     const index = state.instances.findIndex((instance) => instance.base_name === selectBase);
     if (index >= 0) selectInstance(index);
-  } else if (state.selected) {
+  } else if (state.selected && state.selected.source !== "benchmark") {
     const index = state.instances.findIndex((instance) => instance.base_name === state.selected.base_name && instance.folder === state.selected.folder);
     state.selected = index >= 0 ? state.instances[index] : null;
   }
@@ -1438,15 +1442,49 @@ function renderSelected() {
   el("selName").textContent = instance.base_name;
   // "n301" in the name counts the depot; say what the number in the header counts.
   const customers = Number.isFinite(Number(instance.n)) ? `${instance.n} customers` : "customers n/a";
-  el("selMeta").innerHTML = `<span>CVRP · ${escapeHtml(instance.city)} · ${escapeHtml(customers)} · capacity ${escapeHtml(instance.summary.capacity ?? "n/a")}</span>`
-    + (instance.vrptw ? '<span class="chip chip-acc" title="A VRPTW twin was derived from this instance">VRPTW twin</span>' : "");
+  const benchmark = instance.source === "benchmark";
+  const lead = benchmark ? `${instance.problem} · ${instance.family}` : "CVRP";
+  el("selMeta").innerHTML = `<span>${escapeHtml(lead)} · ${escapeHtml(instance.city)} · ${escapeHtml(customers)} · capacity ${escapeHtml(instance.summary.capacity ?? "n/a")}</span>`
+    + (instance.vrptw ? '<span class="chip chip-acc" title="A VRPTW twin was derived from this instance">VRPTW twin</span>' : "")
+    + (benchmark ? `<span class="chip chip-acc" title="Published instance, read-only: your solutions are stored in the workspace">benchmark${instance.summary.revision ? ` ${escapeHtml(instance.summary.revision)}` : ""}</span>` : "")
+    + (benchmark && instance.tw_set ? `<span class="chip chip-acc" title="Time-window set">${escapeHtml(instance.tw_set)}</span>` : "");
+  // The .vrp export is a CVRP format; a benchmark has no workspace folder to zip.
+  el("download-open").hidden = benchmark && instance.problem !== "CVRP";
+  el("download").hidden = benchmark;
+  el("download-rule").hidden = benchmark;
   renderDetails(instance);
   renderRunCard();
   renderLegend();
   syncAppearanceControls();
 }
 
+function renderBenchmarkDetails(instance) {
+  const summary = instance.summary || {};
+  const variants = instance.files?.vrp_json || {};
+  const first = Object.values(variants)[0] || "";
+  const facts = [
+    ["Family", `${escapeHtml(instance.family)}${summary.revision ? ` · revision ${escapeHtml(summary.revision)}` : ""}`],
+    ["Problem", `${escapeHtml(instance.problem)}${instance.tw_set ? ` · time windows: ${escapeHtml(instance.tw_set)}` : ""}`],
+    ["City", escapeHtml(instance.city)],
+    ["Customers", escapeHtml(instance.n)],
+    ["Capacity", escapeHtml(summary.capacity ?? "n/a")],
+  ];
+  if (summary.route_count != null) facts.push(["Vehicles, lower bound", escapeHtml(summary.route_count)]);
+  for (const metric of Object.keys(variants)) {
+    const published = (summary.bks?.[metric] || []).join(", ") || "no BKS";
+    facts.push([`${metric[0].toUpperCase()}${metric.slice(1)} variant`, `cost in ${escapeHtml(summary.units?.[metric] || "units")} · ${escapeHtml(published)}`]);
+  }
+  if (summary.profile) facts.push(["Checker profile", escapeHtml(summary.profile)]);
+  facts.push(["Folder", folderFactHtml(`${instance.folder}/${first.split("/").slice(0, -1).join("/")}`)]);
+  facts.push(["My solutions", escapeHtml(instance.solution_count)]);
+  el("selFacts").innerHTML = facts.map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join("");
+}
+
 function renderDetails(instance) {
+  if (instance.source === "benchmark") {
+    renderBenchmarkDetails(instance);
+    return;
+  }
   const summary = instance.summary || {};
   const variants = instance.files?.vrp_json || {};
   const facts = [
@@ -1552,7 +1590,12 @@ el("routes-none").addEventListener("click", () => {
 });
 
 function selectInstance(index, preferredRunId = null) {
-  state.selected = state.instances[index];
+  return activateInstance(state.instances[index], preferredRunId);
+}
+
+/* Makes `instance` the selected one: a workspace instance or a benchmark's. */
+function activateInstance(instance, preferredRunId = null) {
+  state.selected = instance;
   state.selected.solved = null;
   state.selected.rendered = null;
   state.solutionRuns = [];
@@ -1568,6 +1611,8 @@ function selectInstance(index, preferredRunId = null) {
   el("import-panel").hidden = true;
   state.comparison = null;
   renderInstanceList();
+  renderBenchmarkList();
+  syncMetricOptions();
   renderSelected();
   loadSolvers().catch((error) => console.warn("Unable to list solvers", error));
   return loadSolutionRuns(preferredRunId).catch((error) => {
@@ -1600,6 +1645,184 @@ async function displayInstanceOnly(fit = true) {
   refreshSolutionControls();
   renderSelected();
   status(`Displayed ${instance.base_name}: depot and ${instance.n} customer positions.`);
+}
+
+/* ── Benchmarks: published instances as a second, read-only source ── */
+/* The same panel serves them: a solution found elsewhere is imported, checked by
+   the reference checker, stored in the workspace and drawn, with the published
+   BKS as the reference to compare against. */
+const placeName = (slug) => String(slug || "").split("_").filter(Boolean)
+  .map((word) => word[0].toUpperCase() + word.slice(1)).join(" ");
+
+function setInstanceSource(source) {
+  state.instanceSource = source;
+  const benchmarks = source === "benchmarks";
+  el("workspaceSource").hidden = benchmarks;
+  el("benchmarkSource").hidden = !benchmarks;
+  for (const [id, active] of [["sourceWorkspace", !benchmarks], ["sourceBenchmarks", benchmarks]]) {
+    el(id).classList.toggle("tab-active", active);
+    el(id).setAttribute("aria-pressed", String(active));
+  }
+  if (benchmarks && !state.benchmarks.loaded && !state.benchmarks.loading) {
+    loadBenchmarks().catch((error) => {
+      state.benchmarks.loading = false;
+      el("benchList").innerHTML = `<div class="empty-note">Cannot list the benchmarks: ${escapeHtml(error.message)}</div>`;
+    });
+  }
+}
+
+async function loadBenchmarks(refresh = false) {
+  state.benchmarks.loading = true;
+  el("benchList").innerHTML = '<div class="empty-note">Reading the benchmarks folder…</div>';
+  const data = await api(`/api/workbench/benchmarks${refresh ? "?refresh=true" : ""}`);
+  Object.assign(state.benchmarks, { loaded: true, loading: false, instances: data.instances || [], hint: data.hint, root: data.root });
+  const scopes = benchmarkScopes();
+  if (!scopes.some((scope) => scope.key === state.benchmarks.scope)) state.benchmarks.scope = scopes[0]?.key || null;
+  renderBenchmarkFilters();
+  renderBenchmarkList();
+}
+
+/* A scope is a family under one problem class: what a solution is checked against. */
+function benchmarkScopes() {
+  const scopes = new Map();
+  for (const entry of state.benchmarks.instances) {
+    const key = `${entry.family}|${entry.problem_type}`;
+    if (!scopes.has(key)) scopes.set(key, { key, family: entry.family, problem: entry.problem_type, count: 0 });
+    scopes.get(key).count += 1;
+  }
+  return [...scopes.values()];
+}
+
+function scopedBenchmarks() {
+  return state.benchmarks.instances.filter((entry) => `${entry.family}|${entry.problem_type}` === state.benchmarks.scope);
+}
+
+function renderBenchmarkFilters() {
+  const scopes = benchmarkScopes();
+  el("bench-scope").hidden = scopes.length < 2;
+  el("bench-scope").innerHTML = scopes
+    .map((scope) => `<button type="button" class="tab-btn${scope.key === state.benchmarks.scope ? " tab-active" : ""}" data-bench-scope="${escapeHtml(scope.key)}" aria-pressed="${scope.key === state.benchmarks.scope}" title="${scope.count} instances">${escapeHtml(scope.family)} ${escapeHtml(scope.problem)}</button>`)
+    .join("");
+  const scoped = scopedBenchmarks();
+  const fill = (id, all, values, label) => {
+    const select = el(id);
+    const previous = select.value;
+    select.innerHTML = "";
+    select.append(new Option(all, ""));
+    values.forEach((value) => select.append(new Option(label(value), String(value))));
+    select.value = values.map(String).includes(previous) ? previous : "";
+  };
+  fill("bench-city", "All cities", [...new Set(scoped.map((entry) => entry.city))].sort(), placeName);
+  const sizes = [...new Set(scoped.map((entry) => entry.n_customers))].sort((a, b) => a - b);
+  // A family with one size per city has as many sizes as instances: the search does that job better.
+  el("bench-size-field").hidden = sizes.length > 12;
+  fill("bench-size", "All sizes", sizes.length > 12 ? [] : sizes, (value) => `${value} customers`);
+}
+
+function filteredBenchmarks() {
+  const needle = el("bench-search").value.trim().toLowerCase();
+  const city = el("bench-city").value;
+  const size = el("bench-size").value;
+  const mine = el("bench-solved").checked;
+  return scopedBenchmarks().filter((entry) => {
+    if (city && entry.city !== city) return false;
+    if (size && String(entry.n_customers) !== size) return false;
+    if (mine && !entry.solution_count) return false;
+    return !needle || `${entry.base_name} ${entry.city} ${placeName(entry.city)}`.toLowerCase().includes(needle);
+  });
+}
+
+function renderBenchmarkList() {
+  const list = el("benchList");
+  if (!state.benchmarks.loaded) return;
+  const scoped = scopedBenchmarks();
+  if (!state.benchmarks.instances.length) {
+    el("bench-count").textContent = "";
+    list.innerHTML = `<div class="empty-note">${escapeHtml(state.benchmarks.hint || "No published instance was found.")}</div>`;
+    return;
+  }
+  const entries = filteredBenchmarks();
+  el("bench-count").textContent = entries.length === scoped.length
+    ? `${entries.length} instance${entries.length === 1 ? "" : "s"}`
+    : `${entries.length} of ${scoped.length}`;
+  if (!entries.length) {
+    list.innerHTML = '<div class="empty-note">No instance matches these filters.</div>';
+    return;
+  }
+  list.innerHTML = entries.map((entry) => {
+    const selected = state.selected?.instance_id === entry.instance_id;
+    const windows = entry.tw_set ? ` <span class="chip chip-acc" title="Time-window set">${escapeHtml(entry.tw_set)}</span>` : "";
+    const mine = entry.solution_count
+      ? ` <span class="chip chip-gr">${entry.solution_count} of mine</span>`
+      : "";
+    return `<button type="button" class="inst-row${selected ? " selected" : ""}" data-bench-id="${escapeHtml(entry.instance_id)}">`
+      + `<span class="inst-head"><span class="inst-name">${escapeHtml(entry.base_name)}</span>${windows}${mine}</span>`
+      + `<span class="inst-meta">${escapeHtml(placeName(entry.city))} · ${escapeHtml(entry.n_customers)} customers · ${escapeHtml(entry.metrics.join(", "))}</span></button>`;
+  }).join("");
+}
+
+/* The panel's instance object for a benchmark entry, kept so its map data is fetched once. */
+async function selectBenchmark(instanceId, preferredRunId = null) {
+  let instance = state.benchmarkObjects.get(instanceId);
+  if (!instance) {
+    const data = await api(`/api/workbench/benchmarks/${encodeURIComponent(instanceId)}`);
+    const entry = data.instance;
+    instance = {
+      instance_id: entry.instance_id,
+      source: "benchmark",
+      family: entry.family,
+      problem: entry.problem_type,
+      tw_set: entry.tw_set,
+      base_name: entry.base_name,
+      folder: entry.folder,
+      files: entry.files,
+      summary: entry.summary || {},
+      vrptw: null,
+      city: placeName(entry.city),
+      n: entry.n_customers ?? "?",
+      seed: null,
+      solution_count: entry.solution_count || 0,
+      solved: null,
+      rendered: null,
+      mapData: null,
+    };
+    state.benchmarkObjects.set(instanceId, instance);
+  }
+  return activateInstance(instance, preferredRunId);
+}
+
+el("sourceWorkspace").addEventListener("click", () => setInstanceSource("workspace"));
+el("sourceBenchmarks").addEventListener("click", () => setInstanceSource("benchmarks"));
+el("bench-scope").addEventListener("click", (event) => {
+  const button = event.target instanceof Element ? event.target.closest("[data-bench-scope]") : null;
+  if (!button) return;
+  // City and size carry over between the problem classes of one family, not between
+  // families: a city both have would silently hide the rest of the other one.
+  if (button.dataset.benchScope.split("|")[0] !== String(state.benchmarks.scope).split("|")[0]) {
+    el("bench-city").value = "";
+    el("bench-size").value = "";
+  }
+  state.benchmarks.scope = button.dataset.benchScope;
+  renderBenchmarkFilters();
+  renderBenchmarkList();
+});
+["bench-search", "bench-city", "bench-size", "bench-solved"].forEach((id) => el(id).addEventListener("input", renderBenchmarkList));
+el("benchList").addEventListener("click", (event) => {
+  const row = event.target instanceof Element ? event.target.closest("[data-bench-id]") : null;
+  if (!row) return;
+  selectBenchmark(row.dataset.benchId).catch((error) => status(`Cannot open the benchmark instance: ${error.message}`));
+});
+
+/* Not every instance has the three metric variants (a VRPTW benchmark is fastest only):
+   the metric selects offer what the selected instance has. */
+function syncMetricOptions() {
+  const available = Object.keys(state.selected?.files?.vrp_json || {});
+  for (const id of ["solve-metric", "import-metric", "download-metric"]) {
+    const select = el(id);
+    for (const option of select.options) option.disabled = available.length > 0 && !available.includes(option.value);
+    if (select.selectedOptions[0]?.disabled) select.value = available[0];
+  }
+  syncVrpExportControls();
 }
 
 /* ── Persistent solutions ── */
@@ -1640,6 +1863,7 @@ function runWhere(run) {
 }
 
 function runProblem(run) {
+  if (state.selected?.source === "benchmark") return state.selected.problem;
   return run.instance_path && /cvrptw/i.test(String(run.instance_path)) ? "VRPTW" : "CVRP";
 }
 
@@ -1721,23 +1945,46 @@ function renderRunCard() {
     body.innerHTML = '<div class="run-card-none">Instance only</div>'
       + `<div class="run-card-line">${records.length
         ? `Depot and customers. ${records.length} saved solution${records.length === 1 ? "" : "s"} can be drawn.`
-        : "Depot and customers. No saved solution yet."}</div>`;
+        : "Depot and customers. No saved solution yet."}</div>`
+      + (instance.source === "benchmark"
+        ? '<div class="row run-card-actions"><button type="button" class="btn btn-secondary" data-panel-action="import">Check my solution</button></div>'
+        : "");
     return;
   }
   const validation = run.validation || {};
   const metric = runMetric(run);
-  const chip = validation.valid
-    ? `<span class="chip chip-gr" title="Validated on the ${escapeHtml(metric)} variant: canonical cost ${escapeHtml(validation.routing_cost)}, ${escapeHtml(validation.num_routes)} route(s).">validated</span>`
-    : '<span class="chip chip-cor">invalid</span>';
+  const chip = validation.recorded
+    ? `<span class="chip chip-gr" title="Published BKS: validated when it entered the collection${validation.validated_by ? ` (${escapeHtml(validation.validated_by)})` : ""}.">published</span>`
+    : validation.valid
+      ? `<span class="chip chip-gr" title="Validated on the ${escapeHtml(metric)} variant: canonical cost ${escapeHtml(validation.routing_cost)}, ${escapeHtml(validation.num_routes)} route(s).">validated</span>`
+      : '<span class="chip chip-cor">invalid</span>';
   body.innerHTML = `<div class="sel-cost-row"><span class="sel-cost" id="selCost">${escapeHtml(run.cost ?? "n/a")}</span>`
     + `<span class="run-card-routes">${escapeHtml(run.num_routes)} route${run.num_routes === 1 ? "" : "s"}</span>${chip}</div>`
     + `<div class="run-card-line">${escapeHtml(runGroupLabel(run))}</div>`
-    + `<div class="run-card-line">${escapeHtml(runWhere(run))}</div>`;
+    + `<div class="run-card-line">${escapeHtml(runWhere(run))}</div>`
+    + bksStandingHtml(run);
   if (!validation.valid) {
     line.hidden = false;
     line.className = "validation-line invalid";
     line.textContent = `Invalid: ${validation.error_message || validation.status || "checker rejected this solution"}`;
   }
+}
+
+/* Where a displayed solution stands against the published BKS of its variant and objective. */
+function bksStandingHtml(run) {
+  if (run.source === "bks" || !runIsRanked(run)) return "";
+  const label = runGroupLabel(run);
+  const bks = allSolutionRecords().find((other) => other.source === "bks" && runIsRanked(other) && runGroupLabel(other) === label);
+  if (!bks) return "";
+  const order = compareRunQuality(run, bks);
+  const share = Number(bks.cost) > 0 ? Math.abs((100 * (Number(run.cost) - Number(bks.cost))) / Number(bks.cost)) : 0;
+  const amount = runIsHierarchical(run) && run.num_routes !== bks.num_routes
+    ? `${Math.abs(run.num_routes - bks.num_routes)} route${Math.abs(run.num_routes - bks.num_routes) === 1 ? "" : "s"}`
+    : `${share.toFixed(share < 10 ? 2 : 1)}%`;
+  if (order < 0) {
+    return `<div class="run-card-line run-card-better">Better than the published BKS by ${escapeHtml(amount)}. It can be submitted with <code>mamut-routing bks submit</code>.</div>`;
+  }
+  return `<div class="run-card-line">${order === 0 ? "Equals the published BKS." : `${escapeHtml(amount)} above the published BKS.`}</div>`;
 }
 
 function runRowHtml(run, group, { compare }) {
@@ -1857,7 +2104,11 @@ async function loadSolutionRuns(preferredRunId = null) {
 /* ── Run list, run switcher and comparison ── */
 function comparisonHtml(value, reference) {
   const gap = value.relative_gap_percent == null ? "n/a" : `${value.relative_gap_percent > 0 ? "+" : ""}${value.relative_gap_percent.toFixed(3)}%`;
-  const signed = (number) => (number > 0 ? `+${number}` : String(number));
+  // A difference of two binary64 costs carries rounding noise (74.36700000000002): twelve digits say all there is.
+  const signed = (number) => {
+    const clean = Number.isInteger(number) ? number : Number(number.toPrecision(12));
+    return clean > 0 ? `+${clean}` : String(clean);
+  };
   const extent = (loads) => (loads.length ? `${Math.min(...loads)}–${Math.max(...loads)}` : "n/a");
   const verdict = { better: "better than", worse: "worse than", equal: "equal to" }[value.ordering] || value.ordering;
   const difference = value.route_difference;

@@ -141,7 +141,7 @@ Workbench GUI running (pid 391337), workspace /path/to/.cache/mamut-tools
 http://127.0.0.1:39117/?token=<token>
 ```
 
-The port is picked automatically and the server binds to loopback only, so it is never reachable from outside your machine. Useful options: `--port <N>` to pin a port, `--no-open` to skip opening the browser (handy over SSH), and `--output-dir <DIR>` to choose the workspace directory holding generated instances.
+The port is picked automatically and the server binds to loopback only, so it is never reachable from outside your machine. Useful options: `--port <N>` to pin a port, `--no-open` to skip opening the browser (handy over SSH), `--output-dir <DIR>` to choose the workspace directory holding generated instances, and `--benchmarks-dir <DIR>` to point at a folder of published collections (see "Checking a solution for a published instance").
 
 Check on it or shut it down with:
 
@@ -165,6 +165,12 @@ Generated instances remain under `<workspace>/instances/`. Generation controls i
 - append-only job logs under `<workspace>/state/logs/`.
 
 The selected instance's **Download** menu offers the zip of every artifact and "Download .vrp", which exports the metric variant chosen in that menu as one classic CVRPLIB `.vrp` file (explicit full matrix, the published costs; rendered by mamut-routing-lib's `mamut_routing_lib.cvrplib`, so it matches `mamut-routing export vrp` and the website download byte for byte). For the euclidean variant an `EUC_2D` checkbox writes a coordinates-only file instead, whose TSPLIB `nint` costs differ from the published ones.
+
+### Checking a solution for a published instance
+
+The Visualize tab has two sources. **Workspace** lists the instances generated here; **Benchmarks** lists the static instances (CVRP and VRPTW) of the published geographic collections found on disk, today Mamut2026 and Poryos2026. Pick a family and problem class, then an instance: the map shows its depot and customers, the published BKS of each metric variant is listed as a reference run, and **Check my solution** opens the import form (CVRPLIB `.sol`, JSON routes or an LKH-3 MTSP solution file). The reference checker decides: a rejected solution comes back with the checker's reason and nothing is stored; an accepted one is stored in your workspace, drawn on the instance's published road graph, and shown with its gap to the BKS. Comparing, animating and solving locally work as for a generated instance.
+
+The benchmarks folder is read-only: runs are kept under `solutions/` in the workspace, never in the collection. The folder is found, in this order, from `--benchmarks-dir` (on `gui start` and `gui run`), `MAMUT_ROUTING_BENCHMARKS_ROOT`, `MAMUT_ROUTING_ROOT/benchmarks`, or a `benchmarks` folder with collections at or above the directory the GUI is started in (a MAMUT-routing checkout). Time-dependent instances and the classic families are not offered there yet. A published BKS is listed with the validation recorded in its file rather than checked again on every listing; comparing against it reprices both solutions exactly.
 
 Both instances and solutions remain available after the GUI or machine restarts, until their workspace files are removed. Selecting an instance immediately displays its depot and customer positions without requiring a solve. The panel's Displayed solution card says what is drawn and switches it; the Runs tab lists every saved run by metric and objective, best first, with its gap to the best. Select any saved run to render it again—the customer markers then adopt their route colors—or press Compare on another run of the same group to inspect cost and route-count deltas, route loads, changed directed edges, and changes to customer grouping. Cancellation: queued work stops immediately; a running PyVRP solve stops at its next iteration and an external solver is killed with its process group (also when the server stops); a matrix calculation stops at its next safe checkpoint. Solutions found elsewhere can be imported from the Runs tab (CVRPLIB `.sol`, JSON routes or an LKH-3 MTSP solution file); they are checked before they are stored.
 

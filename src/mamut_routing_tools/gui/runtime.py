@@ -115,7 +115,9 @@ def status(workspace: Path) -> dict[str, Any]:
     return {"running": alive, "healthy": healthy, **state}
 
 
-def start(workspace: Path, *, host: str = "127.0.0.1", port: int = 0) -> dict[str, Any]:
+def start(
+    workspace: Path, *, host: str = "127.0.0.1", port: int = 0, benchmarks_dir: Path | None = None,
+) -> dict[str, Any]:
     current = status(workspace)
     if current.get("running"):
         return {**current, "already_running": True}
@@ -125,6 +127,9 @@ def start(workspace: Path, *, host: str = "127.0.0.1", port: int = 0) -> dict[st
     env = dict(os.environ)
     env["MAMUT_GUI_WORKSPACE"] = str(workspace)
     env["MAMUT_GUI_TOKEN"] = token
+    if benchmarks_dir is not None:
+        # The server resolves its benchmarks folder from the environment (gui/benchmarks.py).
+        env["MAMUT_GUI_BENCHMARKS_DIR"] = str(Path(benchmarks_dir).expanduser().resolve())
     log_file = _log_path(workspace).open("ab")
     process = subprocess.Popen(
         [

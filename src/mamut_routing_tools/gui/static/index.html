@@ -94,6 +94,12 @@
   </div>
 
   <section id="visualizePanel" class="tab-panel">
+    <!-- Two places an instance can come from: generated here, or a published collection on disk. -->
+    <div class="tabs tabs-sm" role="group" aria-label="Instance source">
+      <button id="sourceWorkspace" class="tab-btn tab-active" type="button" aria-pressed="true">Workspace</button>
+      <button id="sourceBenchmarks" class="tab-btn" type="button" aria-pressed="false">Benchmarks</button>
+    </div>
+    <div id="workspaceSource" class="source-view">
     <div class="kicker">Workspace instances · click to select</div>
     <!-- The list is unbounded and unordered otherwise; the published workbench has
          had filters for the same job for a long time. -->
@@ -118,7 +124,25 @@
     <div id="instList" class="inst-list">
       <div class="empty-note">Nothing generated yet. Use the Generate tab: generated instances land in the workspace instances/ directory and appear here, ready to solve and render on the map.</div>
     </div>
-    <p class="note">Published benchmark instances live on the MAMUT-routing website; this local workbench lists the instances generated in your workspace.</p>
+    <p class="note">Instances generated in your workspace. Published Mamut2026 and Poryos2026 instances are under Benchmarks.</p>
+    </div>
+    <div id="benchmarkSource" class="source-view" hidden>
+      <div class="kicker">Published instances · check your solution</div>
+      <div class="inst-filters">
+        <div id="bench-scope" class="tabs tabs-sm" role="group" aria-label="Family and problem class"></div>
+        <input id="bench-search" type="search" placeholder="Search name or city…" aria-label="Search benchmark instances">
+        <div class="grid-2">
+          <label class="field"><span>City</span><select id="bench-city"><option value="">All cities</option></select></label>
+          <label class="field" id="bench-size-field"><span>Size</span><select id="bench-size"><option value="">All sizes</option></select></label>
+        </div>
+        <div class="inst-filter-foot">
+          <label class="inst-check"><input id="bench-solved" type="checkbox"> With my solutions only</label>
+          <span id="bench-count" class="poi-count"></span>
+        </div>
+      </div>
+      <div id="benchList" class="inst-list"></div>
+      <p class="note">Read-only. A solution you import is checked by the reference checker and stored in your workspace, never in the benchmarks folder.</p>
+    </div>
   </section>
 
   <section id="generatePanel" class="tab-panel tab-panel-active">
@@ -600,7 +624,7 @@
     <button id="download-close" class="popover-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
   </div>
   <button id="download" class="btn btn-ghost" type="button" title="Every file of the instance: the three metric variants, the manifest and the saved solutions">Every file (.zip)</button>
-  <div class="fading-rule"></div>
+  <div class="fading-rule" id="download-rule"></div>
   <label class="field"><span>Classic CVRPLIB .vrp of one variant</span><select id="download-metric"><option value="fastest">Fastest</option><option value="shortest">Shortest</option><option value="euclidean">Euclidean</option></select></label>
   <label id="download-vrp-euc2d-field" class="field checkbox-field" hidden><input id="download-vrp-euc2d" type="checkbox"> <span>EUC_2D (coordinates only; TSPLIB nint costs, not the published ones)</span></label>
   <button id="download-vrp" class="btn btn-ghost" type="button" title="Explicit full matrix, the published costs">Download .vrp</button>
