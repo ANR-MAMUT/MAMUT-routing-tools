@@ -71,7 +71,7 @@ html, body {
 .maplibregl-ctrl-scale {
   border: none;
   padding: 1px 6px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
 }
 .mamut-basemap-control label {
@@ -95,7 +95,7 @@ html, body {
 .maplibregl-ctrl-attrib.maplibregl-compact {
   background: var(--panel);
   color: var(--mut);
-  font-size: 10px;
+  font-size: 11px;
 }
 .maplibregl-ctrl-attrib a { color: var(--mut); }
 .maplibregl-popup-content {
@@ -188,8 +188,7 @@ html, body {
   backdrop-filter: blur(8px);
 }
 .trips-controls { display: flex; align-items: center; gap: 10px; }
-.trips-controls button,
-.trips-controls select {
+.trips-controls button {
   font: inherit;
   font-size: 12px;
   color: var(--ink);
@@ -200,10 +199,75 @@ html, body {
   cursor: pointer;
 }
 .trips-play { min-width: 58px; color: var(--acc) !important; }
-.trips-speed { display: flex; align-items: center; gap: 5px; }
+.trips-speed {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.trips-speed-value {
+  min-width: 56px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The speed slider opens upward from the rate, on hover or keyboard focus. */
+.trips-speed-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 56px;
+  padding: 8px 0;
+  border-radius: 10px;
+  background: var(--s);
+  box-shadow: 0 0 0 1px var(--div), var(--shadow);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 0s linear 120ms;
+}
+
+/* Bridges the gap between the rate and the slider, so the pointer can travel up without closing it. */
+.trips-speed-pop::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 12px;
+}
+
+.trips-speed:hover .trips-speed-pop,
+.trips-speed:focus-within .trips-speed-pop {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition-delay: 0s;
+}
+
+/* A vertical range: the fastest rate at the top. */
+.trips-speed-slider {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 20px;
+  height: 132px;
+  margin: 0;
+  accent-color: var(--acc);
+  cursor: pointer;
+}
+
+.trips-speed-end {
+  font-size: 11px;
+  color: var(--mut);
+  font-variant-numeric: tabular-nums;
+}
 /* Only the scrubber stretches; the other controls keep their natural width. */
 .trips-controls > :not(.trips-scrub) { flex: none; }
-.trips-speed select { min-width: 70px; }
 .trips-caption, .trips-served, .trips-note { color: var(--mut); font-size: 11px; }
 .trips-scrub { flex: 1 1 auto; min-width: 80px; accent-color: var(--acc); }
 .trips-clock { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; }
@@ -369,7 +433,7 @@ html, body {
   transform: rotate(45deg);
 }
 .brand-name { font-weight: 500; font-size: 14px; }
-.brand-sub { font-size: 10.5px; color: var(--mut); }
+.brand-sub { font-size: 11px; color: var(--mut); }
 
 .theme-toggle {
   margin-left: auto;
@@ -377,7 +441,7 @@ html, body {
   border: 1px solid var(--div);
   border-radius: 999px;
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   cursor: pointer;
   user-select: none;
 }
@@ -387,12 +451,12 @@ html, body {
 [data-theme="light"] .theme-side-sun { background: var(--acc-t); color: var(--acc); }
 
 .kicker {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--mut);
 }
-.kicker-selected { color: var(--cy); display: flex; align-items: center; gap: 8px; }
+.kicker-selected { color: var(--cy-text); display: flex; align-items: center; gap: 8px; }
 /* At wide widths #sheet-toggle is display:none, so this is what pushes the collapse
    chevron right; below 1000px the chevron hides and #sheet-toggle takes over. */
 .kicker-selected .panel-toggle { margin-left: auto; }
@@ -438,7 +502,7 @@ html, body {
 
 /* ── Forms ── */
 label.field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.field > span { font-size: 11px; color: var(--mut); }
+.field > span { font-size: 12px; color: var(--mut); }
 .field.checkbox-field { display: flex; flex-direction: row; align-items: center; gap: 6px; }
 .field.checkbox-field > input { width: auto; }
 
@@ -515,20 +579,20 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
 }
 .btn-ghost:hover { color: var(--acc); box-shadow: inset 0 0 0 1px var(--edge); background: var(--acc-t); }
 
-.note { font-size: 11px; line-height: 1.55; color: var(--mut); margin: 0; }
+.note { font-size: 12px; line-height: 1.55; color: var(--mut); margin: 0; }
 
 .chip {
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.02em;
   padding: 2px 8px;
   border-radius: 6px;
   white-space: nowrap;
 }
-.chip-am { background: var(--am-t); color: var(--am); }
-.chip-gr { background: var(--gr-t); color: var(--gr); }
-.chip-acc { background: var(--acc-t); color: var(--acc); }
+.chip-am { background: var(--am-t); color: var(--am-text); }
+.chip-gr { background: var(--gr-t); color: var(--gr-text); }
+.chip-acc { background: var(--acc-t); color: var(--acc-text); }
 
 /* ── Generate: numbered steps ── */
 /* The form used to be fourteen equally-weighted blocks in one scroll. Grouping them
@@ -562,7 +626,7 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  font-size: 9.5px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--acc);
   background: var(--acc-t);
@@ -610,7 +674,7 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
   align-items: center;
   gap: 6px;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 11px;
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid var(--div);
@@ -805,7 +869,7 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
   background: var(--s);
   color: var(--mut);
   font-weight: 500;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   border-bottom: 1px solid var(--div);
@@ -841,17 +905,17 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
 }
 .confirm-modal-body p { margin: 0; }
 .preflight-line { font-size: 11px; line-height: 1.5; }
-.preflight-line.warn { color: var(--am); }
-.preflight-line.bad { color: var(--cor); }
-.preflight-line.good { color: var(--gr); }
+.preflight-line.warn { color: var(--am-text); }
+.preflight-line.bad { color: var(--cor-text); }
+.preflight-line.good { color: var(--gr-text); }
 
 .poi-picker { display: flex; flex-direction: column; gap: 5px; }
 .poi-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.poi-count { margin-left: auto; color: var(--mut); font-size: 10.5px; }
+.poi-count { margin-left: auto; color: var(--mut); font-size: 11px; }
 .mini-btn {
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--mut);
   background: transparent;
   border: 1px solid var(--div);
@@ -884,15 +948,15 @@ details.poi-menu > summary {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10.5px;
+  font-size: 11px;
   padding: 2px 0;
 }
 .osm-row .nm { color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .osm-row .cnt { color: var(--mut); font-variant-numeric: tabular-nums; }
-.osm-row .chip { font-size: 9.5px; padding: 1px 5px; border-radius: 999px; }
-.osm-row .chip.ok { color: var(--gr); background: color-mix(in srgb, var(--gr) 16%, transparent); }
-.osm-row .chip.old { color: var(--am); background: color-mix(in srgb, var(--am) 16%, transparent); }
-.osm-row .chip.bad { color: var(--cor); background: var(--cor-t); }
+.osm-row .chip { font-size: 11px; padding: 1px 5px; border-radius: 999px; }
+.osm-row .chip.ok { color: var(--gr-text); background: color-mix(in srgb, var(--gr) 16%, transparent); }
+.osm-row .chip.old { color: var(--am-text); background: color-mix(in srgb, var(--am) 16%, transparent); }
+.osm-row .chip.bad { color: var(--cor-text); background: var(--cor-t); }
 .poi-list {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -908,7 +972,7 @@ details.poi-menu > summary {
   gap: 5px;
   min-width: 0;
   color: var(--ink);
-  font-size: 10.5px;
+  font-size: 11px;
   cursor: pointer;
 }
 .poi-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -940,7 +1004,10 @@ details.poi-menu > summary {
 .inst-row.selected { background: var(--acc-t); border-color: var(--edge); }
 .inst-row .inst-head { display: flex; align-items: center; gap: 8px; width: 100%; }
 .inst-row .inst-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inst-row .inst-meta { font-size: 11px; color: var(--mut); }
+.inst-row .inst-meta { font-size: 12px; color: var(--mut); }
+/* The selected row is itself accent-tinted: muted text and accent chips need a firmer footing on it. */
+.inst-row.selected .inst-meta { color: color-mix(in srgb, var(--mut) 65%, var(--ink)); }
+.inst-row.selected .chip-acc { background: color-mix(in srgb, var(--s) 75%, transparent); }
 
 .empty-note {
   font-size: 12px;
@@ -973,7 +1040,7 @@ details.poi-menu > summary {
 .job-clock { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; font-weight: 400; }
 .job-progress { color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-actions { display: flex; gap: 3px; }
-.job-actions button { padding: 3px 6px; font-size: 10px; }
+.job-actions button { padding: 3px 6px; font-size: 11px; }
 
 /* ── Progress bars ── */
 /* One shared form in two sizes: a 3px bar under a job row, a 2px hairline pinned to the
@@ -1017,40 +1084,62 @@ details.poi-menu > summary {
   padding: 8px;
   font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.validation-line { font-size: 11px; color: var(--mut); }
-.validation-line.valid { color: var(--gr); }
-.validation-line.invalid { color: var(--cor); }
+.validation-line { font-size: 12px; color: var(--mut); }
+.validation-line.valid { color: var(--gr-text); }
+.validation-line.invalid { color: var(--cor-text); }
 
 /* ── Right panel: selected instance ── */
-.sel-name-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.sel-name { font-size: 20px; font-weight: 500; overflow-wrap: anywhere; }
-.sel-meta { font-size: 11.5px; color: var(--mut); }
+/* The panel is as tall as its content up to the window; past that the route list
+   and the run list scroll inside it, so the header, the displayed solution and
+   the tabs stay in place. */
+.sel-body { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.sel-body[hidden] { display: none; }
+.sel-head { display: flex; align-items: flex-start; gap: 10px; }
+.sel-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sel-name { font-size: 20px; font-weight: 500; line-height: 1.2; overflow-wrap: anywhere; }
+.sel-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: var(--mut); }
+.sel-head .mini-btn { flex: none; margin-top: 3px; }
 
-.sel-cost-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* The solution on the map. */
+.run-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: none;
+  padding: 9px 11px 10px;
+  border: 1px solid var(--div);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.run-card-head { display: flex; align-items: center; gap: 6px; }
+.run-card-head .kicker { margin-right: auto; }
+.run-card-body { display: flex; flex-direction: column; gap: 2px; }
+.run-card-none { font-size: 15px; font-weight: 500; }
+.run-card-line { font-size: 12px; color: var(--mut); }
+.run-card-routes { font-size: 13px; font-variant-numeric: tabular-nums; }
+.sel-cost-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sel-cost-row .chip { align-self: center; margin-left: auto; }
 .sel-cost {
   font-size: 24px;
   font-weight: 500;
+  line-height: 1.15;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.chip-cor { background: var(--cor-t); color: var(--cor-text); }
+/* The map carries the Animate button at desktop widths; this copy is for the
+   narrow layout, where the map's own actions are hidden behind the sheet. */
+.run-card .animate-btn { display: none; }
 
-.sel-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 12px; }
+.sel-facts { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 0; font-size: 13px; }
 .sel-facts dt { color: var(--mut); }
 .sel-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.fact-seed, .fact-file { font-size: 12px; }
 
-.appearance-options {
-  border-top: 1px solid var(--div);
-  padding-top: 7px;
-}
-.appearance-options > summary {
-  cursor: pointer;
-  color: var(--mut);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  user-select: none;
-}
-.appearance-options[open] > summary { margin-bottom: 8px; }
+/* ── Route appearance and downloads: popovers beside the panel ── */
+.appearance-popover, .download-popover { width: min(300px, calc(100vw - 32px)); }
+.run-popover { width: min(340px, calc(100vw - 32px)); }
+.run-popover .run-list { max-height: min(420px, calc(100vh - 140px)); }
 .appearance-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .appearance-wide, .appearance-toggle { grid-column: 1 / -1; }
 .appearance-toggle {
@@ -1067,7 +1156,23 @@ details.poi-menu > summary {
   background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent);
 }
 
-.legend { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
+/* ── Instance sources: workspace and benchmarks ── */
+/* Each view lays out as the tab panel it sits in did: filters on top, a list that takes the rest. */
+.source-view { display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0; }
+.source-view[hidden] { display: none; }
+#bench-scope .tab-btn { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-inline: 6px; }
+#bench-scope[hidden] { display: none; }
+.run-card-actions { margin-top: 5px; }
+.run-card-better { color: var(--gr-text); }
+.run-card-line code { font-size: 11.5px; }
+
+/* ── Routes tab ── */
+.legend-tools { display: flex; align-items: center; gap: 4px; }
+.legend-tools[hidden] { display: none; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; padding: 3px 5px; }
+.icon-btn svg { width: 14px; height: 14px; }
+.mini-btn[aria-expanded="true"] { color: var(--acc); border-color: var(--edge); background: var(--acc-t); }
+.legend { display: flex; flex-direction: column; gap: 2px; flex: 0 1 auto; min-height: 92px; overflow-y: auto; }
 .legend-row {
   display: grid;
   grid-template-columns: 25px minmax(0, 1fr);
@@ -1085,15 +1190,125 @@ details.poi-menu > summary {
   padding: 4px;
   text-align: left;
 }
-.legend-focus { display: flex; align-items: center; gap: 8px; min-width: 0; border-radius: 6px; }
+.legend-focus {
+  display: grid;
+  grid-template-columns: 9px 3.2em minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-radius: 6px;
+}
 .legend-eye { display: inline-flex; align-items: center; justify-content: center; color: var(--mut); border-radius: 6px; }
 .legend-eye svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .legend-eye .eye-slash { stroke-width: 2.2; }
 .legend-row:hover, .legend-row.focused { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .legend-row.off .legend-focus { opacity: 0.35; }
-.legend-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.legend-row .dot { width: 9px; height: 9px; border-radius: 50%; }
 .legend-row .lbl { font-weight: 500; }
-.legend-row .meta { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; }
+.legend-row .meta { color: var(--mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.legend-row .load { display: inline-flex; align-items: center; gap: 7px; }
+.legend-row .load-bar {
+  width: 64px;
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  overflow: hidden;
+}
+.legend-row .load-bar i { display: block; height: 100%; border-radius: 3px; background: color-mix(in srgb, var(--ink) 55%, transparent); }
+.legend-row .load-num { min-width: 3.4ch; text-align: right; color: var(--mut); font-variant-numeric: tabular-nums; }
+.empty-actions { margin-top: 9px; }
+
+/* ── Runs tab ── */
+.run-list { display: flex; flex-direction: column; gap: 2px; flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+#runList { min-height: 92px; }
+.run-group {
+  margin-top: 7px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mut);
+}
+.run-row { display: flex; align-items: center; gap: 6px; flex: none; border: 1px solid transparent; border-radius: 8px; }
+.run-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.run-row.selected { background: var(--acc-t); border-color: var(--edge); }
+.run-pick {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 1px 10px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  text-align: left;
+  border-radius: 8px;
+}
+.run-cost { font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.run-routes { color: var(--mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.run-gap { justify-self: end; color: var(--mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.run-origin {
+  grid-column: 1 / -1;
+  color: var(--mut);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The selected row is accent-tinted: muted text needs a firmer footing on it. */
+.run-row.selected .run-routes,
+.run-row.selected .run-gap,
+.run-row.selected .run-origin { color: color-mix(in srgb, var(--mut) 65%, var(--ink)); }
+.run-compare { flex: none; margin-right: 6px; }
+
+/* The box is as wide as the panel, and the panel can be dragged down to 240px:
+   whatever is inside must fit, wrap or, at the very last, scroll inside the box.
+   It is a size container so the table can change shape with the room it has. */
+.comparison {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: none;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--div);
+  border-radius: 8px;
+  font-size: 12px;
+  container-type: inline-size;
+  overflow-x: auto;
+}
+.comparison[hidden] { display: none; }
+.comparison-head { display: flex; align-items: center; }
+.comparison-head .popover-close { margin-left: auto; }
+.comparison-profile { color: var(--mut); }
+/* A run is named by its solver, method and date: long, and free to break anywhere. */
+.comparison-verdict { overflow-wrap: anywhere; }
+.comparison-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.comparison-table th, .comparison-table td { padding: 3px 0 3px 10px; text-align: right; font-weight: 400; }
+.comparison-table th:first-child { padding-left: 0; text-align: left; color: var(--mut); }
+.comparison-table thead th { font-size: 11px; color: var(--mut); border-bottom: 1px solid var(--div); }
+/* The label gives way and wraps; the figures stay whole. */
+.comparison-facts { font-size: 12px; grid-template-columns: minmax(0, 1fr) auto; }
+.comparison-facts dd { white-space: nowrap; overflow-wrap: normal; }
+/* Three columns of seven-digit costs need about 290px inside the box. With less
+   room each quantity is a block: its name, then one labelled line per column. */
+@container (max-width: 300px) {
+  .comparison-table, .comparison-table tbody, .comparison-table tr { display: block; }
+  .comparison-table thead { display: none; }
+  .comparison-table tr { padding: 4px 0; }
+  .comparison-table tr + tr { border-top: 1px solid var(--div); }
+  .comparison-table th:first-child { display: block; padding: 0 0 1px; color: var(--ink); }
+  /* A figure is never cut in two: a value too long for the line goes under its label,
+     and a difference breaks between the amount and the percentage. */
+  .comparison-table td { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 12px; padding: 1px 0; }
+  .comparison-table td::before { content: attr(data-label); flex: none; color: var(--mut); }
+  .comparison-value { margin-left: auto; text-align: right; }
+  .comparison-table td:empty { display: none; }
+}
 
 /* ── Activity strip (status + job history) ── */
 /* The strip is the foot of the left panel's column: closed it fills the gap the panel
@@ -1187,13 +1402,17 @@ details.poi-menu > summary {
 /* ── Visualize: instance filters ── */
 .inst-filters { display: flex; flex-direction: column; gap: 6px; flex: none; }
 .inst-filter-foot { display: flex; align-items: center; gap: 8px; }
-.inst-check { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--mut); cursor: pointer; }
+.inst-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--mut); cursor: pointer; }
 .inst-filter-foot .poi-count { margin-left: auto; }
 
 /* ── Inspector tabs ── */
+/* The selected-instance body spaces its own blocks, the tab row included. */
+.tabs-sm { margin: 0; }
 .tabs-sm .tab-btn { font-size: 11.5px; padding: 5px 0; border-radius: 7px; }
-/* The right panel is sized by its content, so its tab panels must not stretch. */
+/* The right panel is sized by its content, so its tab panels must not stretch; the two
+   that hold a list may shrink, and their list then scrolls. */
 .inspector-panel.tab-panel-active { flex: none; }
+#routesPanel.tab-panel-active, #runsPanel.tab-panel-active { flex: 0 1 auto; min-height: 0; }
 
 /* ── Selected-instance facts ── */
 .fact-path { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
@@ -1207,7 +1426,7 @@ details.poi-menu > summary {
   cursor: pointer;
   flex: none;
   font: inherit;
-  font-size: 9.5px;
+  font-size: 11px;
   line-height: 1;
   padding: 2px 5px;
   border-radius: 5px;
@@ -1217,11 +1436,45 @@ details.poi-menu > summary {
 }
 .copy-btn:hover { color: var(--acc); border-color: var(--edge); }
 
-.map-clear-btn {
+/* The map's own actions, in its bottom-right corner: animate the displayed run, clear the map. */
+.map-actions {
   position: fixed;
   right: 20px;
   bottom: 18px;
   z-index: 950;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* The prominent copy of the Animate control (the tabs keep theirs): accent outline, never a fill. */
+.map-animate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 16px 7px 13px;
+  border: 2px solid var(--acc);
+  border-radius: 8px;
+  color: var(--acc-text);
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 15%, transparent);
+}
+.map-animate-btn::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 8px solid currentColor;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}
+.map-animate-btn[aria-pressed="true"]::before { width: 9px; height: 9px; border: none; border-radius: 1px; background: currentColor; }
+.map-animate-btn:hover { background: color-mix(in srgb, var(--acc) 18%, var(--panel)); }
+.map-animate-btn:disabled { opacity: 0.7; cursor: progress; }
+.map-clear-btn {
   cursor: pointer;
   font: inherit;
   font-size: 11.5px;
@@ -1235,6 +1488,9 @@ details.poi-menu > summary {
   box-shadow: 0 0 0 1px var(--div);
 }
 .map-clear-btn:hover { color: var(--cor); box-shadow: 0 0 0 1px var(--cor); }
+/* The map actions own the bottom-right corner, so the attribution stops short of them. */
+.maplibregl-ctrl-bottom-right .maplibregl-ctrl { margin-right: 114px; }
+body:has(#map-animate:not([hidden])) .maplibregl-ctrl-bottom-right .maplibregl-ctrl { margin-right: 250px; }
 
 /* ── Map POI picker ── */
 .poi-pick-summary { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
@@ -1259,8 +1515,8 @@ details.poi-menu > summary {
 }
 .picked-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .picked-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.picked-row .cat { color: var(--mut); font-size: 10px; margin-left: auto; flex: none; }
-.picked-row .depot-flag { color: var(--cor); font-size: 10px; flex: none; }
+.picked-row .cat { color: var(--mut); font-size: 11px; margin-left: auto; flex: none; }
+.picked-row .depot-flag { color: var(--cor-text); font-size: 11px; flex: none; }
 
 /* ── Import solution ── */
 #import-text { width: 100%; min-height: 92px; resize: vertical; font-family: ui-monospace, monospace; font-size: 11px; }
@@ -1294,8 +1550,11 @@ details.poi-menu > summary {
     max-height: 52vh;
   }
   .panel-right.sheet-collapsed { max-height: 46px; overflow: hidden; }
+  .run-card .animate-btn:not([hidden]) { display: inline-block; }
   .sheet-toggle { display: inline-flex; }
-  .map-clear-btn { display: none; }
+  .map-actions { display: none; }
+  .maplibregl-ctrl-bottom-right .maplibregl-ctrl,
+  body:has(#map-animate:not([hidden])) .maplibregl-ctrl-bottom-right .maplibregl-ctrl { margin-right: 10px; }
   /* The bottom of the viewport belongs to the right panel's sheet here, so the strip
      moves to the top-right and opens downward. It cannot simply be hidden: since P3
      it carries the job history, which used to live in the left panel. */
@@ -1317,7 +1576,7 @@ details.poi-menu > summary {
   margin-left: auto;
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--mut);
   background: transparent;
   border: 1px solid var(--div);

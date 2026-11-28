@@ -174,20 +174,34 @@ gui_app = typer.Typer(help="Local workbench GUI (loopback server owned by the CL
 app.add_typer(gui_app, name="gui")
 
 
+_BENCHMARKS_DIR_HELP = (
+    "Folder holding published collections (Mamut2026, Poryos2026) to check and draw solutions on. "
+    "Default: MAMUT_ROUTING_BENCHMARKS_ROOT, else a 'benchmarks' folder at or above the current directory."
+)
+
+
 @gui_app.command("start")
 def gui_start_cmd(
     port: Annotated[int, typer.Option("--port", help="Port to bind (0 = pick a free one).")] = 0,
     output_dir: Annotated[Optional[Path], typer.Option("--output-dir", help="Workspace directory.")] = None,
     open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open the tokened URL in the default browser.")] = True,
+    benchmarks_dir: Annotated[Optional[Path], typer.Option("--benchmarks-dir", help=_BENCHMARKS_DIR_HELP)] = None,
 ) -> None:
     """Start the workbench GUI server as a managed background process."""
     from mamut_routing_tools.gui import runtime
     from mamut_routing_tools.workspace import resolve_workspace
 
     workspace = resolve_workspace(output_dir)
-    state = runtime.start(workspace, port=port)
+    state = runtime.start(workspace, port=port, benchmarks_dir=benchmarks_dir)
     if state.get("already_running"):
         typer.echo(f"Already running (pid {state['pid']}): {state['url']}")
+        if benchmarks_dir is not None and str(benchmarks_dir.expanduser().resolve()) != state.get("benchmarks_dir"):
+            # The folder is read when the server starts: saying nothing would leave the option looking applied.
+            typer.echo(
+                "--benchmarks-dir was not applied: the running server keeps the folder it started with. "
+                "Run 'mamut-tools gui stop', then start again with the option.",
+                err=True,
+            )
         return
     typer.echo(f"Workbench GUI running (pid {state['pid']}), workspace {workspace}")
     typer.echo(state["url"])
@@ -223,6 +237,7 @@ def gui_status_cmd(
 def gui_run_cmd(
     port: Annotated[int, typer.Option("--port")] = 8788,
     output_dir: Annotated[Optional[Path], typer.Option("--output-dir")] = None,
+    benchmarks_dir: Annotated[Optional[Path], typer.Option("--benchmarks-dir", help=_BENCHMARKS_DIR_HELP)] = None,
 ) -> None:
     """Run the GUI server in the foreground (development mode)."""
     import secrets
@@ -235,7 +250,7 @@ def gui_run_cmd(
     workspace = resolve_workspace(output_dir)
     token = secrets.token_urlsafe(24)
     typer.echo(f"http://127.0.0.1:{port}/?token={token}")
-    uvicorn.run(create_app(workspace, token), host="127.0.0.1", port=port, log_level="info")
+    uvicorn.run(create_app(workspace, token, benchmarks_dir), host="127.0.0.1", port=port, log_level="info")
 
 
 SOLVER_HELP = (

@@ -302,6 +302,12 @@ const state = {
   // Bulk configuration table
   bulkRows: [],
   bulkNextId: 1,
+  // The last run comparison: { instanceId, candidateId, html }.
+  comparison: null,
+  // Published instances: the listing, the family/problem scope shown, and the panel objects by id.
+  instanceSource: "workspace",
+  benchmarks: { loaded: false, loading: false, instances: [], hint: null, root: null, scope: null },
+  benchmarkObjects: new Map(),
 };
 
 /* ── Tabs ── */
@@ -331,7 +337,7 @@ const layout = window.MamutLayout.initLayout({
 activateTab(el("tabGenerate").classList.contains("tab-active") ? "generate" : "visualize");
 
 /* ── Inspector tabs ── */
-const INSPECTOR_TABS = { instance: "instancePanel", solve: "solvePanel", runs: "runsPanel" };
+const INSPECTOR_TABS = { routes: "routesPanel", runs: "runsPanel", solve: "solvePanel", details: "detailsPanel" };
 function activateInspectorTab(name) {
   if (!INSPECTOR_TABS[name]) return;
   Object.entries(INSPECTOR_TABS).forEach(([tab, panelId]) => {
@@ -346,14 +352,14 @@ Object.keys(INSPECTOR_TABS).forEach((name) => {
   el(`tab${name[0].toUpperCase()}${name.slice(1)}`)
     .addEventListener("click", () => activateInspectorTab(name));
 });
-activateInspectorTab("instance");
+activateInspectorTab("routes");
 
 /* ── Instance filters ── */
 ["inst-search", "inst-city", "inst-sort", "inst-solved"].forEach((id) => {
   el(id).addEventListener("input", renderInstanceList);
 });
 
-/* Copy the full workspace path out of the facts list. */
+/* Copy the full workspace path out of the Details tab. */
 el("selFacts").addEventListener("click", async (event) => {
   const button = event.target instanceof Element ? event.target.closest("[data-copy]") : null;
   if (!button) return;
@@ -493,16 +499,25 @@ function fillBandSelects() {
 /* ── Popovers ── */
 /* Anchor a body-level popover beside its trigger, nudged back inside the viewport.
    Shared by the category picker and the field help. */
-function placePopover(popover, anchor) {
+function placePopover(popover, anchor, beside = anchor) {
   popover.hidden = false;
   const box = anchor.getBoundingClientRect();
+  // `beside` is what the popover must not cover: the trigger itself, or the whole
+  // panel the trigger sits in.
+  const side = beside.getBoundingClientRect();
   const size = popover.getBoundingClientRect();
   const margin = 10;
-  let left = box.right + margin;
-  if (left + size.width > window.innerWidth - margin) {
-    left = Math.max(margin, box.left - size.width - margin);
-  }
+  let left = side.right + margin;
   let top = box.top;
+  if (left + size.width > window.innerWidth - margin) {
+    left = side.left - size.width - margin;
+    if (left < margin && beside !== anchor) {
+      // No room on either side of a full-width sheet: sit above it, in the trigger's column.
+      left = Math.min(box.right - size.width, window.innerWidth - size.width - margin);
+      top = Math.max(margin, side.top - size.height - margin);
+    }
+    left = Math.max(margin, left);
+  }
   if (top + size.height > window.innerHeight - margin) {
     top = Math.max(margin, window.innerHeight - size.height - margin);
   }
@@ -517,9 +532,9 @@ function closePopover() {
   openPopover.onClose();
   openPopover = null;
 }
-function showPopover(popover, anchor, onClose) {
+function showPopover(popover, anchor, onClose, beside) {
   closePopover();
-  placePopover(popover, anchor);
+  placePopover(popover, anchor, beside || anchor);
   openPopover = { popover, onClose: onClose || (() => { popover.hidden = true; }) };
 }
 
@@ -530,7 +545,7 @@ document.addEventListener("pointerdown", (event) => {
   if (!openPopover) return;
   const target = event.target;
   if (!(target instanceof Element)) return;
-  if (openPopover.popover.contains(target) || target.closest(".help-btn, #poi-edit")) return;
+  if (openPopover.popover.contains(target) || target.closest(".help-btn, #poi-edit, [data-popover-trigger]")) return;
   closePopover();
 });
 window.addEventListener("resize", closePopover);
@@ -708,7 +723,7 @@ async function loadInstances(selectBase) {
   if (selectBase) {
     const index = state.instances.findIndex((instance) => instance.base_name === selectBase);
     if (index >= 0) selectInstance(index);
-  } else if (state.selected) {
+  } else if (state.selected && state.selected.source !== "benchmark") {
     const index = state.instances.findIndex((instance) => instance.base_name === state.selected.base_name && instance.folder === state.selected.folder);
     state.selected = index >= 0 ? state.instances[index] : null;
   }
@@ -1019,7 +1034,9 @@ function resetRouteViewDefaults(rendered = null) {
 
 function syncAppearanceControls() {
   const visible = Boolean(state.selected?.solved && state.lastRendered);
-  el("route-appearance").hidden = !visible;
+  // The settings live in a popover; without a drawn run there is nothing to set.
+  el("appearance-open").hidden = !visible;
+  if (!visible && openPopover?.popover === el("route-appearance")) closePopover();
   if (!visible) return;
   const cachedAvailable = cachedRoadRenderingAvailable();
   const renderSelect = el("appearance-render-mode");
@@ -1108,7 +1125,8 @@ function applySolutionView() {
   syncAnimateButton();
 }
 
-/* One Animate button per panel (Instance legend, Solve, Runs): the run is displayed whichever tab is open. */
+/* One Animate button on the map beside "Clear map", whichever tab is open, and a copy in the
+   "Displayed solution" card for the narrow layout, where the map's actions are hidden. */
 function syncAnimateButton() {
   const shown = Boolean(map && state.selected?.solved && state.lastRendered && state.selectedRunId);
   for (const button of document.querySelectorAll("[data-animate-routes]")) {
@@ -1380,10 +1398,17 @@ function renderInstanceList() {
       ? ` <span class="chip chip-gr">${instance.solution_count} saved solution${instance.solution_count === 1 ? "" : "s"}</span>`
       : "";
     row.innerHTML = `<span class="inst-head"><span class="inst-name">${instance.base_name}</span>${twin}${saved}</span>` +
-      `<span class="inst-meta">${instance.city} · n=${instance.n} · seed ${instance.seed} · capacity ${instance.summary.capacity}</span>`;
+      `<span class="inst-meta">${instance.city} · n=${instance.n} · seed ${shortSeed(instance.seed)} · capacity ${instance.summary.capacity}</span>`;
     row.addEventListener("click", () => selectInstance(index));
     list.append(row);
   });
+}
+
+// A machine-drawn 64-bit seed is 20 digits of noise in a list row. The row keeps
+// both ends, enough to tell two instances apart; the Details tab shows it whole.
+function shortSeed(seed) {
+  const text = String(seed ?? "?");
+  return text.length > 9 ? `${text.slice(0, 4)}…${text.slice(-3)}` : text;
 }
 
 /* ── Selected instance panel ── */
@@ -1401,43 +1426,85 @@ function folderFactHtml(folder) {
     `<button type="button" class="copy-btn" data-copy="${escapeHtml(folder)}" title="Copy the full path">Copy</button></span>`;
 }
 
+/* The panel keeps what the instance is apart from what is drawn on the map: the
+   header and the Details tab describe the instance, the "Displayed solution"
+   card and the Routes tab describe the run on the map, the Runs tab lists every
+   saved run, and Solve only queues a new one. */
 function renderSelected() {
   const instance = state.selected;
   el("selEmpty").hidden = Boolean(instance);
   el("selBody").hidden = !instance;
   if (!instance) {
+    closePopover();
     syncAppearanceControls();
     return;
   }
   el("selName").textContent = instance.base_name;
-  el("selMeta").textContent = `CVRP · ${instance.city} · n=${instance.n}`;
-  const facts = [
-    ["Capacity", instance.summary.capacity],
-    ["Expected routes", instance.summary.route_count != null ? `~${instance.summary.route_count}` : "n/a"],
-    ["Seed", instance.seed],
-    ["Folder", folderFactHtml(instance.folder)],
-    ["Saved solutions", instance.solution_count],
-  ];
-  if (instance.vrptw) facts.push(["VRPTW twin", "derived"]);
-  if (instance.solved) {
-    // Which of the three metric variants this cost actually belongs to.
-    facts.push(["Solved on", solvedVariantFile(instance)]);
-  }
-  el("selFacts").innerHTML = facts
-    .map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`)
-    .join("");
-  if (instance.solved) {
-    const metric = runMetric(instance.solved);
-    el("selObjective").hidden = false;
-    el("selObjLabel").textContent =
-      `${metric} · ${instance.solved.objective_function || "MonoCost"} · ${runSourceLabel(instance.solved)}`;
-    el("selCost").textContent = String(instance.solved.cost);
-    el("selMethod").textContent = instance.solved.method || instance.solved.solver || "pyvrp";
-  } else {
-    el("selObjective").hidden = true;
-  }
+  // "n301" in the name counts the depot; say what the number in the header counts.
+  const customers = Number.isFinite(Number(instance.n)) ? `${instance.n} customers` : "customers n/a";
+  const benchmark = instance.source === "benchmark";
+  const lead = benchmark ? `${instance.problem} · ${instance.family}` : "CVRP";
+  el("selMeta").innerHTML = `<span>${escapeHtml(lead)} · ${escapeHtml(instance.city)} · ${escapeHtml(customers)} · capacity ${escapeHtml(instance.summary.capacity ?? "n/a")}</span>`
+    + (instance.vrptw ? '<span class="chip chip-acc" title="A VRPTW twin was derived from this instance">VRPTW twin</span>' : "")
+    + (benchmark ? `<span class="chip chip-acc" title="Published instance, read-only: your solutions are stored in the workspace">benchmark${instance.summary.revision ? ` ${escapeHtml(instance.summary.revision)}` : ""}</span>` : "")
+    + (benchmark && instance.tw_set ? `<span class="chip chip-acc" title="Time-window set">${escapeHtml(instance.tw_set)}</span>` : "");
+  // The .vrp export is a CVRP format; a benchmark has no workspace folder to zip.
+  el("download-open").hidden = benchmark && instance.problem !== "CVRP";
+  el("download").hidden = benchmark;
+  el("download-rule").hidden = benchmark;
+  renderDetails(instance);
+  renderRunCard();
   renderLegend();
   syncAppearanceControls();
+}
+
+function renderBenchmarkDetails(instance) {
+  const summary = instance.summary || {};
+  const variants = instance.files?.vrp_json || {};
+  const first = Object.values(variants)[0] || "";
+  const facts = [
+    ["Family", `${escapeHtml(instance.family)}${summary.revision ? ` · revision ${escapeHtml(summary.revision)}` : ""}`],
+    ["Problem", `${escapeHtml(instance.problem)}${instance.tw_set ? ` · time windows: ${escapeHtml(instance.tw_set)}` : ""}`],
+    ["City", escapeHtml(instance.city)],
+    ["Customers", escapeHtml(instance.n)],
+    ["Capacity", escapeHtml(summary.capacity ?? "n/a")],
+  ];
+  if (summary.route_count != null) facts.push(["Vehicles, lower bound", escapeHtml(summary.route_count)]);
+  for (const metric of Object.keys(variants)) {
+    const published = (summary.bks?.[metric] || []).join(", ") || "no BKS";
+    facts.push([`${metric[0].toUpperCase()}${metric.slice(1)} variant`, `cost in ${escapeHtml(summary.units?.[metric] || "units")} · ${escapeHtml(published)}`]);
+  }
+  if (summary.profile) facts.push(["Checker profile", escapeHtml(summary.profile)]);
+  facts.push(["Folder", folderFactHtml(`${instance.folder}/${first.split("/").slice(0, -1).join("/")}`)]);
+  facts.push(["My solutions", escapeHtml(instance.solution_count)]);
+  el("selFacts").innerHTML = facts.map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join("");
+}
+
+function renderDetails(instance) {
+  if (instance.source === "benchmark") {
+    renderBenchmarkDetails(instance);
+    return;
+  }
+  const summary = instance.summary || {};
+  const variants = instance.files?.vrp_json || {};
+  const facts = [
+    ["Problem", instance.vrptw ? "CVRP, with a derived VRPTW twin" : "CVRP"],
+    ["City", escapeHtml(instance.city)],
+    ["Customers", escapeHtml(instance.n)],
+    ["Capacity", escapeHtml(summary.capacity ?? "n/a")],
+    ["Expected routes", summary.route_count != null ? `~${escapeHtml(summary.route_count)}` : "n/a"],
+  ];
+  // The generator stores the codes of the Generate form; say what they stand for.
+  const coded = (labels, code) => (labels.has(Number(code)) ? `${escapeHtml(labels.get(Number(code)))} (${escapeHtml(code)})` : escapeHtml(code));
+  if (summary.demand_type != null) facts.push(["Demand type", coded(DEMAND_LABELS, summary.demand_type)]);
+  if (summary.avg_route_size != null) facts.push(["Route size band", coded(BAND_LABELS, summary.avg_route_size)]);
+  facts.push(["Seed", `<span class="fact-seed">${escapeHtml(instance.seed)}</span>`]);
+  facts.push(["Folder", folderFactHtml(instance.folder)]);
+  for (const metric of ["fastest", "shortest", "euclidean"]) {
+    if (variants[metric]) facts.push([`${metric[0].toUpperCase()}${metric.slice(1)} variant`, `<code class="fact-file">${escapeHtml(String(variants[metric]).split(/[\\/]/).pop())}</code>`]);
+  }
+  facts.push(["Saved solutions", escapeHtml(instance.solution_count)]);
+  el("selFacts").innerHTML = facts.map(([key, value]) => `<dt>${key}</dt><dd>${value}</dd>`).join("");
 }
 
 function routeVisibilityIcon(hidden) {
@@ -1447,13 +1514,27 @@ function routeVisibilityIcon(hidden) {
 function renderLegend() {
   const legend = el("legend");
   const instance = state.selected;
-  if (!instance || !instance.solved || !state.lastRendered) {
-    legend.innerHTML = '<div class="empty-note">Customer positions are displayed on the map. Select or create a saved solution to draw routes.</div>';
+  const drawn = Boolean(instance && instance.solved && state.lastRendered);
+  el("legendTools").hidden = !drawn;
+  if (!drawn) {
+    el("legendTitle").textContent = "Routes";
+    const saved = instance ? allSolutionRecords().length : 0;
+    legend.innerHTML = '<div class="empty-note">No solution is drawn: the map shows the depot and the customers.'
+      + (instance
+        ? `<div class="row empty-actions">${saved ? '<button type="button" class="mini-btn" data-panel-action="runs">Choose a saved solution</button>' : ""}`
+          + '<button type="button" class="mini-btn" data-panel-action="solve">Solve it</button>'
+          + '<button type="button" class="mini-btn" data-panel-action="import">Import a solution</button></div>'
+        : "")
+      + "</div>";
     syncAppearanceControls();
     return;
   }
+  const features = state.lastRendered.geojson.features;
+  const shown = features.filter((_, index) => !state.hiddenRoutes.has(index)).length;
+  el("legendTitle").textContent = shown === features.length ? `Routes · ${features.length}` : `Routes · ${shown} of ${features.length} shown`;
+  const capacity = Number(instance.summary.capacity);
   legend.innerHTML = "";
-  state.lastRendered.geojson.features.forEach((feature, index) => {
+  features.forEach((feature, index) => {
     const hidden = state.hiddenRoutes.has(index);
     const focused = state.focusedRoute === index;
     const row = document.createElement("div");
@@ -1476,11 +1557,17 @@ function renderLegend() {
     const focus = document.createElement("button");
     focus.type = "button";
     focus.className = "legend-focus";
+    focus.title = focused ? "Clear the focus" : "Focus this route: the others fade";
     focus.setAttribute("aria-pressed", String(focused));
     focus.setAttribute("aria-label", `${focused ? "Clear focus from" : "Focus"} route ${index + 1}`);
+    const load = Number(feature.properties.load);
+    // A bar says at a glance how full each vehicle is; the number stays for the exact load.
+    const loadHtml = capacity > 0 && Number.isFinite(load)
+      ? `<span class="load" title="Load ${load} of capacity ${capacity}"><span class="load-bar"><i style="width:${Math.min(100, (100 * load) / capacity).toFixed(1)}%"></i></span><span class="load-num">${load}</span></span>`
+      : `<span class="load"><span class="load-num">load ${escapeHtml(feature.properties.load ?? "?")}</span></span>`;
     focus.innerHTML = `<span class="dot" style="background:${routeColor(index)}"></span>` +
       `<span class="lbl">R${feature.properties.route_index}</span>` +
-      `<span class="meta">${feature.properties.stops} stops · load ${feature.properties.load}</span>`;
+      `<span class="meta">${feature.properties.stops} stops</span>` + loadHtml;
     focus.addEventListener("click", () => {
       state.hiddenRoutes.delete(index);
       state.focusedRoute = state.focusedRoute === index ? null : index;
@@ -1492,8 +1579,23 @@ function renderLegend() {
   syncAppearanceControls();
 }
 
+el("routes-all").addEventListener("click", () => {
+  state.hiddenRoutes.clear();
+  redrawRoutes();
+});
+el("routes-none").addEventListener("click", () => {
+  (state.lastRendered?.geojson.features || []).forEach((_, index) => state.hiddenRoutes.add(index));
+  state.focusedRoute = null;
+  redrawRoutes();
+});
+
 function selectInstance(index, preferredRunId = null) {
-  state.selected = state.instances[index];
+  return activateInstance(state.instances[index], preferredRunId);
+}
+
+/* Makes `instance` the selected one: a workspace instance or a benchmark's. */
+function activateInstance(instance, preferredRunId = null) {
+  state.selected = instance;
   state.selected.solved = null;
   state.selected.rendered = null;
   state.solutionRuns = [];
@@ -1505,9 +1607,12 @@ function selectInstance(index, preferredRunId = null) {
   previewLayers.clearLayers();
   instanceNodeLayers.clearLayers();
   clearRouteLayers();
-  // A half-filled import belongs to the instance it was opened for.
+  // A half-filled import and a comparison belong to the instance they were opened for.
   el("import-panel").hidden = true;
+  state.comparison = null;
   renderInstanceList();
+  renderBenchmarkList();
+  syncMetricOptions();
   renderSelected();
   loadSolvers().catch((error) => console.warn("Unable to list solvers", error));
   return loadSolutionRuns(preferredRunId).catch((error) => {
@@ -1542,6 +1647,192 @@ async function displayInstanceOnly(fit = true) {
   status(`Displayed ${instance.base_name}: depot and ${instance.n} customer positions.`);
 }
 
+/* ── Benchmarks: published instances as a second, read-only source ── */
+/* The same panel serves them: a solution found elsewhere is imported, checked by
+   the reference checker, stored in the workspace and drawn, with the published
+   BKS as the reference to compare against. */
+const placeName = (slug) => String(slug || "").split("_").filter(Boolean)
+  .map((word) => word[0].toUpperCase() + word.slice(1)).join(" ");
+
+function setInstanceSource(source) {
+  state.instanceSource = source;
+  const benchmarks = source === "benchmarks";
+  el("workspaceSource").hidden = benchmarks;
+  el("benchmarkSource").hidden = !benchmarks;
+  for (const [id, active] of [["sourceWorkspace", !benchmarks], ["sourceBenchmarks", benchmarks]]) {
+    el(id).classList.toggle("tab-active", active);
+    el(id).setAttribute("aria-pressed", String(active));
+  }
+  if (benchmarks && !state.benchmarks.loaded && !state.benchmarks.loading) {
+    loadBenchmarks().catch((error) => {
+      state.benchmarks.loading = false;
+      el("benchList").innerHTML = `<div class="empty-note">Cannot list the benchmarks: ${escapeHtml(error.message)}</div>`;
+    });
+  }
+}
+
+async function loadBenchmarks(refresh = false) {
+  state.benchmarks.loading = true;
+  // A rescan can change what an instance is: the panel objects are fetched again when next selected.
+  if (refresh) state.benchmarkObjects.clear();
+  el("benchList").innerHTML = '<div class="empty-note">Reading the benchmarks folder…</div>';
+  const data = await api(`/api/workbench/benchmarks${refresh ? "?refresh=true" : ""}`);
+  Object.assign(state.benchmarks, { loaded: true, loading: false, instances: data.instances || [], hint: data.hint, root: data.root });
+  const scopes = benchmarkScopes();
+  if (!scopes.some((scope) => scope.key === state.benchmarks.scope)) state.benchmarks.scope = scopes[0]?.key || null;
+  renderBenchmarkFilters();
+  renderBenchmarkList();
+}
+
+/* A scope is a family under one problem class: what a solution is checked against. */
+function benchmarkScopes() {
+  const scopes = new Map();
+  for (const entry of state.benchmarks.instances) {
+    const key = `${entry.family}|${entry.problem_type}`;
+    if (!scopes.has(key)) scopes.set(key, { key, family: entry.family, problem: entry.problem_type, count: 0 });
+    scopes.get(key).count += 1;
+  }
+  return [...scopes.values()];
+}
+
+function scopedBenchmarks() {
+  return state.benchmarks.instances.filter((entry) => `${entry.family}|${entry.problem_type}` === state.benchmarks.scope);
+}
+
+function renderBenchmarkFilters() {
+  const scopes = benchmarkScopes();
+  el("bench-scope").hidden = scopes.length < 2;
+  el("bench-scope").innerHTML = scopes
+    .map((scope) => `<button type="button" class="tab-btn${scope.key === state.benchmarks.scope ? " tab-active" : ""}" data-bench-scope="${escapeHtml(scope.key)}" aria-pressed="${scope.key === state.benchmarks.scope}" title="${scope.count} instances">${escapeHtml(scope.family)} ${escapeHtml(scope.problem)}</button>`)
+    .join("");
+  const scoped = scopedBenchmarks();
+  const fill = (id, all, values, label) => {
+    const select = el(id);
+    const previous = select.value;
+    select.innerHTML = "";
+    select.append(new Option(all, ""));
+    values.forEach((value) => select.append(new Option(label(value), String(value))));
+    select.value = values.map(String).includes(previous) ? previous : "";
+  };
+  fill("bench-city", "All cities", [...new Set(scoped.map((entry) => entry.city))].sort(), placeName);
+  const sizes = [...new Set(scoped.map((entry) => entry.n_customers))].sort((a, b) => a - b);
+  // A family with one size per city has as many sizes as instances: the search does that job better.
+  el("bench-size-field").hidden = sizes.length > 12;
+  fill("bench-size", "All sizes", sizes.length > 12 ? [] : sizes, (value) => `${value} customers`);
+}
+
+function filteredBenchmarks() {
+  const needle = el("bench-search").value.trim().toLowerCase();
+  const city = el("bench-city").value;
+  const size = el("bench-size").value;
+  const mine = el("bench-solved").checked;
+  return scopedBenchmarks().filter((entry) => {
+    if (city && entry.city !== city) return false;
+    if (size && String(entry.n_customers) !== size) return false;
+    if (mine && !entry.solution_count) return false;
+    return !needle || `${entry.base_name} ${entry.city} ${placeName(entry.city)}`.toLowerCase().includes(needle);
+  });
+}
+
+function renderBenchmarkList() {
+  const list = el("benchList");
+  if (!state.benchmarks.loaded) return;
+  const scoped = scopedBenchmarks();
+  if (!state.benchmarks.instances.length) {
+    el("bench-count").textContent = "";
+    list.innerHTML = `<div class="empty-note">${escapeHtml(state.benchmarks.hint || "No published instance was found.")}</div>`;
+    return;
+  }
+  const entries = filteredBenchmarks();
+  el("bench-count").textContent = entries.length === scoped.length
+    ? `${entries.length} instance${entries.length === 1 ? "" : "s"}`
+    : `${entries.length} of ${scoped.length}`;
+  if (!entries.length) {
+    list.innerHTML = '<div class="empty-note">No instance matches these filters.</div>';
+    return;
+  }
+  list.innerHTML = entries.map((entry) => {
+    const selected = state.selected?.instance_id === entry.instance_id;
+    const windows = entry.tw_set ? ` <span class="chip chip-acc" title="Time-window set">${escapeHtml(entry.tw_set)}</span>` : "";
+    const mine = entry.solution_count
+      ? ` <span class="chip chip-gr">${entry.solution_count} of mine</span>`
+      : "";
+    return `<button type="button" class="inst-row${selected ? " selected" : ""}" data-bench-id="${escapeHtml(entry.instance_id)}">`
+      + `<span class="inst-head"><span class="inst-name">${escapeHtml(entry.base_name)}</span>${windows}${mine}</span>`
+      + `<span class="inst-meta">${escapeHtml(placeName(entry.city))} · ${escapeHtml(entry.n_customers)} customers · ${escapeHtml(entry.metrics.join(", "))}</span></button>`;
+  }).join("");
+}
+
+/* The panel's instance object for a benchmark entry, kept so its map data is fetched once. */
+async function selectBenchmark(instanceId, preferredRunId = null) {
+  let instance = state.benchmarkObjects.get(instanceId);
+  if (!instance) {
+    const data = await api(`/api/workbench/benchmarks/${encodeURIComponent(instanceId)}`);
+    const entry = data.instance;
+    instance = {
+      instance_id: entry.instance_id,
+      source: "benchmark",
+      family: entry.family,
+      problem: entry.problem_type,
+      tw_set: entry.tw_set,
+      base_name: entry.base_name,
+      folder: entry.folder,
+      files: entry.files,
+      summary: entry.summary || {},
+      vrptw: null,
+      city: placeName(entry.city),
+      n: entry.n_customers ?? "?",
+      seed: null,
+      solution_count: entry.solution_count || 0,
+      solved: null,
+      rendered: null,
+      mapData: null,
+    };
+    state.benchmarkObjects.set(instanceId, instance);
+  }
+  return activateInstance(instance, preferredRunId);
+}
+
+el("bench-refresh").addEventListener("click", () => {
+  loadBenchmarks(true).catch((error) => {
+    state.benchmarks.loading = false;
+    el("benchList").innerHTML = `<div class="empty-note">Cannot list the benchmarks: ${escapeHtml(error.message)}</div>`;
+  });
+});
+el("sourceWorkspace").addEventListener("click", () => setInstanceSource("workspace"));
+el("sourceBenchmarks").addEventListener("click", () => setInstanceSource("benchmarks"));
+el("bench-scope").addEventListener("click", (event) => {
+  const button = event.target instanceof Element ? event.target.closest("[data-bench-scope]") : null;
+  if (!button) return;
+  // City and size carry over between the problem classes of one family, not between
+  // families: a city both have would silently hide the rest of the other one.
+  if (button.dataset.benchScope.split("|")[0] !== String(state.benchmarks.scope).split("|")[0]) {
+    el("bench-city").value = "";
+    el("bench-size").value = "";
+  }
+  state.benchmarks.scope = button.dataset.benchScope;
+  renderBenchmarkFilters();
+  renderBenchmarkList();
+});
+["bench-search", "bench-city", "bench-size", "bench-solved"].forEach((id) => el(id).addEventListener("input", renderBenchmarkList));
+el("benchList").addEventListener("click", (event) => {
+  const row = event.target instanceof Element ? event.target.closest("[data-bench-id]") : null;
+  if (!row) return;
+  selectBenchmark(row.dataset.benchId).catch((error) => status(`Cannot open the benchmark instance: ${error.message}`));
+});
+
+/* Not every instance has the three metric variants (a VRPTW benchmark is fastest only):
+   the metric selects offer what the selected instance has. */
+function syncMetricOptions() {
+  const available = Object.keys(state.selected?.files?.vrp_json || {});
+  for (const id of ["solve-metric", "import-metric", "download-metric"]) {
+    const select = el(id);
+    for (const option of select.options) option.disabled = available.length > 0 && !available.includes(option.value);
+    if (select.selectedOptions[0]?.disabled) select.value = available[0];
+  }
+  syncVrpExportControls();
+}
+
 /* ── Persistent solutions ── */
 /* Runs of an earlier version of the instance (it was regenerated or replaced)
    are "stale": the server flags them and refuses to render or compare them, so
@@ -1560,76 +1851,213 @@ function runMetric(run) {
   return run?.metadata?.metric || "unknown metric";
 }
 
-function runSourceLabel(run) {
+/* Where a run comes from, and when: "pyvrp · pyvrp-ils-v1", "Imported · LKH-3", "BKS". */
+function runOrigin(run) {
   if (run.source === "bks") return "BKS";
-  if (run.source === "imported") return `imported${run.solver && run.solver !== "external" ? ` · ${run.solver}` : ""}`;
-  const when = run.created_at ? new Date(run.created_at).toLocaleString() : "saved run";
-  return run.solver ? `${run.solver} · ${when}` : when;
+  if (run.source === "imported") return `Imported${run.solver && run.solver !== "external" ? ` · ${run.solver}` : ""}`;
+  const solver = run.solver || "pyvrp";
+  return run.method && run.method !== solver ? `${solver} · ${run.method}` : solver;
 }
 
-function solvedVariantFile(instance) {
-  const metric = runMetric(instance.solved);
-  const file = instance.files?.[metric];
-  return file || `${instance.base_name}_${metric}.vrp`;
+function runDate(run) {
+  const date = run.created_at ? new Date(run.created_at) : null;
+  return date && !Number.isNaN(date.getTime())
+    ? date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
+    : "";
 }
 
-function solutionLabel(run) {
-  const validity = run.validation?.valid ? "valid" : "invalid";
-  const problem = run.instance_path && /cvrptw/i.test(String(run.instance_path)) ? "VRPTW" : "CVRP";
-  return `${runMetric(run)} · ${problem} · ${runSourceLabel(run)} · ${run.objective_function}`
-    + ` · cost ${run.cost ?? "?"} · ${run.num_routes} routes · ${validity}`;
+function runWhere(run) {
+  return [runOrigin(run), runDate(run)].filter(Boolean).join(" · ");
+}
+
+function runProblem(run) {
+  if (state.selected?.source === "benchmark") return state.selected.problem;
+  return run.instance_path && /cvrptw/i.test(String(run.instance_path)) ? "VRPTW" : "CVRP";
+}
+
+/* Costs only compare between runs of the same variant under the same objective,
+   so that is what a group of the run list is. */
+function runGroupLabel(run) {
+  return `${runMetric(run)} · ${run.objective_function || "MonoCost"}${runProblem(run) === "VRPTW" ? " · VRPTW" : ""}`;
+}
+
+function runIsHierarchical(run) {
+  return /hierarchical/i.test(String(run.objective_function || ""));
+}
+
+function runIsRanked(run) {
+  return Boolean(run.validation?.valid) && run.cost != null && Number.isFinite(Number(run.cost));
+}
+
+/* Best first: valid runs before invalid ones, fewer routes first under a
+   hierarchical objective, then the lower cost. */
+function compareRunQuality(a, b) {
+  const rankedA = runIsRanked(a);
+  const rankedB = runIsRanked(b);
+  if (rankedA !== rankedB) return rankedA ? -1 : 1;
+  if (!rankedA) return 0;
+  if (runIsHierarchical(a) && a.num_routes !== b.num_routes) return a.num_routes - b.num_routes;
+  return Number(a.cost) - Number(b.cost);
+}
+
+function runGroups() {
+  const groups = new Map();
+  for (const run of allSolutionRecords()) {
+    const label = runGroupLabel(run);
+    if (!groups.has(label)) groups.set(label, { label, runs: [] });
+    groups.get(label).runs.push(run);
+  }
+  for (const group of groups.values()) {
+    group.runs.sort(compareRunQuality);
+    group.best = runIsRanked(group.runs[0]) ? group.runs[0] : null;
+  }
+  return [...groups.values()];
+}
+
+/* How far a run is from the best of its group: a relative gap, or a number of
+   routes when the objective puts the fleet first. */
+function runGapLabel(run, group) {
+  const best = group.best;
+  if (!best || !runIsRanked(run) || group.runs.length < 2) return "";
+  if (run === best) return "best";
+  if (runIsHierarchical(run) && run.num_routes !== best.num_routes) {
+    const extra = run.num_routes - best.num_routes;
+    return `+${extra} route${extra === 1 ? "" : "s"}`;
+  }
+  const reference = Number(best.cost);
+  if (!(reference > 0)) return "";
+  const gap = (100 * (Number(run.cost) - reference)) / reference;
+  return gap === 0 ? "= best" : `+${gap.toFixed(gap < 10 ? 2 : 1)}%`;
+}
+
+function displayedRun() {
+  return state.selectedRunId ? state.selected?.solved || null : null;
+}
+
+/* The metric the user is working on: the displayed run's, else the Solve tab's. */
+function preferredMetric() {
+  const metric = displayedRun()?.metadata?.metric;
+  return ["fastest", "shortest", "euclidean"].includes(metric) ? metric : el("solve-metric").value;
+}
+
+function renderRunCard() {
+  const instance = state.selected;
+  if (!instance) return;
+  const records = allSolutionRecords();
+  const run = displayedRun();
+  el("run-switch").hidden = records.length === 0;
+  const line = el("solution-validation");
+  line.hidden = true;
+  const body = el("runCardBody");
+  if (!run) {
+    body.innerHTML = '<div class="run-card-none">Instance only</div>'
+      + `<div class="run-card-line">${records.length
+        ? `Depot and customers. ${records.length} saved solution${records.length === 1 ? "" : "s"} can be drawn.`
+        : "Depot and customers. No saved solution yet."}</div>`
+      + (instance.source === "benchmark"
+        ? '<div class="row run-card-actions"><button type="button" class="btn btn-secondary" data-panel-action="import">Check my solution</button></div>'
+        : "");
+    return;
+  }
+  const validation = run.validation || {};
+  const metric = runMetric(run);
+  const chip = validation.recorded
+    ? `<span class="chip chip-gr" title="Published BKS: validated when it entered the collection${validation.validated_by ? ` (${escapeHtml(validation.validated_by)})` : ""}.">published</span>`
+    : validation.valid
+      ? `<span class="chip chip-gr" title="Validated on the ${escapeHtml(metric)} variant: canonical cost ${escapeHtml(validation.routing_cost)}, ${escapeHtml(validation.num_routes)} route(s).">validated</span>`
+      : '<span class="chip chip-cor">invalid</span>';
+  body.innerHTML = `<div class="sel-cost-row"><span class="sel-cost" id="selCost">${escapeHtml(run.cost ?? "n/a")}</span>`
+    + `<span class="run-card-routes">${escapeHtml(run.num_routes)} route${run.num_routes === 1 ? "" : "s"}</span>${chip}</div>`
+    + `<div class="run-card-line">${escapeHtml(runGroupLabel(run))}</div>`
+    + `<div class="run-card-line">${escapeHtml(runWhere(run))}</div>`
+    + bksStandingHtml(run);
+  if (!validation.valid) {
+    line.hidden = false;
+    line.className = "validation-line invalid";
+    line.textContent = `Invalid: ${validation.error_message || validation.status || "checker rejected this solution"}`;
+  }
+}
+
+/* Where a displayed solution stands against the published BKS of its variant and objective. */
+function bksStandingHtml(run) {
+  if (run.source === "bks" || !runIsRanked(run)) return "";
+  const label = runGroupLabel(run);
+  const bks = allSolutionRecords().find((other) => other.source === "bks" && runIsRanked(other) && runGroupLabel(other) === label);
+  if (!bks) return "";
+  const order = compareRunQuality(run, bks);
+  const share = Number(bks.cost) > 0 ? Math.abs((100 * (Number(run.cost) - Number(bks.cost))) / Number(bks.cost)) : 0;
+  // Both costs are rounded for display, so this line says no more than they show:
+  // a gap too small to print is "less than 0.01%", and equal displays are not
+  // called equal solutions. Compare, in the Runs tab, prices both exactly.
+  const amount = runIsHierarchical(run) && run.num_routes !== bks.num_routes
+    ? `${Math.abs(run.num_routes - bks.num_routes)} route${Math.abs(run.num_routes - bks.num_routes) === 1 ? "" : "s"}`
+    : share < 0.005 ? "less than 0.01%" : `${share.toFixed(share < 10 ? 2 : 1)}%`;
+  if (order < 0) {
+    return `<div class="run-card-line run-card-better">Better than the published BKS by ${escapeHtml(amount)}. It can be submitted with <code>mamut-routing bks submit</code>.</div>`;
+  }
+  return `<div class="run-card-line">${order === 0
+    ? "Same cost as the published BKS at the displayed precision; Compare prices both exactly."
+    : `${escapeHtml(amount)} above the published BKS.`}</div>`;
+}
+
+function runRowHtml(run, group, { compare }) {
+  const current = displayedRun();
+  const displayed = run.run_id === state.selectedRunId;
+  const gap = runGapLabel(run, group);
+  const canCompare = compare && !displayed && current && runIsRanked(run) && runIsRanked(current) && group.runs.includes(current);
+  return `<div class="run-row${displayed ? " selected" : ""}">`
+    + `<button type="button" class="run-pick" data-run-id="${escapeHtml(run.run_id)}" aria-pressed="${displayed}" title="${displayed ? "Displayed on the map" : "Display this solution on the map"}">`
+    + `<span class="run-cost">${escapeHtml(run.cost ?? "n/a")}</span>`
+    + `<span class="run-routes">${escapeHtml(run.num_routes)} route${run.num_routes === 1 ? "" : "s"}</span>`
+    + `<span class="run-gap">${run.validation?.valid ? escapeHtml(gap) : '<span class="chip chip-cor">invalid</span>'}</span>`
+    + `<span class="run-origin">${escapeHtml(runWhere(run))}</span></button>`
+    + (canCompare ? `<button type="button" class="mini-btn run-compare" data-compare-id="${escapeHtml(run.run_id)}" title="Compare the displayed solution against this one">Compare</button>` : "")
+    + "</div>";
+}
+
+function runListHtml(options) {
+  const groups = runGroups();
+  if (!groups.length) return "";
+  const none = `<div class="run-row${state.selectedRunId ? "" : " selected"}">`
+    + `<button type="button" class="run-pick run-pick-none" data-run-id="" aria-pressed="${!state.selectedRunId}">`
+    + '<span class="run-cost">Instance only</span><span class="run-origin">Depot and customers, no routes</span></button></div>';
+  return none + groups
+    .map((group) => `<div class="run-group">${escapeHtml(group.label)}</div>${group.runs.map((run) => runRowHtml(run, group, options)).join("")}`)
+    .join("");
+}
+
+function renderRunLists() {
+  const records = allSolutionRecords();
+  el("runsTitle").textContent = records.length ? `Saved solutions · ${records.length}` : "Saved solutions";
+  el("runList").innerHTML = records.length
+    ? runListHtml({ compare: true })
+    : '<div class="empty-note">No saved solution yet. Queue one in the Solve tab, or import a solution found elsewhere.</div>';
+  el("runPopoverList").innerHTML = runListHtml({ compare: false });
+  const stale = staleRunCount();
+  const note = el("runsNote");
+  note.hidden = stale === 0;
+  note.textContent = stale
+    ? `${stale} stale run${stale === 1 ? "" : "s"} of an earlier version of this instance (regenerated since) hidden.`
+    : "";
+  // A comparison belongs to the run it was made for.
+  const comparison = state.comparison;
+  const output = el("comparison-output");
+  if (comparison && comparison.instanceId === state.selected?.instance_id && comparison.candidateId === state.selectedRunId) {
+    output.hidden = false;
+    output.innerHTML = comparison.html;
+  } else {
+    state.comparison = null;
+    output.hidden = true;
+    output.innerHTML = "";
+  }
 }
 
 function refreshSolutionControls() {
-  const runs = allSolutionRecords();
-  const runSelect = el("solution-run");
-  const comparisonSelect = el("comparison-run");
-  runSelect.innerHTML = "";
-  runSelect.append(new Option("Instance only · customer locations", ""));
-  const stale = staleRunCount();
-  const staleNote = stale
-    ? ` ${stale} stale run${stale === 1 ? "" : "s"} of an earlier version of this instance (regenerated since) hidden.`
-    : "";
-  if (!runs.length) {
-    comparisonSelect.innerHTML = '<option value="">Select a reference run</option>';
-    el("compare").disabled = true;
-    el("solution-validation").className = "validation-line";
-    el("solution-validation").textContent = `No saved solutions yet; instance data is stored locally.${staleNote}`;
-    return;
-  }
-  runs.forEach((run) => runSelect.append(new Option(solutionLabel(run), run.run_id)));
-  if (state.selectedRunId && !runs.some((run) => run.run_id === state.selectedRunId)) {
+  if (state.selectedRunId && !allSolutionRecords().some((run) => run.run_id === state.selectedRunId)) {
     state.selectedRunId = null;
   }
-  runSelect.value = state.selectedRunId || "";
-  const selected = runs.find((run) => run.run_id === state.selectedRunId);
-  comparisonSelect.innerHTML = "";
-  comparisonSelect.append(new Option("Select a reference run", ""));
-  runs
-    .filter((run) => run.run_id !== state.selectedRunId
-      && run.objective_function === selected?.objective_function
-      && run.metadata?.metric === selected?.metadata?.metric)
-    .forEach((run) => comparisonSelect.append(new Option(solutionLabel(run), run.run_id)));
-  el("compare").disabled = !selected || comparisonSelect.options.length <= 1;
-  if (!selected) {
-    el("solution-validation").className = "validation-line";
-    el("solution-validation").textContent =
-      `${state.solutionRuns.length - stale} saved solution run(s) available locally.${staleNote}`;
-    return;
-  }
-  const validation = selected?.validation || {};
-  const metric = runMetric(selected);
-  const line = el("solution-validation");
-  line.className = `validation-line ${validation.valid ? "valid" : "invalid"}`;
-  line.textContent = validation.valid
-    ? `Validated on the ${metric} variant: canonical cost ${validation.routing_cost}, ${validation.num_routes} route(s).`
-    : `Invalid: ${validation.error_message || validation.status || "checker rejected this solution"}`;
-  // Only same-metric runs can be compared, so say so rather than leaving an
-  // empty reference list looking broken.
-  if (validation.valid && el("solve-metric").value !== metric) {
-    line.className = "validation-line";
-    line.textContent += ` The Metric selector is on ${el("solve-metric").value}; only ${metric} runs compare with this one.`;
-  }
+  renderRunCard();
+  renderRunLists();
 }
 
 async function displaySolutionRun(runId, fit = true) {
@@ -1676,8 +2104,12 @@ async function loadSolutionRuns(preferredRunId = null) {
   state.solutionRuns = data.runs || [];
   state.solutionReferences = data.references || [];
   instance.solution_count = state.solutionRuns.filter((run) => !run.stale).length;
+  // The benchmark list was fetched once: its row learns of the new count here.
+  const listed = state.benchmarks.instances.find((entry) => entry.instance_id === instance.instance_id);
+  if (listed) listed.solution_count = instance.solution_count;
   state.selectedRunId = preferredRunId;
   renderInstanceList();
+  renderBenchmarkList();
   refreshSolutionControls();
   if (state.selectedRunId) {
     await displaySolutionRun(state.selectedRunId, true);
@@ -1686,36 +2118,111 @@ async function loadSolutionRuns(preferredRunId = null) {
   }
 }
 
-el("solution-run").addEventListener("change", (event) => {
-  displaySolutionRun(event.target.value, true).catch((error) => status(`Cannot display solution: ${error.message}`));
-});
+/* ── Run list, run switcher and comparison ── */
+function comparisonHtml(value, reference) {
+  const gap = value.relative_gap_percent == null ? "n/a" : `${value.relative_gap_percent > 0 ? "+" : ""}${value.relative_gap_percent.toFixed(3)}%`;
+  // A difference of two binary64 costs carries rounding noise (74.36700000000002): twelve digits say all there is.
+  const signed = (number) => {
+    const clean = Number.isInteger(number) ? number : Number(number.toPrecision(12));
+    return clean > 0 ? `+${clean}` : String(clean);
+  };
+  const extent = (loads) => (loads.length ? `${Math.min(...loads)}–${Math.max(...loads)}` : "n/a");
+  const verdict = { better: "better than", worse: "worse than", equal: "equal to" }[value.ordering] || value.ordering;
+  const difference = value.route_difference;
+  return '<div class="comparison-head"><span class="kicker">Comparison</span>'
+    + '<button type="button" class="popover-close" data-comparison-close aria-label="Close the comparison"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>'
+    + `<div class="comparison-verdict">The displayed solution is <strong>${escapeHtml(verdict)}</strong> ${escapeHtml(runWhere(reference))} <span class="comparison-profile">(${escapeHtml(value.profile)})</span></div>`
+    + '<table class="comparison-table"><thead><tr><th></th><th>Displayed</th><th>Reference</th><th>Difference</th></tr></thead><tbody>'
+    // Each cell names its column: in a narrow panel the table stacks and the head row is gone (workbench.css).
+    + `<tr><th>Cost</th><td data-label="Displayed">${escapeHtml(value.candidate.cost)}</td><td data-label="Reference">${escapeHtml(value.reference.cost)}</td><td data-label="Difference"><span class="comparison-value">${value.cost_delta == null ? "outside binary64" : escapeHtml(signed(value.cost_delta))} <span class="comparison-profile">${escapeHtml(gap)}</span></span></td></tr>`
+    + `<tr><th>Routes</th><td data-label="Displayed">${value.candidate.num_routes}</td><td data-label="Reference">${value.reference.num_routes}</td><td data-label="Difference">${escapeHtml(signed(value.route_count_delta))}</td></tr>`
+    + `<tr><th>Loads</th><td data-label="Displayed">${escapeHtml(extent(value.candidate.route_loads))}</td><td data-label="Reference">${escapeHtml(extent(value.reference.route_loads))}</td><td></td></tr>`
+    + "</tbody></table>"
+    + '<dl class="sel-facts comparison-facts">'
+    + `<dt>Directed edges</dt><dd>+${difference.directed_edges_added} / −${difference.directed_edges_removed}</dd>`
+    + `<dt>Customer pairs on one route</dt><dd>+${difference.co_routed_customer_pairs_added} / −${difference.co_routed_customer_pairs_removed}</dd>`
+    + "</dl>";
+}
 
-el("comparison-run").addEventListener("change", (event) => {
-  el("compare").disabled = !event.target.value;
-});
-
-el("compare").addEventListener("click", async () => {
-  if (!state.selected || !state.selectedRunId || !el("comparison-run").value) return;
+async function compareWith(referenceId) {
+  const instance = state.selected;
+  const candidateId = state.selectedRunId;
+  if (!instance || !candidateId || !referenceId) return;
+  const output = el("comparison-output");
+  const keep = (html) => {
+    if (state.selected !== instance || state.selectedRunId !== candidateId) return;
+    state.comparison = { instanceId: instance.instance_id, candidateId, html };
+    output.hidden = false;
+    output.innerHTML = html;
+    output.scrollIntoView({ block: "nearest" });
+  };
   try {
-    const data = await api(`/api/instances/${encodeURIComponent(state.selected.instance_id)}/solutions/compare`, {
-      candidate_run_id: state.selectedRunId,
-      reference_run_id: el("comparison-run").value,
+    const data = await api(`/api/instances/${encodeURIComponent(instance.instance_id)}/solutions/compare`, {
+      candidate_run_id: candidateId,
+      reference_run_id: referenceId,
     });
-    const value = data.comparison;
-    const gap = value.relative_gap_percent == null ? "n/a" : `${value.relative_gap_percent.toFixed(3)}%`;
-    el("comparison-output").hidden = false;
-    el("comparison-output").textContent = [
-      `Result: ${value.ordering} (${value.profile})`,
-      `Cost delta: ${value.cost_delta ?? "outside binary64 range"} (gap ${gap})`,
-      `Route-count delta: ${value.route_count_delta}`,
-      `Candidate loads: ${value.candidate.route_loads.join(", ")}`,
-      `Reference loads: ${value.reference.route_loads.join(", ")}`,
-      `Directed edges +${value.route_difference.directed_edges_added} / -${value.route_difference.directed_edges_removed}`,
-      `Co-routed pairs +${value.route_difference.co_routed_customer_pairs_added} / -${value.route_difference.co_routed_customer_pairs_removed}`,
-    ].join("\n");
+    const reference = allSolutionRecords().find((run) => run.run_id === referenceId);
+    keep(comparisonHtml(data.comparison, reference || {}));
   } catch (error) {
-    el("comparison-output").hidden = false;
-    el("comparison-output").textContent = `Comparison failed: ${error.message}`;
+    keep(`<div class="validation-line invalid">Comparison failed: ${escapeHtml(error.message)}</div>`);
+  }
+}
+
+function onRunListClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const compare = target?.closest("[data-compare-id]");
+  if (compare) {
+    compareWith(compare.dataset.compareId);
+    return;
+  }
+  const pick = target?.closest("[data-run-id]");
+  if (!pick) return;
+  closePopover();
+  displaySolutionRun(pick.dataset.runId, true).catch((error) => status(`Cannot display solution: ${error.message}`));
+}
+el("runList").addEventListener("click", onRunListClick);
+el("runPopoverList").addEventListener("click", onRunListClick);
+
+el("comparison-output").addEventListener("click", (event) => {
+  if (!(event.target instanceof Element) || !event.target.closest("[data-comparison-close]")) return;
+  state.comparison = null;
+  el("comparison-output").hidden = true;
+});
+
+/* Popovers of the selected-instance panel open beside the panel, over the map,
+   so they never cover what they act on. */
+function togglePanelPopover(popoverId, button, beforeOpen) {
+  const popover = el(popoverId);
+  if (!popover.hidden) {
+    closePopover();
+    return;
+  }
+  beforeOpen?.();
+  showPopover(popover, button, () => {
+    popover.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+  }, document.querySelector(".panel-right"));
+  button.setAttribute("aria-expanded", "true");
+}
+el("run-switch").addEventListener("click", (event) => togglePanelPopover("run-popover", event.currentTarget));
+el("appearance-open").addEventListener("click", (event) => togglePanelPopover("route-appearance", event.currentTarget));
+el("download-open").addEventListener("click", (event) => togglePanelPopover("download-popover", event.currentTarget, () => {
+  el("download-metric").value = preferredMetric();
+  syncVrpExportControls();
+}));
+for (const id of ["run-popover-close", "appearance-close", "download-close"]) {
+  el(id).addEventListener("click", closePopover);
+}
+
+/* The shortcuts of an empty state: "Solve it", "Import a solution", "Choose a saved solution". */
+document.querySelector(".panel-right").addEventListener("click", (event) => {
+  const action = event.target instanceof Element ? event.target.closest("[data-panel-action]")?.dataset.panelAction : null;
+  if (!action) return;
+  if (action === "import") {
+    activateInspectorTab("runs");
+    openImportPanel();
+  } else {
+    activateInspectorTab(action);
   }
 });
 
@@ -2073,16 +2580,18 @@ async function handleFinishedJob(job) {
       + (twinFailures ? ` ${twinFailures} VRPTW twin(s) could not be derived.` : ""));
   } else if (job.kind === "solve") {
     const preferredRunId = result.solution?.run_id || null;
-    let selectedByHandler = false;
-    if (!state.selected || state.selected.instance_id !== result.instance_id) {
+    // The run belongs to the solved instance: it is shown there, never loaded
+    // into whatever instance happens to be selected by now.
+    if (state.selected?.instance_id === result.instance_id) {
+      await loadSolutionRuns(preferredRunId);
+    } else if (String(result.instance_id).startsWith("bench-")) {
+      setInstanceSource("benchmarks");
+      await selectBenchmark(result.instance_id, preferredRunId);
+    } else {
       await loadInstances();
       const index = state.instances.findIndex((instance) => instance.instance_id === result.instance_id);
-      if (index >= 0) {
-        await selectInstance(index, preferredRunId);
-        selectedByHandler = true;
-      }
+      if (index >= 0) await selectInstance(index, preferredRunId);
     }
-    if (!selectedByHandler) await loadSolutionRuns(preferredRunId);
     activateTab("visualize");
     status(`Solved ${result.solution?.instance_name || "instance"} with ${result.solver || "pyvrp"}: cost ${result.cost}; checker ${result.validation?.status}.`);
   }
@@ -2205,12 +2714,12 @@ el("generate").addEventListener("click", async () => {
 });
 
 function syncVrpExportControls() {
-  const euclidean = el("solve-metric").value === "euclidean";
+  const euclidean = el("download-metric").value === "euclidean";
   el("download-vrp-euc2d-field").hidden = !euclidean;
   if (!euclidean) el("download-vrp-euc2d").checked = false;
 }
 
-el("solve-metric").addEventListener("change", syncVrpExportControls);
+el("download-metric").addEventListener("change", syncVrpExportControls);
 el("solve-metric").addEventListener("change", () => loadSolvers().catch(() => {}));
 el("solve-objective").addEventListener("change", () => loadSolvers().catch(() => {}));
 el("solve-solver").addEventListener("change", syncSolverNote);
@@ -2219,7 +2728,7 @@ syncVrpExportControls();
 el("download-vrp").addEventListener("click", async () => {
   const instance = state.selected;
   if (!instance) return;
-  const metric = el("solve-metric").value;
+  const metric = el("download-metric").value;
   const edgeWeightType = el("download-vrp-euc2d").checked ? "EUC_2D" : "EXPLICIT";
   const filename = `${instance.base_name}_${metric}.vrp`;
   try {
@@ -2813,13 +3322,19 @@ function resetImportPanel() {
   el("import-label").value = "";
   el("import-validation").className = "validation-line";
   el("import-validation").textContent =
-    "Imported solutions are checked against the metric selected above before they are stored.";
+    "Imported solutions are checked against the chosen metric before they are stored.";
+}
+
+function openImportPanel() {
+  resetImportPanel();
+  el("import-metric").value = preferredMetric();
+  el("import-panel").hidden = false;
+  el("import-panel").scrollIntoView({ block: "nearest" });
 }
 
 el("import-open").addEventListener("click", () => {
-  const panel = el("import-panel");
-  panel.hidden = !panel.hidden;
-  if (!panel.hidden) resetImportPanel();
+  if (el("import-panel").hidden) openImportPanel();
+  else el("import-panel").hidden = true;
 });
 el("import-cancel").addEventListener("click", () => { el("import-panel").hidden = true; });
 el("import-file").addEventListener("change", async (event) => {
@@ -2834,7 +3349,7 @@ el("import-run").addEventListener("click", async () => {
   const instance = state.selected;
   const line = el("import-validation");
   if (!instance) { status("Select an instance first."); return; }
-  const metric = el("solve-metric").value;
+  const metric = el("import-metric").value;
   try {
     line.className = "validation-line";
     line.textContent = `Checking the routes against the ${metric} variant…`;

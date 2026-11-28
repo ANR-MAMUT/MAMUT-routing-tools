@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from mamut_routing_tools.generation.artifacts import belongs_to_base
+from mamut_routing_tools.gui import benchmarks as benchmark_source
 from mamut_routing_tools.gui.jobs import JobContext, JobManager
 from mamut_routing_tools.gui.preferences import PreferenceStore
 from mamut_routing_tools.gui.solutions import (
@@ -303,7 +304,19 @@ def _workspace_instances(workspace: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _is_benchmark(record: dict[str, Any]) -> bool:
+    return record.get("source") == "benchmark"
+
+
 def _workspace_instance(workspace: Path, instance_id: str) -> dict[str, Any]:
+    """The record of a generated instance, or of a published benchmark instance.
+
+    Both have the same shape (``benchmarks.BenchmarkCatalog``), so everything
+    keyed on an instance id -- runs, import, render, compare, solve -- serves
+    either without knowing which it is.
+    """
+    if benchmark_source.is_benchmark_id(instance_id):
+        return benchmark_source.catalog_for(workspace).record(instance_id)
     for record in _workspace_instances(workspace):
         if record["instance_id"] == instance_id:
             return record
@@ -322,14 +335,21 @@ def _instance_variant_path(record: dict[str, Any], metric: str) -> Path:
     return path
 
 
-def _instance_map_payload(record: dict[str, Any]) -> dict[str, Any]:
-    """Small, geometry-only view of instance metadata for the GUI map."""
-
+def _instance_meta(record: dict[str, Any], workspace: Path) -> dict[str, Any]:
+    """Node positions and provenance: the generator's metadata file, or a benchmark's geo sidecar."""
+    if _is_benchmark(record):
+        return benchmark_source.catalog_for(workspace).meta(record)
     folder = Path(record["folder"])
     meta_path = folder / str(record["files"]["meta"])
     if not meta_path.is_file() or not _contained(meta_path, folder):
         raise FileNotFoundError(meta_path)
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
+def _instance_map_payload(record: dict[str, Any], workspace: Path) -> dict[str, Any]:
+    """Small, geometry-only view of instance metadata for the GUI map."""
+
+    meta = _instance_meta(record, workspace)
     depot_id = int(meta.get("depot_instance_node_id") or 1)
     raw_nodes = sorted(meta.get("nodes") or [], key=lambda node: int(node["instance_node_id"]))
     features = []
@@ -610,7 +630,13 @@ def _generate_bulk_payload(
     return result
 
 
-def create_app(workspace: Path, token: str) -> FastAPI:
+def create_app(workspace: Path, token: str, benchmarks_dir: Path | None = None) -> FastAPI:
+    benchmark_source.configure_catalog(workspace, benchmark_source.resolve_benchmarks_root(benchmarks_dir))
+
+    def benchmarks() -> benchmark_source.BenchmarkCatalog:
+        # The same lookup the module-level helpers use (`_workspace_instance`, `_instance_meta`).
+        return benchmark_source.catalog_for(workspace)
+
     jobs = JobManager(workspace)
     solutions = SolutionStore(workspace)
     preferences = PreferenceStore(workspace)
@@ -765,6 +791,29 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             # Runs of an earlier version of the instance (regenerated) do not count.
             record["solution_count"] = len(solutions.current(str(record["instance_id"])))
         return {"ok": True, "instances": records}
+
+    @app.get("/api/workbench/benchmarks")
+    def workbench_benchmarks(refresh: bool = False) -> dict[str, Any]:
+        """Static instances of the published geographic collections found on disk.
+
+        Read-only: a solution checked against one of them is stored in the
+        workspace, never in the benchmarks folder. A plain ``def`` because the
+        first listing walks the folder.
+        """
+        listing = benchmarks().listing(refresh)
+        for record in listing["instances"]:
+            record["solution_count"] = len(solutions.current(str(record["instance_id"])))
+        return {"ok": True, **listing}
+
+    @app.get("/api/workbench/benchmarks/{instance_id}")
+    def workbench_benchmark(instance_id: str) -> Any:
+        try:
+            record = benchmarks().detail(instance_id)
+        except KeyError:
+            return _payload_error(404, "Unknown benchmark instance")
+        except Exception as error:  # noqa: BLE001
+            return _payload_error(400, str(error))
+        return {"ok": True, "instance": {**record, "solution_count": len(solutions.current(instance_id))}}
 
     @app.get("/api/workbench/osmdata/audit")
     async def osmdata_audit() -> Any:
@@ -1025,7 +1074,7 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             return _payload_error(404, "Unknown job")
 
     @app.get("/api/instances/{instance_id}/solutions")
-    async def list_solution_runs(instance_id: str) -> Any:
+    def list_solution_runs(instance_id: str) -> Any:
         try:
             record = _workspace_instance(workspace, instance_id)
             references = _bks_references(record)
@@ -1041,9 +1090,9 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         }
 
     @app.get("/api/instances/{instance_id}/map-data")
-    async def instance_map_data(instance_id: str) -> Any:
+    def instance_map_data(instance_id: str) -> Any:
         try:
-            return _instance_map_payload(_workspace_instance(workspace, instance_id))
+            return _instance_map_payload(_workspace_instance(workspace, instance_id), workspace)
         except KeyError:
             return _payload_error(404, "Unknown workspace instance")
         except Exception as error:  # noqa: BLE001
@@ -1071,20 +1120,18 @@ def create_app(workspace: Path, token: str) -> FastAPI:
             return _payload_error(400, str(error))
 
     @app.post("/api/instances/{instance_id}/solutions/{run_id}/render")
-    async def render_solution_run(instance_id: str, run_id: str, metric: str = "fastest") -> Any:
+    def render_solution_run(instance_id: str, run_id: str, metric: str = "fastest") -> Any:
+        # A plain ``def``: reading a benchmark's sidecars (megabytes of gzip JSON) and
+        # searching its road graph both block, so the whole handler runs in a worker thread.
         try:
             record = _workspace_instance(workspace, instance_id)
             solution = _solution_or_reference(solutions, record, instance_id, run_id)
             if solution.get("stale"):
                 return _payload_error(409, _stale_message(solution))
-            folder = Path(record["folder"])
-            meta_path = folder / str(record["files"]["meta"])
-            if not meta_path.is_file() or not _contained(meta_path, folder):
-                raise FileNotFoundError(meta_path)
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            return _render_routes_payload(
-                {"meta": meta, "routes": solution["routes"], "metric": metric}, workspace
-            )
+            meta = _instance_meta(record, workspace)
+            # A published instance has no OSM extract here: its road-graph sidecar gives the paths.
+            roads = benchmarks().roads(record) if _is_benchmark(record) else None
+            return _render_routes_payload({"meta": meta, "routes": solution["routes"], "metric": metric}, workspace, roads)
         except KeyError:
             return _payload_error(404, "Unknown instance or solution run")
         except Exception as error:  # noqa: BLE001
@@ -1122,7 +1169,8 @@ def create_app(workspace: Path, token: str) -> FastAPI:
         except KeyError:
             return _payload_error(404, "Unknown instance")
         try:
-            return _import_solution_payload(record, instance_id, payload, solutions)
+            # The checker loads the whole cost matrix: seconds on a large instance.
+            return await run_in_threadpool(_import_solution_payload, record, instance_id, payload, solutions)
         except SolutionImportError as error:
             return _payload_error(400, str(error))
         except Exception as error:  # noqa: BLE001
@@ -1625,6 +1673,26 @@ def _solvers_payload(workspace: Path, instance_id: str, metric: str, objective_f
     return {"ok": True, "config": str(config) if config else None, "config_error": config_error, "solvers": rows}
 
 
+def _recorded_bks_validation(bks: Any) -> dict[str, Any]:
+    """The verdict a published BKS carries, without running the checker again.
+
+    A BKS of a collection was validated when it entered it, and says so in its
+    metadata. Checking it again on every listing costs the whole cost matrix
+    per metric variant (twelve seconds each at n=4000) to learn nothing new;
+    comparing against it still reprices both solutions exactly.
+    """
+    metadata = bks.metadata
+    return {
+        "valid": True,
+        "status": "published",
+        "recorded": True,
+        "error_message": None,
+        "routing_cost": metadata.get("validated_cost", bks.cost),
+        "num_routes": metadata.get("validated_num_routes", len(bks.routes)),
+        "validated_by": metadata.get("validated_by"),
+    }
+
+
 def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
     from mamut_routing_lib.artifacts import get_bks_path_for_instance, load_benchmark_instance, load_bks
     from mamut_routing_lib.enums import ObjectiveFunction
@@ -1641,11 +1709,14 @@ def _bks_references(record: dict[str, Any]) -> list[dict[str, Any]]:
             if not path.is_file():
                 continue
             bks = load_bks(path)
-            marked = "standard" in bks.metadata or "exact_evaluation" in bks.metadata
-            validation = validate_solution(
-                instance, bks.routes, instance_path=instance_path, objective_function=objective,
-                marked_input=bks if marked else None,
-            )
+            if _is_benchmark(record):
+                validation = _recorded_bks_validation(bks)
+            else:
+                marked = "standard" in bks.metadata or "exact_evaluation" in bks.metadata
+                validation = validate_solution(
+                    instance, bks.routes, instance_path=instance_path, objective_function=objective,
+                    marked_input=bks if marked else None,
+                )
             references.append(
                 {
                     "schema_version": 1,
@@ -1750,7 +1821,9 @@ def _export_vrp_payload(record: dict[str, Any], payload: dict[str, Any], workspa
     if export_format not in EXPORT_SUFFIXES:
         raise ValueError(f"Unsupported format '{export_format}'")
     instance_path = _instance_variant_path(record, metric)
-    if not instance_path.is_file() or not _contained(instance_path, instances_dir(workspace, create=False)):
+    # A benchmark file sits in its collection, which `_instance_variant_path` has just checked.
+    inside = _is_benchmark(record) or _contained(instance_path, instances_dir(workspace, create=False))
+    if not instance_path.is_file() or not inside:
         raise ValueError(f"Instance file for the '{metric}' variant is missing")
     instance = load_benchmark_instance(instance_path)
     options = VrpExportOptions(edge_weight_type=edge_weight_type, format=export_format)  # type: ignore[arg-type]
@@ -1787,10 +1860,21 @@ def _instance_from_vrp_text(vrp_text: str) -> Any:
     )
 
 
-def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str, Any]:
+def _segment_between(path: list[list[float]], start: list[float], end: list[float]) -> list[list[float]]:
+    """A road path with the two locations it joins as its ends, without repeated points."""
+    points: list[list[float]] = []
+    for point in (start, *path, end):
+        if not points or abs(points[-1][0] - point[0]) > 1e-9 or abs(points[-1][1] - point[1]) > 1e-9:
+            points.append([float(point[0]), float(point[1])])
+    return points if len(points) > 1 else [list(start), list(end)]
+
+
+def _render_routes_payload(payload: dict[str, Any], workspace: Path, roads: Any = None) -> dict[str, Any]:
     """Road polylines for arbitrary routes over a workbench meta object:
     cache-first on meta.road_cache, live Dijkstra fill on the meta's OSM
-    graph for shortest/fastest, straight lines otherwise."""
+    graph for shortest/fastest, straight lines otherwise. With ``roads`` (a
+    benchmark instance's ``SidecarRoads``) the paths come from the published
+    road graph instead, and no OSM extract is needed."""
     from mamut_routing_tools.geometry.materialize import candidate_route_segment, resolve_source_osm_path
     from mamut_routing_tools.roadgraph.build import road_graph_candidates
 
@@ -1814,8 +1898,10 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
         return [float(node["poi_lon"]), float(node["poi_lat"])]
 
     road_cache = (meta.get("road_cache") or {}).get(metric) or {}
+    # Model index (depot and customers in id order) of each metadata id: how the road graph names nodes.
+    model_index = {metadata_id: index for index, metadata_id in enumerate(sorted(nodes))}
     candidates = None
-    if metric in ("shortest", "fastest"):
+    if roads is None and metric in ("shortest", "fastest"):
         try:
             osm_path = resolve_source_osm_path(workspace, meta, "meta")
             candidates = [
@@ -1845,7 +1931,12 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
             from_id, to_id = sequence[i], sequence[i + 1]
             from_node, to_node = nodes[from_id], nodes[to_id]
             segment = None
-            if metric in ("shortest", "fastest"):
+            if roads is not None:
+                road_path = roads.segment(model_index[from_id], model_index[to_id], metric)
+                if road_path is not None:
+                    segment = _segment_between(road_path, node_lonlat(from_id), node_lonlat(to_id))
+                    segment_modes.add("cached_road")
+            elif metric in ("shortest", "fastest"):
                 key = f"{from_node['graph_vertex_id']}_{to_node['graph_vertex_id']}"
                 cached = road_cache.get(key)
                 if cached:
@@ -1908,6 +1999,7 @@ def _render_routes_payload(payload: dict[str, Any], workspace: Path) -> dict[str
             "metric": metric,
             "route_count": len(routes),
             "render_mode": overall,
+            "road_source": "road-graph sidecar" if roads is not None else "osm",
             "used_cache": used_cache,
             "cache_miss_count": cache_miss_count,
             "straight_fallback_count": cache_miss_count,
