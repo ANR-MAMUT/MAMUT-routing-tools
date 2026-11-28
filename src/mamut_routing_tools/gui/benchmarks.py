@@ -221,7 +221,9 @@ class BenchmarkCatalog:
 
     def _loaded(self, refresh: bool = False) -> dict[str, dict[str, Any]]:
         with self._lock:
-            if self._records is None or refresh:
+            # A scan that found nothing (no folder yet, an unreadable one) is not kept:
+            # the folder may have been cloned or repaired since, and looking again is cheap.
+            if self._records is None or refresh or self._error or not self._records:
                 self._scan()
             assert self._records is not None
             return self._records
@@ -356,11 +358,14 @@ class BenchmarkCatalog:
         return roads
 
 
+#: One catalog per workspace and per process. The server and its module-level
+#: helpers all reach it through ``catalog_for``, so they cannot disagree on which
+#: folder an instance id belongs to.
 _CATALOGS: dict[str, BenchmarkCatalog] = {}
 
 
 def configure_catalog(workspace: Path, root: Path | None) -> BenchmarkCatalog:
-    """The catalog the server of ``workspace`` reads its benchmark instances from."""
+    """Set the folder the server of ``workspace`` reads its benchmark instances from."""
     catalog = BenchmarkCatalog(root)
     _CATALOGS[str(Path(workspace).resolve())] = catalog
     return catalog

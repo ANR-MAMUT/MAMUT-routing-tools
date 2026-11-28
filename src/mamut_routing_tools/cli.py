@@ -195,6 +195,13 @@ def gui_start_cmd(
     state = runtime.start(workspace, port=port, benchmarks_dir=benchmarks_dir)
     if state.get("already_running"):
         typer.echo(f"Already running (pid {state['pid']}): {state['url']}")
+        if benchmarks_dir is not None and str(benchmarks_dir.expanduser().resolve()) != state.get("benchmarks_dir"):
+            # The folder is read when the server starts: saying nothing would leave the option looking applied.
+            typer.echo(
+                "--benchmarks-dir was not applied: the running server keeps the folder it started with. "
+                "Run 'mamut-tools gui stop', then start again with the option.",
+                err=True,
+            )
         return
     typer.echo(f"Workbench GUI running (pid {state['pid']}), workspace {workspace}")
     typer.echo(state["url"])

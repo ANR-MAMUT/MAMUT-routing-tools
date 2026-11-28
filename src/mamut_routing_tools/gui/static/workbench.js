@@ -1673,6 +1673,8 @@ function setInstanceSource(source) {
 
 async function loadBenchmarks(refresh = false) {
   state.benchmarks.loading = true;
+  // A rescan can change what an instance is: the panel objects are fetched again when next selected.
+  if (refresh) state.benchmarkObjects.clear();
   el("benchList").innerHTML = '<div class="empty-note">Reading the benchmarks folder…</div>';
   const data = await api(`/api/workbench/benchmarks${refresh ? "?refresh=true" : ""}`);
   Object.assign(state.benchmarks, { loaded: true, loading: false, instances: data.instances || [], hint: data.hint, root: data.root });
@@ -1791,6 +1793,12 @@ async function selectBenchmark(instanceId, preferredRunId = null) {
   return activateInstance(instance, preferredRunId);
 }
 
+el("bench-refresh").addEventListener("click", () => {
+  loadBenchmarks(true).catch((error) => {
+    state.benchmarks.loading = false;
+    el("benchList").innerHTML = `<div class="empty-note">Cannot list the benchmarks: ${escapeHtml(error.message)}</div>`;
+  });
+});
 el("sourceWorkspace").addEventListener("click", () => setInstanceSource("workspace"));
 el("sourceBenchmarks").addEventListener("click", () => setInstanceSource("benchmarks"));
 el("bench-scope").addEventListener("click", (event) => {
@@ -1978,13 +1986,18 @@ function bksStandingHtml(run) {
   if (!bks) return "";
   const order = compareRunQuality(run, bks);
   const share = Number(bks.cost) > 0 ? Math.abs((100 * (Number(run.cost) - Number(bks.cost))) / Number(bks.cost)) : 0;
+  // Both costs are rounded for display, so this line says no more than they show:
+  // a gap too small to print is "less than 0.01%", and equal displays are not
+  // called equal solutions. Compare, in the Runs tab, prices both exactly.
   const amount = runIsHierarchical(run) && run.num_routes !== bks.num_routes
     ? `${Math.abs(run.num_routes - bks.num_routes)} route${Math.abs(run.num_routes - bks.num_routes) === 1 ? "" : "s"}`
-    : `${share.toFixed(share < 10 ? 2 : 1)}%`;
+    : share < 0.005 ? "less than 0.01%" : `${share.toFixed(share < 10 ? 2 : 1)}%`;
   if (order < 0) {
     return `<div class="run-card-line run-card-better">Better than the published BKS by ${escapeHtml(amount)}. It can be submitted with <code>mamut-routing bks submit</code>.</div>`;
   }
-  return `<div class="run-card-line">${order === 0 ? "Equals the published BKS." : `${escapeHtml(amount)} above the published BKS.`}</div>`;
+  return `<div class="run-card-line">${order === 0
+    ? "Same cost as the published BKS at the displayed precision; Compare prices both exactly."
+    : `${escapeHtml(amount)} above the published BKS.`}</div>`;
 }
 
 function runRowHtml(run, group, { compare }) {
@@ -2091,8 +2104,12 @@ async function loadSolutionRuns(preferredRunId = null) {
   state.solutionRuns = data.runs || [];
   state.solutionReferences = data.references || [];
   instance.solution_count = state.solutionRuns.filter((run) => !run.stale).length;
+  // The benchmark list was fetched once: its row learns of the new count here.
+  const listed = state.benchmarks.instances.find((entry) => entry.instance_id === instance.instance_id);
+  if (listed) listed.solution_count = instance.solution_count;
   state.selectedRunId = preferredRunId;
   renderInstanceList();
+  renderBenchmarkList();
   refreshSolutionControls();
   if (state.selectedRunId) {
     await displaySolutionRun(state.selectedRunId, true);
@@ -2563,16 +2580,18 @@ async function handleFinishedJob(job) {
       + (twinFailures ? ` ${twinFailures} VRPTW twin(s) could not be derived.` : ""));
   } else if (job.kind === "solve") {
     const preferredRunId = result.solution?.run_id || null;
-    let selectedByHandler = false;
-    if (!state.selected || state.selected.instance_id !== result.instance_id) {
+    // The run belongs to the solved instance: it is shown there, never loaded
+    // into whatever instance happens to be selected by now.
+    if (state.selected?.instance_id === result.instance_id) {
+      await loadSolutionRuns(preferredRunId);
+    } else if (String(result.instance_id).startsWith("bench-")) {
+      setInstanceSource("benchmarks");
+      await selectBenchmark(result.instance_id, preferredRunId);
+    } else {
       await loadInstances();
       const index = state.instances.findIndex((instance) => instance.instance_id === result.instance_id);
-      if (index >= 0) {
-        await selectInstance(index, preferredRunId);
-        selectedByHandler = true;
-      }
+      if (index >= 0) await selectInstance(index, preferredRunId);
     }
-    if (!selectedByHandler) await loadSolutionRuns(preferredRunId);
     activateTab("visualize");
     status(`Solved ${result.solution?.instance_name || "instance"} with ${result.solver || "pyvrp"}: cost ${result.cost}; checker ${result.validation?.status}.`);
   }

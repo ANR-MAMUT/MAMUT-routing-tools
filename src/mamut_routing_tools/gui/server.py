@@ -631,9 +631,12 @@ def _generate_bulk_payload(
 
 
 def create_app(workspace: Path, token: str, benchmarks_dir: Path | None = None) -> FastAPI:
-    benchmarks = benchmark_source.configure_catalog(
-        workspace, benchmark_source.resolve_benchmarks_root(benchmarks_dir)
-    )
+    benchmark_source.configure_catalog(workspace, benchmark_source.resolve_benchmarks_root(benchmarks_dir))
+
+    def benchmarks() -> benchmark_source.BenchmarkCatalog:
+        # The same lookup the module-level helpers use (`_workspace_instance`, `_instance_meta`).
+        return benchmark_source.catalog_for(workspace)
+
     jobs = JobManager(workspace)
     solutions = SolutionStore(workspace)
     preferences = PreferenceStore(workspace)
@@ -797,7 +800,7 @@ def create_app(workspace: Path, token: str, benchmarks_dir: Path | None = None) 
         workspace, never in the benchmarks folder. A plain ``def`` because the
         first listing walks the folder.
         """
-        listing = benchmarks.listing(refresh)
+        listing = benchmarks().listing(refresh)
         for record in listing["instances"]:
             record["solution_count"] = len(solutions.current(str(record["instance_id"])))
         return {"ok": True, **listing}
@@ -805,7 +808,7 @@ def create_app(workspace: Path, token: str, benchmarks_dir: Path | None = None) 
     @app.get("/api/workbench/benchmarks/{instance_id}")
     def workbench_benchmark(instance_id: str) -> Any:
         try:
-            record = benchmarks.detail(instance_id)
+            record = benchmarks().detail(instance_id)
         except KeyError:
             return _payload_error(404, "Unknown benchmark instance")
         except Exception as error:  # noqa: BLE001
@@ -1087,7 +1090,7 @@ def create_app(workspace: Path, token: str, benchmarks_dir: Path | None = None) 
         }
 
     @app.get("/api/instances/{instance_id}/map-data")
-    async def instance_map_data(instance_id: str) -> Any:
+    def instance_map_data(instance_id: str) -> Any:
         try:
             return _instance_map_payload(_workspace_instance(workspace, instance_id), workspace)
         except KeyError:
@@ -1117,7 +1120,9 @@ def create_app(workspace: Path, token: str, benchmarks_dir: Path | None = None) 
             return _payload_error(400, str(error))
 
     @app.post("/api/instances/{instance_id}/solutions/{run_id}/render")
-    async def render_solution_run(instance_id: str, run_id: str, metric: str = "fastest") -> Any:
+    def render_solution_run(instance_id: str, run_id: str, metric: str = "fastest") -> Any:
+        # A plain ``def``: reading a benchmark's sidecars (megabytes of gzip JSON) and
+        # searching its road graph both block, so the whole handler runs in a worker thread.
         try:
             record = _workspace_instance(workspace, instance_id)
             solution = _solution_or_reference(solutions, record, instance_id, run_id)
@@ -1125,10 +1130,8 @@ def create_app(workspace: Path, token: str, benchmarks_dir: Path | None = None) 
                 return _payload_error(409, _stale_message(solution))
             meta = _instance_meta(record, workspace)
             # A published instance has no OSM extract here: its road-graph sidecar gives the paths.
-            roads = benchmarks.roads(record) if _is_benchmark(record) else None
-            return await run_in_threadpool(
-                _render_routes_payload, {"meta": meta, "routes": solution["routes"], "metric": metric}, workspace, roads
-            )
+            roads = benchmarks().roads(record) if _is_benchmark(record) else None
+            return _render_routes_payload({"meta": meta, "routes": solution["routes"], "metric": metric}, workspace, roads)
         except KeyError:
             return _payload_error(404, "Unknown instance or solution run")
         except Exception as error:  # noqa: BLE001

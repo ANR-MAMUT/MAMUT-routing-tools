@@ -178,6 +178,35 @@ def test_the_benchmarks_folder_is_explicit_then_environment_then_found_above(
     assert "No benchmarks folder" in BenchmarkCatalog(None).listing()["hint"]
 
 
+def test_a_folder_that_was_empty_is_read_again(tmp_path: Path, benchmarks_dir: Path) -> None:
+    """A listing that found nothing is not kept for the life of the server."""
+    later = tmp_path / "later"
+    catalog = BenchmarkCatalog(later)
+    assert catalog.listing()["instances"] == [] and "does not exist" in catalog.listing()["hint"]
+    benchmarks_dir.rename(later)  # the collection is cloned after the GUI was started
+    listing = catalog.listing()
+    assert listing["hint"] is None and len(listing["instances"]) == 2
+    # A listing that found instances is kept until a rescan is asked for.
+    import shutil
+
+    shutil.rmtree(later / "Poryos2026" / "VRPTW")
+    assert len(catalog.listing()["instances"]) == 2
+    assert [entry["problem_type"] for entry in catalog.listing(refresh=True)["instances"]] == ["CVRP"]
+
+
+def test_the_server_and_its_helpers_read_one_catalog(tmp_path: Path, benchmarks_dir: Path) -> None:
+    """The listing endpoint and the lookup by instance id go through the same catalog."""
+    workspace = tmp_path / "workspace"
+    first = create_app(workspace, TOKEN, tmp_path / "nowhere")
+    create_app(workspace, TOKEN, benchmarks_dir)  # the same workspace, configured again
+    with TestClient(first, base_url="http://localhost", headers={"X-Mamut-Token": TOKEN}) as test_client:
+        entries = test_client.get("/api/workbench/benchmarks").json()["instances"]
+        assert len(entries) == 2
+        for entry in entries:
+            assert test_client.get(f"/api/instances/{entry['instance_id']}/map-data").json()["ok"]
+            assert test_client.get(f"/api/workbench/benchmarks/{entry['instance_id']}").json()["ok"]
+
+
 def test_a_benchmark_instance_is_served_like_a_workspace_one(client: TestClient, benchmarks_dir: Path) -> None:
     entry = _entry(client, "CVRP")
     instance_id = entry["instance_id"]
@@ -348,3 +377,13 @@ def test_the_frontend_offers_the_benchmarks_source(client: TestClient) -> None:
     assert "Check my solution" in script and "function bksStandingHtml(run)" in script
     # A selected benchmark instance survives a refresh of the workspace list.
     assert 'state.selected.source !== "benchmark"' in script
+    # The folder can be read again, and the list learns of a run made in this session.
+    assert 'id="bench-refresh"' in html and "loadBenchmarks(true)" in script
+    assert "if (listed) listed.solution_count = instance.solution_count;" in script
+    # A finished solve opens the instance it belongs to; it is never loaded into another one.
+    solve = script[script.index('} else if (job.kind === "solve") {'):]
+    solve = solve[:solve.index("activateTab(")]
+    assert "await selectBenchmark(result.instance_id, preferredRunId);" in solve
+    assert solve.count("loadSolutionRuns(preferredRunId)") == 1 and "state.selected?.instance_id === result.instance_id" in solve
+    # The standing against the BKS says no more than the rounded costs show.
+    assert '"less than 0.01%"' in script and "Compare prices both exactly" in script and "Equals the published BKS" not in script

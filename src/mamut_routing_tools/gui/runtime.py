@@ -127,9 +127,10 @@ def start(
     env = dict(os.environ)
     env["MAMUT_GUI_WORKSPACE"] = str(workspace)
     env["MAMUT_GUI_TOKEN"] = token
-    if benchmarks_dir is not None:
+    resolved_benchmarks = str(Path(benchmarks_dir).expanduser().resolve()) if benchmarks_dir is not None else None
+    if resolved_benchmarks is not None:
         # The server resolves its benchmarks folder from the environment (gui/benchmarks.py).
-        env["MAMUT_GUI_BENCHMARKS_DIR"] = str(Path(benchmarks_dir).expanduser().resolve())
+        env["MAMUT_GUI_BENCHMARKS_DIR"] = resolved_benchmarks
     log_file = _log_path(workspace).open("ab")
     process = subprocess.Popen(
         [
@@ -156,6 +157,8 @@ def start(
         "token": token,
         "url": f"http://{host}:{resolved_port}/?token={token}",
         "workspace": str(workspace),
+        # What --benchmarks-dir was at start, so a later `gui start` can tell it was not applied.
+        "benchmarks_dir": resolved_benchmarks,
     }
     _state_path(workspace).write_text(json.dumps(state, indent=1) + "\n")
 
