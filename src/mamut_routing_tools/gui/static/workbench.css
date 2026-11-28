@@ -71,7 +71,7 @@ html, body {
 .maplibregl-ctrl-scale {
   border: none;
   padding: 1px 6px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.5;
 }
 .mamut-basemap-control label {
@@ -95,7 +95,7 @@ html, body {
 .maplibregl-ctrl-attrib.maplibregl-compact {
   background: var(--panel);
   color: var(--mut);
-  font-size: 10px;
+  font-size: 11px;
 }
 .maplibregl-ctrl-attrib a { color: var(--mut); }
 .maplibregl-popup-content {
@@ -369,7 +369,7 @@ html, body {
   transform: rotate(45deg);
 }
 .brand-name { font-weight: 500; font-size: 14px; }
-.brand-sub { font-size: 10.5px; color: var(--mut); }
+.brand-sub { font-size: 11px; color: var(--mut); }
 
 .theme-toggle {
   margin-left: auto;
@@ -377,7 +377,7 @@ html, body {
   border: 1px solid var(--div);
   border-radius: 999px;
   overflow: hidden;
-  font-size: 10px;
+  font-size: 11px;
   cursor: pointer;
   user-select: none;
 }
@@ -387,12 +387,12 @@ html, body {
 [data-theme="light"] .theme-side-sun { background: var(--acc-t); color: var(--acc); }
 
 .kicker {
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--mut);
 }
-.kicker-selected { color: var(--cy); display: flex; align-items: center; gap: 8px; }
+.kicker-selected { color: var(--cy-text); display: flex; align-items: center; gap: 8px; }
 /* At wide widths #sheet-toggle is display:none, so this is what pushes the collapse
    chevron right; below 1000px the chevron hides and #sheet-toggle takes over. */
 .kicker-selected .panel-toggle { margin-left: auto; }
@@ -438,7 +438,7 @@ html, body {
 
 /* ── Forms ── */
 label.field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.field > span { font-size: 11px; color: var(--mut); }
+.field > span { font-size: 12px; color: var(--mut); }
 .field.checkbox-field { display: flex; flex-direction: row; align-items: center; gap: 6px; }
 .field.checkbox-field > input { width: auto; }
 
@@ -515,20 +515,20 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
 }
 .btn-ghost:hover { color: var(--acc); box-shadow: inset 0 0 0 1px var(--edge); background: var(--acc-t); }
 
-.note { font-size: 11px; line-height: 1.55; color: var(--mut); margin: 0; }
+.note { font-size: 12px; line-height: 1.55; color: var(--mut); margin: 0; }
 
 .chip {
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.02em;
   padding: 2px 8px;
   border-radius: 6px;
   white-space: nowrap;
 }
-.chip-am { background: var(--am-t); color: var(--am); }
-.chip-gr { background: var(--gr-t); color: var(--gr); }
-.chip-acc { background: var(--acc-t); color: var(--acc); }
+.chip-am { background: var(--am-t); color: var(--am-text); }
+.chip-gr { background: var(--gr-t); color: var(--gr-text); }
+.chip-acc { background: var(--acc-t); color: var(--acc-text); }
 
 /* ── Generate: numbered steps ── */
 /* The form used to be fourteen equally-weighted blocks in one scroll. Grouping them
@@ -562,7 +562,7 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  font-size: 9.5px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--acc);
   background: var(--acc-t);
@@ -610,7 +610,7 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
   align-items: center;
   gap: 6px;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 11px;
   padding: 2px 8px;
   border-radius: 999px;
   border: 1px solid var(--div);
@@ -805,7 +805,7 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
   background: var(--s);
   color: var(--mut);
   font-weight: 500;
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   border-bottom: 1px solid var(--div);
@@ -841,17 +841,17 @@ input[type="range"] { width: 100%; accent-color: var(--acc); }
 }
 .confirm-modal-body p { margin: 0; }
 .preflight-line { font-size: 11px; line-height: 1.5; }
-.preflight-line.warn { color: var(--am); }
-.preflight-line.bad { color: var(--cor); }
-.preflight-line.good { color: var(--gr); }
+.preflight-line.warn { color: var(--am-text); }
+.preflight-line.bad { color: var(--cor-text); }
+.preflight-line.good { color: var(--gr-text); }
 
 .poi-picker { display: flex; flex-direction: column; gap: 5px; }
 .poi-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.poi-count { margin-left: auto; color: var(--mut); font-size: 10.5px; }
+.poi-count { margin-left: auto; color: var(--mut); font-size: 11px; }
 .mini-btn {
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--mut);
   background: transparent;
   border: 1px solid var(--div);
@@ -884,15 +884,15 @@ details.poi-menu > summary {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10.5px;
+  font-size: 11px;
   padding: 2px 0;
 }
 .osm-row .nm { color: var(--ink); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .osm-row .cnt { color: var(--mut); font-variant-numeric: tabular-nums; }
-.osm-row .chip { font-size: 9.5px; padding: 1px 5px; border-radius: 999px; }
-.osm-row .chip.ok { color: var(--gr); background: color-mix(in srgb, var(--gr) 16%, transparent); }
-.osm-row .chip.old { color: var(--am); background: color-mix(in srgb, var(--am) 16%, transparent); }
-.osm-row .chip.bad { color: var(--cor); background: var(--cor-t); }
+.osm-row .chip { font-size: 11px; padding: 1px 5px; border-radius: 999px; }
+.osm-row .chip.ok { color: var(--gr-text); background: color-mix(in srgb, var(--gr) 16%, transparent); }
+.osm-row .chip.old { color: var(--am-text); background: color-mix(in srgb, var(--am) 16%, transparent); }
+.osm-row .chip.bad { color: var(--cor-text); background: var(--cor-t); }
 .poi-list {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -908,7 +908,7 @@ details.poi-menu > summary {
   gap: 5px;
   min-width: 0;
   color: var(--ink);
-  font-size: 10.5px;
+  font-size: 11px;
   cursor: pointer;
 }
 .poi-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -940,7 +940,10 @@ details.poi-menu > summary {
 .inst-row.selected { background: var(--acc-t); border-color: var(--edge); }
 .inst-row .inst-head { display: flex; align-items: center; gap: 8px; width: 100%; }
 .inst-row .inst-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.inst-row .inst-meta { font-size: 11px; color: var(--mut); }
+.inst-row .inst-meta { font-size: 12px; color: var(--mut); }
+/* The selected row is itself accent-tinted: muted text and accent chips need a firmer footing on it. */
+.inst-row.selected .inst-meta { color: color-mix(in srgb, var(--mut) 65%, var(--ink)); }
+.inst-row.selected .chip-acc { background: color-mix(in srgb, var(--s) 75%, transparent); }
 
 .empty-note {
   font-size: 12px;
@@ -973,7 +976,7 @@ details.poi-menu > summary {
 .job-clock { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; font-weight: 400; }
 .job-progress { color: var(--mut); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-actions { display: flex; gap: 3px; }
-.job-actions button { padding: 3px 6px; font-size: 10px; }
+.job-actions button { padding: 3px 6px; font-size: 11px; }
 
 /* ── Progress bars ── */
 /* One shared form in two sizes: a 3px bar under a job row, a 2px hairline pinned to the
@@ -1017,9 +1020,9 @@ details.poi-menu > summary {
   padding: 8px;
   font: 10.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-.validation-line { font-size: 11px; color: var(--mut); }
-.validation-line.valid { color: var(--gr); }
-.validation-line.invalid { color: var(--cor); }
+.validation-line { font-size: 12px; color: var(--mut); }
+.validation-line.valid { color: var(--gr-text); }
+.validation-line.invalid { color: var(--cor-text); }
 
 /* ── Right panel: selected instance ── */
 .sel-name-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
@@ -1187,7 +1190,7 @@ details.poi-menu > summary {
 /* ── Visualize: instance filters ── */
 .inst-filters { display: flex; flex-direction: column; gap: 6px; flex: none; }
 .inst-filter-foot { display: flex; align-items: center; gap: 8px; }
-.inst-check { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--mut); cursor: pointer; }
+.inst-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--mut); cursor: pointer; }
 .inst-filter-foot .poi-count { margin-left: auto; }
 
 /* ── Inspector tabs ── */
@@ -1207,7 +1210,7 @@ details.poi-menu > summary {
   cursor: pointer;
   flex: none;
   font: inherit;
-  font-size: 9.5px;
+  font-size: 11px;
   line-height: 1;
   padding: 2px 5px;
   border-radius: 5px;
@@ -1259,8 +1262,8 @@ details.poi-menu > summary {
 }
 .picked-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .picked-row .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.picked-row .cat { color: var(--mut); font-size: 10px; margin-left: auto; flex: none; }
-.picked-row .depot-flag { color: var(--cor); font-size: 10px; flex: none; }
+.picked-row .cat { color: var(--mut); font-size: 11px; margin-left: auto; flex: none; }
+.picked-row .depot-flag { color: var(--cor-text); font-size: 11px; flex: none; }
 
 /* ── Import solution ── */
 #import-text { width: 100%; min-height: 92px; resize: vertical; font-family: ui-monospace, monospace; font-size: 11px; }
@@ -1317,7 +1320,7 @@ details.poi-menu > summary {
   margin-left: auto;
   cursor: pointer;
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--mut);
   background: transparent;
   border: 1px solid var(--div);

@@ -5,13 +5,20 @@
    page that never sets data-theme still renders. Both frontends stamp the attribute
    in a blocking <head> script, so neither relies on that default in practice.
 
-   Kept in step with the Nocturne project on claude.ai/design (theme.json). */
+   Kept in step with the Nocturne project on claude.ai/design (theme.json), with two
+   deliberate departures for legibility, both measured against WCAG 4.5:1:
+
+   - Light --mut is #6b6b8e, not theme.json's #6f6f92, which reads 4.41:1 on --bg.
+   - The --*-text tokens are text-on-surface variants of the status colours. The
+     palette values are tuned for fills, strokes and route lines; as small text the
+     light ones fall to 2.5-3.5:1 and the dark accent to 4.47:1 on its own tint. Use
+     --gr, --cy, ... for marks and --gr-text, --cy-text, ... for words and numbers. */
 
 :root {
   --bg: #f6f5f0;
   --s: #ffffff;
   --ink: #201b45;
-  --mut: #6f6f92;
+  --mut: #6b6b8e;
   --div: rgba(32, 27, 69, 0.14);
   --acc: #5b43e8;
   --on-acc: #ffffff;
@@ -24,6 +31,11 @@
   --gr-t: rgba(15, 158, 104, 0.13);
   --am-t: rgba(196, 127, 0, 0.13);
   --cor-t: rgba(232, 80, 63, 0.12);
+  --acc-text: #5b43e8;
+  --cy-text: #086a86;
+  --gr-text: #08663f;
+  --am-text: #865200;
+  --cor-text: #b83426;
   --svg: #efede6;
   --ptc: #3a3f55;
   --dot: rgba(32, 27, 69, 0.14);
@@ -71,6 +83,11 @@
   --gr-t: rgba(69, 232, 165, 0.16);
   --am-t: rgba(255, 193, 77, 0.16);
   --cor-t: rgba(255, 122, 110, 0.16);
+  --acc-text: #ada0ff;
+  --cy-text: #3cd6f5;
+  --gr-text: #45e8a5;
+  --am-text: #ffc14d;
+  --cor-text: #ff7a6e;
   --svg: #0c0e1f;
   --ptc: #dfe3f5;
   --dot: rgba(238, 240, 255, 0.08);

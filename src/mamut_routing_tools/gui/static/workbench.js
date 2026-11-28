@@ -1380,10 +1380,17 @@ function renderInstanceList() {
       ? ` <span class="chip chip-gr">${instance.solution_count} saved solution${instance.solution_count === 1 ? "" : "s"}</span>`
       : "";
     row.innerHTML = `<span class="inst-head"><span class="inst-name">${instance.base_name}</span>${twin}${saved}</span>` +
-      `<span class="inst-meta">${instance.city} · n=${instance.n} · seed ${instance.seed} · capacity ${instance.summary.capacity}</span>`;
+      `<span class="inst-meta">${instance.city} · n=${instance.n} · seed ${shortSeed(instance.seed)} · capacity ${instance.summary.capacity}</span>`;
     row.addEventListener("click", () => selectInstance(index));
     list.append(row);
   });
+}
+
+// A machine-drawn 64-bit seed is 20 digits of noise in a list row. The row keeps
+// both ends, enough to tell two instances apart; the Details tab shows it whole.
+function shortSeed(seed) {
+  const text = String(seed ?? "?");
+  return text.length > 9 ? `${text.slice(0, 4)}…${text.slice(-3)}` : text;
 }
 
 /* ── Selected instance panel ── */
