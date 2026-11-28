@@ -1265,25 +1265,50 @@ details.poi-menu > summary {
 .run-row.selected .run-origin { color: color-mix(in srgb, var(--mut) 65%, var(--ink)); }
 .run-compare { flex: none; margin-right: 6px; }
 
+/* The box is as wide as the panel, and the panel can be dragged down to 240px:
+   whatever is inside must fit, wrap or, at the very last, scroll inside the box.
+   It is a size container so the table can change shape with the room it has. */
 .comparison {
   display: flex;
   flex-direction: column;
   gap: 7px;
   flex: none;
+  min-width: 0;
   padding: 9px 10px;
   border: 1px solid var(--div);
   border-radius: 8px;
   font-size: 12px;
+  container-type: inline-size;
+  overflow-x: auto;
 }
 .comparison[hidden] { display: none; }
 .comparison-head { display: flex; align-items: center; }
 .comparison-head .popover-close { margin-left: auto; }
 .comparison-profile { color: var(--mut); }
+/* A run is named by its solver, method and date: long, and free to break anywhere. */
+.comparison-verdict { overflow-wrap: anywhere; }
 .comparison-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 .comparison-table th, .comparison-table td { padding: 3px 0 3px 10px; text-align: right; font-weight: 400; }
 .comparison-table th:first-child { padding-left: 0; text-align: left; color: var(--mut); }
 .comparison-table thead th { font-size: 11px; color: var(--mut); border-bottom: 1px solid var(--div); }
-.comparison-facts { font-size: 12px; }
+/* The label gives way and wraps; the figures stay whole. */
+.comparison-facts { font-size: 12px; grid-template-columns: minmax(0, 1fr) auto; }
+.comparison-facts dd { white-space: nowrap; overflow-wrap: normal; }
+/* Three columns of seven-digit costs need about 290px inside the box. With less
+   room each quantity is a block: its name, then one labelled line per column. */
+@container (max-width: 300px) {
+  .comparison-table, .comparison-table tbody, .comparison-table tr { display: block; }
+  .comparison-table thead { display: none; }
+  .comparison-table tr { padding: 4px 0; }
+  .comparison-table tr + tr { border-top: 1px solid var(--div); }
+  .comparison-table th:first-child { display: block; padding: 0 0 1px; color: var(--ink); }
+  /* A figure is never cut in two: a value too long for the line goes under its label,
+     and a difference breaks between the amount and the percentage. */
+  .comparison-table td { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 12px; padding: 1px 0; }
+  .comparison-table td::before { content: attr(data-label); flex: none; color: var(--mut); }
+  .comparison-value { margin-left: auto; text-align: right; }
+  .comparison-table td:empty { display: none; }
+}
 
 /* ── Activity strip (status + job history) ── */
 /* The strip is the foot of the left panel's column: closed it fills the gap the panel

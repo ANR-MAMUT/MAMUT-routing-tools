@@ -2116,9 +2116,10 @@ function comparisonHtml(value, reference) {
     + '<button type="button" class="popover-close" data-comparison-close aria-label="Close the comparison"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>'
     + `<div class="comparison-verdict">The displayed solution is <strong>${escapeHtml(verdict)}</strong> ${escapeHtml(runWhere(reference))} <span class="comparison-profile">(${escapeHtml(value.profile)})</span></div>`
     + '<table class="comparison-table"><thead><tr><th></th><th>Displayed</th><th>Reference</th><th>Difference</th></tr></thead><tbody>'
-    + `<tr><th>Cost</th><td>${escapeHtml(value.candidate.cost)}</td><td>${escapeHtml(value.reference.cost)}</td><td>${value.cost_delta == null ? "outside binary64" : escapeHtml(signed(value.cost_delta))} <span class="comparison-profile">${escapeHtml(gap)}</span></td></tr>`
-    + `<tr><th>Routes</th><td>${value.candidate.num_routes}</td><td>${value.reference.num_routes}</td><td>${escapeHtml(signed(value.route_count_delta))}</td></tr>`
-    + `<tr><th>Loads</th><td>${escapeHtml(extent(value.candidate.route_loads))}</td><td>${escapeHtml(extent(value.reference.route_loads))}</td><td></td></tr>`
+    // Each cell names its column: in a narrow panel the table stacks and the head row is gone (workbench.css).
+    + `<tr><th>Cost</th><td data-label="Displayed">${escapeHtml(value.candidate.cost)}</td><td data-label="Reference">${escapeHtml(value.reference.cost)}</td><td data-label="Difference"><span class="comparison-value">${value.cost_delta == null ? "outside binary64" : escapeHtml(signed(value.cost_delta))} <span class="comparison-profile">${escapeHtml(gap)}</span></span></td></tr>`
+    + `<tr><th>Routes</th><td data-label="Displayed">${value.candidate.num_routes}</td><td data-label="Reference">${value.reference.num_routes}</td><td data-label="Difference">${escapeHtml(signed(value.route_count_delta))}</td></tr>`
+    + `<tr><th>Loads</th><td data-label="Displayed">${escapeHtml(extent(value.candidate.route_loads))}</td><td data-label="Reference">${escapeHtml(extent(value.reference.route_loads))}</td><td></td></tr>`
     + "</tbody></table>"
     + '<dl class="sel-facts comparison-facts">'
     + `<dt>Directed edges</dt><dd>+${difference.directed_edges_added} / −${difference.directed_edges_removed}</dd>`

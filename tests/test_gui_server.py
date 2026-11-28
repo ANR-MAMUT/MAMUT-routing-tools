@@ -1463,6 +1463,26 @@ def test_selected_instance_panel_separates_the_instance_from_the_displayed_solut
     assert '<details id="route-appearance"' not in html
 
 
+def test_the_run_comparison_fits_a_narrow_panel(client: TestClient) -> None:
+    """The comparison table stuck out of its box once the panel was dragged narrow.
+
+    The box is a size container: with little room the table stacks into one labelled
+    line per figure, and whatever is left over wraps or scrolls inside the box.
+    """
+    source = _frontend_source(client)
+    box = source[source.index("\n.comparison {"):]
+    box = box[:box.index("}")]
+    assert "container-type: inline-size;" in box and "overflow-x: auto;" in box and "min-width: 0;" in box
+    stacked = source[source.index("@container (max-width: 300px) {"):]
+    assert ".comparison-table thead { display: none; }" in stacked
+    assert ".comparison-table td::before { content: attr(data-label);" in stacked
+    # Every figure names its column, and a difference breaks between its amount and its percentage.
+    for label in ("Displayed", "Reference", "Difference"):
+        assert f'<td data-label="{label}">' in source
+    assert '<td data-label="Difference"><span class="comparison-value">' in source
+    assert ".comparison-verdict { overflow-wrap: anywhere; }" in source
+
+
 def _timeline_record(tmp_path: Path, *, time_windows: list | None, fastest: bool = True) -> dict:
     """A workspace record whose fastest variant is a three-customer line, 10 s between neighbours."""
     from mamut_routing_lib.models import BenchmarkInstanceVRPTW, BenchmarkInstanceCVRP
