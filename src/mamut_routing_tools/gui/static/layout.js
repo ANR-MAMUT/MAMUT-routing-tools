@@ -204,10 +204,16 @@
         const step = event.shiftKey ? 64 : 16;
         const grow = side === "left" ? "ArrowRight" : "ArrowLeft";
         const shrink = side === "left" ? "ArrowLeft" : "ArrowRight";
-        if (event.key === grow) setWidth(side, current + step);
-        else if (event.key === shrink) setWidth(side, current - step);
-        else if (event.key === "Enter" || event.key === " ") toggleCollapsed(side);
-        else return;
+        /* A step that the window does not allow changes nothing: it must not replace a
+           wider chosen width by the narrower one the window currently imposes. */
+        const next = event.key === grow ? clampWidth(current + step) : clampWidth(current - step);
+        if (event.key === grow || event.key === shrink) {
+          if (next !== current) setWidth(side, next);
+        } else if (event.key === "Enter" || event.key === " ") {
+          toggleCollapsed(side);
+        } else {
+          return;
+        }
         event.preventDefault();
       });
     });
