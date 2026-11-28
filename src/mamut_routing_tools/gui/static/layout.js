@@ -27,6 +27,9 @@
     rightCollapsed: false,
   };
 
+  /* The width a panel is drawn at in the current window. The state keeps the width
+     the user chose; a window too small for it gets a narrower panel for as long as
+     it is small, and the chosen width is back when the window grows again. */
   function clampWidth(width) {
     const max = Math.max(MIN_WIDTH, Math.round(global.innerWidth * MAX_FRACTION));
     return Math.min(max, Math.max(MIN_WIDTH, Math.round(width)));
@@ -45,8 +48,10 @@
       stored = null; /* private mode, or a hand-edited value */
     }
     if (!stored || typeof stored !== "object") return state;
-    if (Number.isFinite(stored.leftWidth)) state.leftWidth = clampWidth(stored.leftWidth);
-    if (Number.isFinite(stored.rightWidth)) state.rightWidth = clampWidth(stored.rightWidth);
+    /* Not clamped to this window: a page opened in a small window must not forget
+       the width chosen in a large one. applyState clamps what it paints. */
+    if (Number.isFinite(stored.leftWidth)) state.leftWidth = Math.max(MIN_WIDTH, Math.round(stored.leftWidth));
+    if (Number.isFinite(stored.rightWidth)) state.rightWidth = Math.max(MIN_WIDTH, Math.round(stored.rightWidth));
     state.leftCollapsed = stored.leftCollapsed === true;
     state.rightCollapsed = stored.rightCollapsed === true;
     return state;
@@ -63,11 +68,11 @@
   function applyState(stage, state) {
     stage.style.setProperty(
       "--wb-left-panel-width",
-      (state.leftCollapsed ? RAIL_WIDTH : state.leftWidth) + "px",
+      (state.leftCollapsed ? RAIL_WIDTH : clampWidth(state.leftWidth)) + "px",
     );
     stage.style.setProperty(
       "--wb-right-panel-width",
-      (state.rightCollapsed ? RAIL_WIDTH : state.rightWidth) + "px",
+      (state.rightCollapsed ? RAIL_WIDTH : clampWidth(state.rightWidth)) + "px",
     );
     stage.dataset.leftCollapsed = String(state.leftCollapsed);
     stage.dataset.rightCollapsed = String(state.rightCollapsed);
@@ -91,7 +96,7 @@
       const max = Math.max(MIN_WIDTH, Math.round(global.innerWidth * MAX_FRACTION));
       stage.querySelectorAll("[data-splitter]").forEach((splitter) => {
         const width = splitter.dataset.splitter === "left" ? state.leftWidth : state.rightWidth;
-        splitter.setAttribute("aria-valuenow", String(width));
+        splitter.setAttribute("aria-valuenow", String(clampWidth(width)));
         splitter.setAttribute("aria-valuemin", String(MIN_WIDTH));
         splitter.setAttribute("aria-valuemax", String(max));
       });
@@ -194,7 +199,8 @@
          to do something useful or it is a focus trap for keyboard users. */
       splitter.addEventListener("keydown", (event) => {
         if (isNarrow()) return;
-        const current = side === "left" ? state.leftWidth : state.rightWidth;
+        /* Step from the width on screen, which a small window may have narrowed. */
+        const current = clampWidth(side === "left" ? state.leftWidth : state.rightWidth);
         const step = event.shiftKey ? 64 : 16;
         const grow = side === "left" ? "ArrowRight" : "ArrowLeft";
         const shrink = side === "left" ? "ArrowLeft" : "ArrowRight";
@@ -224,18 +230,14 @@
       });
     });
 
-    /* Re-clamp on viewport resize: a width that was legal on a wide monitor can exceed
-       40% after the window shrinks, which would bury the map. */
+    /* Repaint on viewport resize: a width that was legal on a wide monitor can exceed
+       40% after the window shrinks, which would bury the map. Only the painted width
+       follows the window. Saving the narrowed width here made one visit to a small
+       window shrink the panels for good. */
     global.addEventListener("resize", () => {
-      const left = clampWidth(state.leftWidth);
-      const right = clampWidth(state.rightWidth);
-      if (left !== state.leftWidth || right !== state.rightWidth) {
-        state.leftWidth = left;
-        state.rightWidth = right;
-        commit();
-      } else {
-        notifyResize();
-      }
+      applyState(stage, state);
+      syncSplitterAria();
+      notifyResize();
     });
 
     return {
