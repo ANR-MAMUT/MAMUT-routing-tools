@@ -341,14 +341,17 @@
 
 <aside class="panel panel-right">
   <div class="panel-rail" role="toolbar" aria-label="Expand the selected-instance panel">
-    <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="instance" title="Instance" aria-label="Instance">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21c4.2-4 7-7.4 7-10.6a7 7 0 1 0-14 0C5 13.6 7.8 17 12 21z"/><circle cx="12" cy="10.2" r="2.4"/></svg>
+    <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="routes" title="Routes" aria-label="Routes">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="18.5" r="2.3"/><circle cx="18" cy="5.5" r="2.3"/><path d="M8.3 18.5H14a3.2 3.2 0 0 0 0-6.4h-4a3.2 3.2 0 0 1 0-6.4h5.7"/></svg>
+    </button>
+    <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="runs" title="Runs" aria-label="Runs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.5" cy="7" r="2.5"/><circle cx="6.5" cy="17" r="2.5"/><circle cx="17.5" cy="12" r="2.5"/><path d="M6.5 9.5v5M9 7h4a2 2 0 0 1 2 2v1M9 17h4a2 2 0 0 0 2-2v-1"/></svg>
     </button>
     <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="solve" title="Solve" aria-label="Solve">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 5.5l10 6.5-10 6.5z"/></svg>
     </button>
-    <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="runs" title="Runs" aria-label="Runs">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.5" cy="7" r="2.5"/><circle cx="6.5" cy="17" r="2.5"/><circle cx="17.5" cy="12" r="2.5"/><path d="M6.5 9.5v5M9 7h4a2 2 0 0 1 2 2v1M9 17h4a2 2 0 0 0 2-2v-1"/></svg>
+    <button class="rail-btn" type="button" data-rail-side="right" data-rail-target="details" title="Details" aria-label="Details">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21c4.2-4 7-7.4 7-10.6a7 7 0 1 0-14 0C5 13.6 7.8 17 12 21z"/><circle cx="12" cy="10.2" r="2.4"/></svg>
     </button>
   </div>
   <div class="kicker kicker-selected">Selected instance
@@ -358,51 +361,69 @@
     </button>
   </div>
   <div id="selEmpty" class="empty-note">Generate an instance or pick one in the Visualize tab to display its depot and customers. Solving is optional.</div>
-  <div id="selBody" hidden>
-    <div class="sel-name-row"><span class="sel-name" id="selName"></span><span class="sel-meta" id="selMeta"></span></div>
-    <div id="selObjective" hidden>
-      <div class="kicker" id="selObjLabel">MonoCost · local solve</div>
-      <div class="sel-cost-row"><span class="sel-cost" id="selCost"></span><span class="chip chip-am" id="selMethod"></span></div>
+  <div id="selBody" class="sel-body" hidden>
+    <!-- What the instance is: it does not change with the solution on the map. -->
+    <div class="sel-head">
+      <div class="sel-title"><span class="sel-name" id="selName"></span><span class="sel-meta" id="selMeta"></span></div>
+      <button id="download-open" class="mini-btn" type="button" data-popover-trigger aria-haspopup="dialog" aria-expanded="false">Download</button>
     </div>
 
-    <!-- Five unrelated jobs used to stack in one 300px column: facts, solve config,
-         solution import, run comparison and the route legend. -->
-    <div class="tabs tabs-sm">
-      <button id="tabInstance" class="tab-btn tab-active" type="button">Instance</button>
-      <button id="tabSolve" class="tab-btn" type="button">Solve</button>
-      <button id="tabRuns" class="tab-btn" type="button">Runs</button>
-    </div>
-
-  <section id="instancePanel" class="tab-panel inspector-panel tab-panel-active">
-    <dl class="sel-facts" id="selFacts"></dl>
-    <details id="route-appearance" class="appearance-options" hidden>
-      <summary>Appearance</summary>
-      <div class="appearance-grid">
-        <label class="field appearance-wide"><span>Route rendering</span>
-          <select id="appearance-render-mode">
-            <option value="straight_line">Straight lines</option>
-            <option value="cached_road">Cached road</option>
-          </select>
-        </label>
-        <label id="appearance-depot-field" class="field appearance-wide" hidden>
-          <span>Depot leg fading: <output id="appearance-depot-value" class="range-value">25%</output></span>
-          <input id="appearance-depot-opacity" type="range" min="0" max="1" step="0.05" value="0.25">
-        </label>
-        <label class="field appearance-wide">
-          <span>Other routes<span id="appearance-focus-hint"> (focus a route)</span>: <output id="appearance-other-value" class="range-value">20%</output></span>
-          <input id="appearance-other-opacity" type="range" min="0" max="0.8" step="0.05" value="0.2" disabled>
-        </label>
-        <label class="appearance-toggle"><input id="appearance-customers" type="checkbox"> Fade/hide customers with routes</label>
-        <label class="appearance-toggle"><input id="appearance-arrows" type="checkbox"> Direction arrows</label>
-        <label class="appearance-toggle"><input id="appearance-depot-star" type="checkbox"> Depot as star</label>
+    <!-- What is drawn on the map, and the one place to change it: the cost shown
+         and the run chosen cannot disagree. -->
+    <section id="runCard" class="run-card" aria-label="Displayed solution">
+      <div class="run-card-head">
+        <span class="kicker">Displayed solution</span>
+        <!-- Narrow layouts hide the map's own Animate button; this one stands in for it there. -->
+        <button id="animate-routes" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden>Animate</button>
+        <button id="run-switch" class="mini-btn" type="button" data-popover-trigger aria-haspopup="dialog" aria-expanded="false" hidden>Change</button>
       </div>
-    </details>
-    <div class="fading-rule" style="margin:8px 0"></div>
+      <div id="runCardBody" class="run-card-body"></div>
+      <div id="solution-validation" class="validation-line" hidden></div>
+    </section>
+
+    <div class="tabs tabs-sm">
+      <button id="tabRoutes" class="tab-btn tab-active" type="button">Routes</button>
+      <button id="tabRuns" class="tab-btn" type="button">Runs</button>
+      <button id="tabSolve" class="tab-btn" type="button">Solve</button>
+      <button id="tabDetails" class="tab-btn" type="button">Details</button>
+    </div>
+
+  <section id="routesPanel" class="tab-panel inspector-panel tab-panel-active">
     <div class="legend-head">
-      <div class="kicker">Routes · eye to show/hide · row to focus</div>
-      <button id="animate-routes" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden>Animate</button>
+      <div class="kicker" id="legendTitle">Routes</div>
+      <div class="legend-tools" id="legendTools" hidden>
+        <button id="routes-all" class="mini-btn" type="button" title="Show every route">All</button>
+        <button id="routes-none" class="mini-btn" type="button" title="Hide every route">None</button>
+        <button id="appearance-open" class="mini-btn icon-btn" type="button" data-popover-trigger aria-haspopup="dialog" aria-expanded="false" title="Route appearance" aria-label="Route appearance" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg>
+        </button>
+      </div>
     </div>
     <div id="legend" class="legend"><div class="empty-note">Select an instance to display its customer positions. Solving adds route overlays.</div></div>
+  </section>
+
+  <section id="runsPanel" class="tab-panel inspector-panel">
+    <div class="legend-head">
+      <div class="kicker" id="runsTitle">Saved solutions</div>
+      <button id="import-open" class="mini-btn" type="button">Import solution…</button>
+    </div>
+    <div id="import-panel" class="option-group" hidden>
+      <label class="field"><span>Solution file (.sol or .json)</span><input id="import-file" type="file" accept=".sol,.txt,.json"></label>
+      <label class="field"><span>…or paste the routes</span><textarea id="import-text" placeholder="Route #1: 3 7 1&#10;Route #2: 2 5 4"></textarea></label>
+      <div class="grid-2">
+        <label class="field"><span>Metric it was found on</span><select id="import-metric"><option value="fastest">Fastest</option><option value="shortest">Shortest</option><option value="euclidean">Euclidean</option></select></label>
+        <label class="field"><span>Objective</span><select id="import-objective"><option value="">From the record or family</option><option value="MonoCost">MonoCost</option><option value="HierarchicalVehicleCost">Hierarchical vehicle cost</option></select></label>
+      </div>
+      <label class="field"><span>Source label</span><input id="import-label" type="text" placeholder="e.g. LKH-3, or a paper"></label>
+      <div id="import-validation" class="validation-line">Imported solutions are checked against the chosen metric before they are stored.</div>
+      <div class="row">
+        <button id="import-run" class="btn" type="button">Check and import</button>
+        <button id="import-cancel" class="btn btn-ghost" type="button">Cancel</button>
+      </div>
+    </div>
+    <div id="runList" class="run-list"></div>
+    <div id="runsNote" class="validation-line" hidden></div>
+    <div id="comparison-output" class="comparison" hidden></div>
   </section>
 
   <section id="solvePanel" class="tab-panel inspector-panel">
@@ -434,37 +455,12 @@
     </div>
     <div class="row">
       <button id="solve" class="btn" type="button">Queue solve</button>
-      <button id="import-open" class="btn btn-secondary" type="button">Import solution…</button>
-      <button id="solve-animate" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden title="Play the displayed run's vehicles over time">Animate</button>
     </div>
-    <div id="import-panel" class="option-group" hidden>
-      <label class="field"><span>Solution file (.sol or .json)</span><input id="import-file" type="file" accept=".sol,.txt,.json"></label>
-      <label class="field"><span>…or paste the routes</span><textarea id="import-text" placeholder="Route #1: 3 7 1&#10;Route #2: 2 5 4"></textarea></label>
-      <label class="field"><span>Import objective</span><select id="import-objective"><option value="">From the record or family</option><option value="MonoCost">MonoCost</option><option value="HierarchicalVehicleCost">Hierarchical vehicle cost</option></select></label>
-      <label class="field"><span>Source label</span><input id="import-label" type="text" placeholder="e.g. LKH-3, or a paper"></label>
-      <div id="import-validation" class="validation-line">Imported solutions are checked against the metric selected above before they are stored.</div>
-      <div class="row">
-        <button id="import-run" class="btn" type="button">Check and import</button>
-        <button id="import-cancel" class="btn btn-ghost" type="button">Cancel</button>
-      </div>
-    </div>
-    <div class="row">
-      <button id="download" class="btn btn-ghost" type="button">Download zip</button>
-      <button id="download-vrp" class="btn btn-ghost" type="button" title="Classic CVRPLIB .vrp of the selected metric variant (explicit full matrix, the published costs)">Download .vrp</button>
-    </div>
-    <label id="download-vrp-euc2d-field" class="field checkbox-field" hidden><input id="download-vrp-euc2d" type="checkbox"> <span>EUC_2D .vrp (coordinates only; TSPLIB nint costs, not the published ones)</span></label>
+    <div class="validation-line">The result is checked, saved with the instance and displayed when the job ends.</div>
   </section>
 
-  <section id="runsPanel" class="tab-panel inspector-panel">
-    <div class="kicker">Validated solution runs</div>
-    <div class="run-controls">
-      <label class="field"><span>Displayed run</span><select id="solution-run"><option value="">Instance only · customer locations</option></select></label>
-      <div id="solution-validation" class="validation-line">Solve this instance to create a validated run.</div>
-      <button id="runs-animate" class="animate-btn" data-animate-routes type="button" aria-pressed="false" hidden title="Play the displayed run's vehicles over time">Animate</button>
-      <label class="field"><span>Compare displayed run against</span><select id="comparison-run"><option value="">Select a reference run</option></select></label>
-      <button id="compare" class="btn btn-secondary" type="button" disabled>Compare runs</button>
-      <pre id="comparison-output" class="mono-output" hidden></pre>
-    </div>
+  <section id="detailsPanel" class="tab-panel inspector-panel">
+    <dl class="sel-facts" id="selFacts"></dl>
   </section>
   </div>
 </aside>
@@ -569,6 +565,56 @@
 
 <!-- Help lives at body level so it escapes the panel's overflow clipping instead of
      pushing the form it explains further down. -->
+<!-- Route appearance: beside the panel rather than in it, so the route list keeps
+     its height and the map stays in view while a setting is changed. -->
+<div id="route-appearance" class="popover appearance-popover" hidden role="dialog" aria-modal="false" aria-labelledby="appearance-title">
+  <div class="popover-head">
+    <span id="appearance-title">Route appearance</span>
+    <button id="appearance-close" class="popover-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <div class="appearance-grid">
+    <label class="field appearance-wide"><span>Route rendering</span>
+      <select id="appearance-render-mode">
+        <option value="straight_line">Straight lines</option>
+        <option value="cached_road">Cached road</option>
+      </select>
+    </label>
+    <label id="appearance-depot-field" class="field appearance-wide" hidden>
+      <span>Depot leg fading: <output id="appearance-depot-value" class="range-value">25%</output></span>
+      <input id="appearance-depot-opacity" type="range" min="0" max="1" step="0.05" value="0.25">
+    </label>
+    <label class="field appearance-wide">
+      <span>Other routes<span id="appearance-focus-hint"> (focus a route)</span>: <output id="appearance-other-value" class="range-value">20%</output></span>
+      <input id="appearance-other-opacity" type="range" min="0" max="0.8" step="0.05" value="0.2" disabled>
+    </label>
+    <label class="appearance-toggle"><input id="appearance-customers" type="checkbox"> Fade/hide customers with routes</label>
+    <label class="appearance-toggle"><input id="appearance-arrows" type="checkbox"> Direction arrows</label>
+    <label class="appearance-toggle"><input id="appearance-depot-star" type="checkbox"> Depot as star</label>
+  </div>
+</div>
+
+<!-- The files of the selected instance. -->
+<div id="download-popover" class="popover download-popover" hidden role="dialog" aria-modal="false" aria-labelledby="download-title">
+  <div class="popover-head">
+    <span id="download-title">Download the instance</span>
+    <button id="download-close" class="popover-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <button id="download" class="btn btn-ghost" type="button" title="Every file of the instance: the three metric variants, the manifest and the saved solutions">Every file (.zip)</button>
+  <div class="fading-rule"></div>
+  <label class="field"><span>Classic CVRPLIB .vrp of one variant</span><select id="download-metric"><option value="fastest">Fastest</option><option value="shortest">Shortest</option><option value="euclidean">Euclidean</option></select></label>
+  <label id="download-vrp-euc2d-field" class="field checkbox-field" hidden><input id="download-vrp-euc2d" type="checkbox"> <span>EUC_2D (coordinates only; TSPLIB nint costs, not the published ones)</span></label>
+  <button id="download-vrp" class="btn btn-ghost" type="button" title="Explicit full matrix, the published costs">Download .vrp</button>
+</div>
+
+<!-- The displayed solution's switcher: the same rows as the Runs tab. -->
+<div id="run-popover" class="popover run-popover" hidden role="dialog" aria-modal="false" aria-labelledby="run-popover-title">
+  <div class="popover-head">
+    <span id="run-popover-title">Display on the map</span>
+    <button id="run-popover-close" class="popover-close" type="button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button>
+  </div>
+  <div id="runPopoverList" class="run-list"></div>
+</div>
+
 <div id="help-popover" class="popover help-popover" hidden role="dialog" aria-modal="false">
   <div class="popover-head">
     <span id="help-popover-title">About this field</span>

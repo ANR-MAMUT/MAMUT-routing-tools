@@ -1089,35 +1089,57 @@ details.poi-menu > summary {
 .validation-line.invalid { color: var(--cor-text); }
 
 /* ── Right panel: selected instance ── */
-.sel-name-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.sel-name { font-size: 20px; font-weight: 500; overflow-wrap: anywhere; }
-.sel-meta { font-size: 11.5px; color: var(--mut); }
+/* The panel is as tall as its content up to the window; past that the route list
+   and the run list scroll inside it, so the header, the displayed solution and
+   the tabs stay in place. */
+.sel-body { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.sel-body[hidden] { display: none; }
+.sel-head { display: flex; align-items: flex-start; gap: 10px; }
+.sel-title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.sel-name { font-size: 20px; font-weight: 500; line-height: 1.2; overflow-wrap: anywhere; }
+.sel-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: var(--mut); }
+.sel-head .mini-btn { flex: none; margin-top: 3px; }
 
-.sel-cost-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* The solution on the map. */
+.run-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: none;
+  padding: 9px 11px 10px;
+  border: 1px solid var(--div);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--ink) 3%, transparent);
+}
+.run-card-head { display: flex; align-items: center; gap: 6px; }
+.run-card-head .kicker { margin-right: auto; }
+.run-card-body { display: flex; flex-direction: column; gap: 2px; }
+.run-card-none { font-size: 15px; font-weight: 500; }
+.run-card-line { font-size: 12px; color: var(--mut); }
+.run-card-routes { font-size: 13px; font-variant-numeric: tabular-nums; }
+.sel-cost-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.sel-cost-row .chip { align-self: center; margin-left: auto; }
 .sel-cost {
   font-size: 24px;
   font-weight: 500;
+  line-height: 1.15;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+.chip-cor { background: var(--cor-t); color: var(--cor-text); }
+/* The map carries the Animate button at desktop widths; this copy is for the
+   narrow layout, where the map's own actions are hidden behind the sheet. */
+.run-card .animate-btn { display: none; }
 
-.sel-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 12px; }
+.sel-facts { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 0; font-size: 13px; }
 .sel-facts dt { color: var(--mut); }
 .sel-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.fact-seed, .fact-file { font-size: 12px; }
 
-.appearance-options {
-  border-top: 1px solid var(--div);
-  padding-top: 7px;
-}
-.appearance-options > summary {
-  cursor: pointer;
-  color: var(--mut);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  user-select: none;
-}
-.appearance-options[open] > summary { margin-bottom: 8px; }
+/* ── Route appearance and downloads: popovers beside the panel ── */
+.appearance-popover, .download-popover { width: min(300px, calc(100vw - 32px)); }
+.run-popover { width: min(340px, calc(100vw - 32px)); }
+.run-popover .run-list { max-height: min(420px, calc(100vh - 140px)); }
 .appearance-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .appearance-wide, .appearance-toggle { grid-column: 1 / -1; }
 .appearance-toggle {
@@ -1134,7 +1156,13 @@ details.poi-menu > summary {
   background: linear-gradient(to right, transparent, var(--div) 24px, var(--div) calc(100% - 24px), transparent);
 }
 
-.legend { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
+/* ── Routes tab ── */
+.legend-tools { display: flex; align-items: center; gap: 4px; }
+.legend-tools[hidden] { display: none; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; padding: 3px 5px; }
+.icon-btn svg { width: 14px; height: 14px; }
+.mini-btn[aria-expanded="true"] { color: var(--acc); border-color: var(--edge); background: var(--acc-t); }
+.legend { display: flex; flex-direction: column; gap: 2px; flex: 0 1 auto; min-height: 92px; overflow-y: auto; }
 .legend-row {
   display: grid;
   grid-template-columns: 25px minmax(0, 1fr);
@@ -1152,15 +1180,100 @@ details.poi-menu > summary {
   padding: 4px;
   text-align: left;
 }
-.legend-focus { display: flex; align-items: center; gap: 8px; min-width: 0; border-radius: 6px; }
+.legend-focus {
+  display: grid;
+  grid-template-columns: 9px 3.2em minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  border-radius: 6px;
+}
 .legend-eye { display: inline-flex; align-items: center; justify-content: center; color: var(--mut); border-radius: 6px; }
 .legend-eye svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .legend-eye .eye-slash { stroke-width: 2.2; }
 .legend-row:hover, .legend-row.focused { background: color-mix(in srgb, var(--ink) 5%, transparent); }
 .legend-row.off .legend-focus { opacity: 0.35; }
-.legend-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.legend-row .dot { width: 9px; height: 9px; border-radius: 50%; }
 .legend-row .lbl { font-weight: 500; }
-.legend-row .meta { margin-left: auto; color: var(--mut); font-variant-numeric: tabular-nums; }
+.legend-row .meta { color: var(--mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.legend-row .load { display: inline-flex; align-items: center; gap: 7px; }
+.legend-row .load-bar {
+  width: 64px;
+  height: 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ink) 12%, transparent);
+  overflow: hidden;
+}
+.legend-row .load-bar i { display: block; height: 100%; border-radius: 3px; background: color-mix(in srgb, var(--ink) 55%, transparent); }
+.legend-row .load-num { min-width: 3.4ch; text-align: right; color: var(--mut); font-variant-numeric: tabular-nums; }
+.empty-actions { margin-top: 9px; }
+
+/* ── Runs tab ── */
+.run-list { display: flex; flex-direction: column; gap: 2px; flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+#runList { min-height: 92px; }
+.run-group {
+  margin-top: 7px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--mut);
+}
+.run-row { display: flex; align-items: center; gap: 6px; flex: none; border: 1px solid transparent; border-radius: 8px; }
+.run-row:hover { background: color-mix(in srgb, var(--ink) 5%, transparent); }
+.run-row.selected { background: var(--acc-t); border-color: var(--edge); }
+.run-pick {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 1px 10px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  text-align: left;
+  border-radius: 8px;
+}
+.run-cost { font-size: 14px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.run-routes { color: var(--mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.run-gap { justify-self: end; color: var(--mut); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.run-origin {
+  grid-column: 1 / -1;
+  color: var(--mut);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The selected row is accent-tinted: muted text needs a firmer footing on it. */
+.run-row.selected .run-routes,
+.run-row.selected .run-gap,
+.run-row.selected .run-origin { color: color-mix(in srgb, var(--mut) 65%, var(--ink)); }
+.run-compare { flex: none; margin-right: 6px; }
+
+.comparison {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  flex: none;
+  padding: 9px 10px;
+  border: 1px solid var(--div);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.comparison[hidden] { display: none; }
+.comparison-head { display: flex; align-items: center; }
+.comparison-head .popover-close { margin-left: auto; }
+.comparison-profile { color: var(--mut); }
+.comparison-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.comparison-table th, .comparison-table td { padding: 3px 0 3px 10px; text-align: right; font-weight: 400; }
+.comparison-table th:first-child { padding-left: 0; text-align: left; color: var(--mut); }
+.comparison-table thead th { font-size: 11px; color: var(--mut); border-bottom: 1px solid var(--div); }
+.comparison-facts { font-size: 12px; }
 
 /* ── Activity strip (status + job history) ── */
 /* The strip is the foot of the left panel's column: closed it fills the gap the panel
@@ -1258,9 +1371,13 @@ details.poi-menu > summary {
 .inst-filter-foot .poi-count { margin-left: auto; }
 
 /* ── Inspector tabs ── */
+/* The selected-instance body spaces its own blocks, the tab row included. */
+.tabs-sm { margin: 0; }
 .tabs-sm .tab-btn { font-size: 11.5px; padding: 5px 0; border-radius: 7px; }
-/* The right panel is sized by its content, so its tab panels must not stretch. */
+/* The right panel is sized by its content, so its tab panels must not stretch; the two
+   that hold a list may shrink, and their list then scrolls. */
 .inspector-panel.tab-panel-active { flex: none; }
+#routesPanel.tab-panel-active, #runsPanel.tab-panel-active { flex: 0 1 auto; min-height: 0; }
 
 /* ── Selected-instance facts ── */
 .fact-path { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
@@ -1398,6 +1515,7 @@ body:has(#map-animate:not([hidden])) .maplibregl-ctrl-bottom-right .maplibregl-c
     max-height: 52vh;
   }
   .panel-right.sheet-collapsed { max-height: 46px; overflow: hidden; }
+  .run-card .animate-btn:not([hidden]) { display: inline-block; }
   .sheet-toggle { display: inline-flex; }
   .map-actions { display: none; }
   .maplibregl-ctrl-bottom-right .maplibregl-ctrl,

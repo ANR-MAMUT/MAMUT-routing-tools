@@ -109,7 +109,8 @@ def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client
     assert 'id="cluster-decay"' in html
     assert "POI / ${100 - poiPercent}% parametric" in html
     assert "Excentered (corner)" in html
-    assert "Instance only · customer locations" in html
+    # An instance can be displayed without any solution: the first row of the run list.
+    assert "Instance only" in html and "Depot and customers, no routes" in html
     assert "City fetches store every listed category" in html
     assert "poiCategories: [...POI_CATEGORIES]" in html
 
@@ -173,10 +174,10 @@ def test_gui_shell_groups_the_form_and_moves_jobs_out_of_the_panel(client: TestC
     # The 49-checkbox list must still be reachable, just not inline.
     assert 'id="poi-list"' in html
 
-    # The inspector is tabbed rather than a five-section stack.
-    for tab in ("tabInstance", "tabSolve", "tabRuns"):
+    # The inspector is tabbed rather than a five-section stack, one job per tab.
+    for tab in ("tabRoutes", "tabRuns", "tabSolve", "tabDetails"):
         assert f'id="{tab}"' in html
-    for panel in ("instancePanel", "solvePanel", "runsPanel"):
+    for panel in ("routesPanel", "runsPanel", "solvePanel", "detailsPanel"):
         assert f'id="{panel}"' in html
 
     # Jobs and the status line are one bottom strip now, not opposite corners.
@@ -1426,12 +1427,40 @@ def test_instances_generated_before_the_family_rename_still_open(client: TestCli
     assert run_id
 
 
-def test_animate_is_offered_on_the_solve_and_runs_tabs_too(client: TestClient) -> None:
+def test_animate_is_one_button_on_the_map_with_a_copy_for_the_narrow_layout(client: TestClient) -> None:
     source = _frontend_source(client)
-    for button in ('id="animate-routes"', 'id="solve-animate"', 'id="runs-animate"'):
-        assert button in source
-    assert source.count("data-animate-routes") >= 4  # three buttons, and the script drives them all
+    # The map's button serves every tab; the card's copy shows only where the map's actions are hidden.
+    assert 'id="map-animate"' in source and 'id="animate-routes"' in source
+    assert 'id="solve-animate"' not in source and 'id="runs-animate"' not in source
+    assert ".run-card .animate-btn { display: none; }" in source
+    assert ".run-card .animate-btn:not([hidden]) { display: inline-block; }" in source
     assert "syncAnimateButton();  // nothing is drawn any more" in source  # Clear map hides them
+
+
+def test_selected_instance_panel_separates_the_instance_from_the_displayed_solution(client: TestClient) -> None:
+    html = _frontend_source(client)
+    panel = html[html.index('<aside class="panel panel-right">'):html.index("</aside>", html.index('<aside class="panel panel-right">'))]
+
+    # The header is the instance; the card under it is the run on the map and the way to change it.
+    assert panel.index('id="selName"') < panel.index('id="runCard"') < panel.index('id="tabRoutes"')
+    assert 'id="run-switch"' in panel and 'id="runCardBody"' in panel and 'id="solution-validation"' in panel
+    # The run is chosen from a list, in the Runs tab and in the card's switcher: no dropdown.
+    assert 'id="runList"' in panel and 'id="runPopoverList"' in html
+    assert 'id="solution-run"' not in html and 'id="comparison-run"' not in html
+    assert "function runGroups()" in html and "function runGapLabel(run, group)" in html
+    # Each tab does one job: routes; saved runs, import and comparison; solver settings; static facts.
+    section = lambda name: panel[panel.index(f'<section id="{name}"'):panel.index("</section>", panel.index(f'<section id="{name}"'))]
+    assert 'id="legend"' in section("routesPanel") and 'id="routes-all"' in section("routesPanel")
+    assert 'id="import-panel"' in section("runsPanel") and 'id="comparison-output"' in section("runsPanel")
+    assert 'id="import-metric"' in section("runsPanel")
+    solve = section("solvePanel")
+    assert 'id="solve"' in solve and "import" not in solve and "download" not in solve
+    assert 'id="selFacts"' in section("detailsPanel")
+    # Appearance and downloads are popovers beside the panel, not blocks inside it.
+    assert 'id="route-appearance" class="popover appearance-popover"' in html and 'id="route-appearance"' not in panel
+    assert 'id="download-popover" class="popover download-popover"' in html and 'id="download-metric"' in html
+    assert 'id="download-open"' in panel and 'id="appearance-open"' in panel
+    assert '<details id="route-appearance"' not in html
 
 
 def _timeline_record(tmp_path: Path, *, time_windows: list | None, fastest: bool = True) -> dict:
