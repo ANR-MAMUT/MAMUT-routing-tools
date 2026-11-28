@@ -630,7 +630,10 @@
   </div>
 </section>
 <div id="tripsBar" class="trips-bar-host" hidden></div>
-<button id="clear" class="map-clear-btn" type="button">Clear map</button>
+<div class="map-actions">
+  <button id="map-animate" class="map-animate-btn" data-animate-routes type="button" aria-pressed="false" hidden title="Play the displayed run's vehicles over time">Animate</button>
+  <button id="clear" class="map-clear-btn" type="button">Clear map</button>
+</div>
 
 <script src="/static/nocturne.js"></script>
 <script src="/static/vendor/maplibre-gl/maplibre-gl.js"></script>

@@ -188,8 +188,7 @@ html, body {
   backdrop-filter: blur(8px);
 }
 .trips-controls { display: flex; align-items: center; gap: 10px; }
-.trips-controls button,
-.trips-controls select {
+.trips-controls button {
   font: inherit;
   font-size: 12px;
   color: var(--ink);
@@ -200,10 +199,75 @@ html, body {
   cursor: pointer;
 }
 .trips-play { min-width: 58px; color: var(--acc) !important; }
-.trips-speed { display: flex; align-items: center; gap: 5px; }
+.trips-speed {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.trips-speed-value {
+  min-width: 56px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The speed slider opens upward from the rate, on hover or keyboard focus. */
+.trips-speed-pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 56px;
+  padding: 8px 0;
+  border-radius: 10px;
+  background: var(--s);
+  box-shadow: 0 0 0 1px var(--div), var(--shadow);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(6px);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 0s linear 120ms;
+}
+
+/* Bridges the gap between the rate and the slider, so the pointer can travel up without closing it. */
+.trips-speed-pop::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: 12px;
+}
+
+.trips-speed:hover .trips-speed-pop,
+.trips-speed:focus-within .trips-speed-pop {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition-delay: 0s;
+}
+
+/* A vertical range: the fastest rate at the top. */
+.trips-speed-slider {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 20px;
+  height: 132px;
+  margin: 0;
+  accent-color: var(--acc);
+  cursor: pointer;
+}
+
+.trips-speed-end {
+  font-size: 11px;
+  color: var(--mut);
+  font-variant-numeric: tabular-nums;
+}
 /* Only the scrubber stretches; the other controls keep their natural width. */
 .trips-controls > :not(.trips-scrub) { flex: none; }
-.trips-speed select { min-width: 70px; }
 .trips-caption, .trips-served, .trips-note { color: var(--mut); font-size: 11px; }
 .trips-scrub { flex: 1 1 auto; min-width: 80px; accent-color: var(--acc); }
 .trips-clock { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; }
@@ -1220,11 +1284,45 @@ details.poi-menu > summary {
 }
 .copy-btn:hover { color: var(--acc); border-color: var(--edge); }
 
-.map-clear-btn {
+/* The map's own actions, in its bottom-right corner: animate the displayed run, clear the map. */
+.map-actions {
   position: fixed;
   right: 20px;
   bottom: 18px;
   z-index: 950;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* The prominent copy of the Animate control (the tabs keep theirs): accent outline, never a fill. */
+.map-animate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 7px 16px 7px 13px;
+  border: 2px solid var(--acc);
+  border-radius: 8px;
+  color: var(--acc-text);
+  background: var(--panel);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--acc) 15%, transparent);
+}
+.map-animate-btn::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 8px solid currentColor;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+}
+.map-animate-btn[aria-pressed="true"]::before { width: 9px; height: 9px; border: none; border-radius: 1px; background: currentColor; }
+.map-animate-btn:hover { background: color-mix(in srgb, var(--acc) 18%, var(--panel)); }
+.map-animate-btn:disabled { opacity: 0.7; cursor: progress; }
+.map-clear-btn {
   cursor: pointer;
   font: inherit;
   font-size: 11.5px;
@@ -1238,6 +1336,9 @@ details.poi-menu > summary {
   box-shadow: 0 0 0 1px var(--div);
 }
 .map-clear-btn:hover { color: var(--cor); box-shadow: 0 0 0 1px var(--cor); }
+/* The map actions own the bottom-right corner, so the attribution stops short of them. */
+.maplibregl-ctrl-bottom-right .maplibregl-ctrl { margin-right: 114px; }
+body:has(#map-animate:not([hidden])) .maplibregl-ctrl-bottom-right .maplibregl-ctrl { margin-right: 250px; }
 
 /* ── Map POI picker ── */
 .poi-pick-summary { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
@@ -1298,7 +1399,9 @@ details.poi-menu > summary {
   }
   .panel-right.sheet-collapsed { max-height: 46px; overflow: hidden; }
   .sheet-toggle { display: inline-flex; }
-  .map-clear-btn { display: none; }
+  .map-actions { display: none; }
+  .maplibregl-ctrl-bottom-right .maplibregl-ctrl,
+  body:has(#map-animate:not([hidden])) .maplibregl-ctrl-bottom-right .maplibregl-ctrl { margin-right: 10px; }
   /* The bottom of the viewport belongs to the right panel's sheet here, so the strip
      moves to the top-right and opens downward. It cannot simply be hidden: since P3
      it carries the job history, which used to live in the left panel. */

@@ -154,6 +154,8 @@ def test_gui_shell_exposes_restored_generation_and_instance_only_controls(client
     assert 'value="cached_road"' in html and 'value="straight_line"' in html
     # Route animation: the button, the playback bar host, deck.gl loaded on demand only.
     assert 'id="animate-routes"' in html and 'id="tripsBar"' in html
+    # A prominent copy of the control sits on the map, before "Clear map".
+    assert html.index('<div class="map-actions">') < html.index('id="map-animate" class="map-animate-btn" data-animate-routes') < html.index('id="clear"')
     assert '<script src="/static/vendor/deck.gl' not in html
     assert 'const DECK_SRC = "/static/vendor/deck.gl/dist.min.js";' in html
 

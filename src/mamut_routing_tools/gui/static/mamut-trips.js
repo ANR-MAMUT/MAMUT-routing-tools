@@ -309,7 +309,7 @@
     return node;
   }
 
-  /* The playback bar: play/pause, speed, scrubber, clock, served counter, the
+  /* The playback bar: play/pause, speed (a slider that opens upward), scrubber, clock, served counter, the
      origin of the times, close. All text goes through textContent. */
   function buildBar(host, handlers) {
     host.replaceChildren();
@@ -319,16 +319,34 @@
     bar.setAttribute("aria-label", "Route animation");
     const play = element("button", "trips-play", "Play");
     play.type = "button";
-    const speedLabel = element("label", "trips-speed");
+    /* Speed: the current rate is a small button, and hovering or focusing it opens a
+       vertical slider above the bar. The steps span three orders of magnitude, which a
+       position on a scale shows and a line picked from a list of thirteen does not. */
+    const speedBox = element("div", "trips-speed");
     const speedCaption = element("span", "trips-caption", "Speed");
-    const speed = element("select");
+    const speedValue = element("button", "trips-speed-value", `×${SPEED_STEPS[0]}`);
+    speedValue.type = "button";
+    speedValue.setAttribute("aria-label", "Playback speed");
+    const speedPop = element("div", "trips-speed-pop");
+    const speed = element("input", "trips-speed-slider");
+    speed.type = "range";
+    speed.min = "0";
+    speed.max = String(SPEED_STEPS.length - 1);
+    speed.step = "1";
     speed.setAttribute("aria-label", "Simulated seconds per second");
-    SPEED_STEPS.forEach((step) => {
-      const option = element("option", null, `×${step}`);
-      option.value = String(step);
-      speed.appendChild(option);
-    });
-    speedLabel.append(speedCaption, speed);
+    speed.setAttribute("aria-orientation", "vertical");
+    speedPop.append(
+      element("span", "trips-speed-end", `×${SPEED_STEPS[SPEED_STEPS.length - 1]}`),
+      speed,
+      element("span", "trips-speed-end", `×${SPEED_STEPS[0]}`),
+    );
+    speedBox.append(speedCaption, speedValue, speedPop);
+    const showSpeed = (value) => {
+      const index = Math.max(0, SPEED_STEPS.indexOf(value));
+      speed.value = String(index);
+      speed.setAttribute("aria-valuetext", `×${SPEED_STEPS[index]}`);
+      speedValue.textContent = `×${SPEED_STEPS[index]}`;
+    };
     const scrub = element("input", "trips-scrub");
     scrub.type = "range";
     scrub.min = "0";
@@ -343,11 +361,54 @@
     close.title = "Close the animation";
     const note = element("p", "trips-note", "");
     const controls = element("div", "trips-controls");
-    controls.append(play, speedLabel, scrub, clock, served, close);
+    controls.append(play, speedBox, scrub, clock, served, close);
     bar.append(controls, note);
     host.appendChild(bar);
     play.addEventListener("click", handlers.togglePlay);
-    speed.addEventListener("change", () => handlers.setSpeed(Number(speed.value)));
+    speed.addEventListener("input", () => {
+      const step = SPEED_STEPS[Number(speed.value)] ?? SPEED_STEPS[0];
+      showSpeed(step);
+      handlers.setSpeed(step);
+    });
+    // A touch screen has no hover: tapping the rate moves the focus to the slider, which opens it.
+    speedValue.addEventListener("click", () => speed.focus());
+    /* The slider is open while the pointer is over it, or while it holds the focus (keyboard use).
+       A click or a drag also leaves the focus on it, which would hold it open after the mouse has
+       gone: so a mouse that leaves takes that focus with it, unless a drag is still in progress or
+       the slider is being driven from the keyboard. */
+    let speedHeld = false;       // a thumb drag is in progress
+    let speedHovered = false;    // the mouse is over the rate or the slider
+    let speedFromKeys = false;   // the last change came from the keyboard
+    const releaseSpeed = () => {
+      speed.blur();
+      speedValue.blur();
+    };
+    speed.addEventListener("keydown", () => {
+      speedFromKeys = true;
+    });
+    speed.addEventListener("pointerdown", (event) => {
+      speedFromKeys = false;
+      speedHeld = true;
+      // The release is then reported to the slider wherever the pointer is, with no listener on the window.
+      speed.setPointerCapture?.(event.pointerId);
+    });
+    const endSpeedDrag = () => {
+      speedHeld = false;
+      if (!speedHovered) releaseSpeed();
+    };
+    speed.addEventListener("pointerup", endSpeedDrag);
+    speed.addEventListener("pointercancel", endSpeedDrag);
+    speedValue.addEventListener("pointerdown", () => {
+      speedFromKeys = false;
+    });
+    speedBox.addEventListener("pointerenter", (event) => {
+      if (event.pointerType === "mouse") speedHovered = true;
+    });
+    speedBox.addEventListener("pointerleave", (event) => {
+      if (event.pointerType !== "mouse") return;
+      speedHovered = false;
+      if (!speedHeld && !speedFromKeys) releaseSpeed();
+    });
     scrub.addEventListener("input", () => handlers.seek(Number(scrub.value)));
     // While the thumb is held, playback must not move it out from under the pointer. The release
     // can happen anywhere on the page, so it is listened for on the window.
@@ -369,7 +430,7 @@
     });
     scrub.addEventListener("change", () => handlers.scrubbing(false));
     close.addEventListener("click", handlers.close);
-    return { play, speed, scrub, clock, served, note, detach: () => endScrub?.() };
+    return { play, setSpeed: showSpeed, scrub, clock, served, note, detach: () => endScrub?.() };
   }
 
   /* Without WebGL2: a note in the bar's place, closed like an animation (its × button, or
@@ -597,7 +658,7 @@
       },
     });
     ui.scrub.max = String(data.span);
-    ui.speed.value = String(state.speed);
+    ui.setSpeed(state.speed);
     const clockKey = data.fallbackRoutes > 0 && data.clock !== "schematic" ? "schematic" : data.clock;
     const partial = data.fallbackRoutes > 0 && data.clock !== "schematic"
       ? ` ${data.fallbackRoutes} route(s) without a matching schedule run at constant speed.`
